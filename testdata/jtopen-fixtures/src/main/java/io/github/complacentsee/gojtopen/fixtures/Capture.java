@@ -2,6 +2,11 @@ package io.github.complacentsee.gojtopen.fixtures;
 
 import com.ibm.as400.access.Trace;
 
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -40,37 +45,85 @@ public final class Capture {
         Path fixturesDir = Paths.get(cfg.fixturesDir).toAbsolutePath();
         Files.createDirectories(fixturesDir);
 
-        List<Case> cases = Cases.all(cfg.schema);
-        if (!cfg.only.isEmpty()) {
-            cases.removeIf(c -> !cfg.only.contains(c.name));
-        }
+        // Tee System.err into fixtures/run.log so journal-setup messages
+        // and other failures are committed alongside the trace files
+        // instead of disappearing with the user's terminal session.
+        Path runLog = fixturesDir.resolve("run.log");
+        PrintStream originalErr = System.err;
+        FileOutputStream logOut = new FileOutputStream(runLog.toFile(), false);
+        PrintStream teeErr = new PrintStream(
+                new TeeOutputStream(logOut, originalErr), true, StandardCharsets.UTF_8.name());
+        System.setErr(teeErr);
 
-        System.out.println("goJTOpen fixture capture");
-        System.out.println("  host:     " + cfg.host);
-        System.out.println("  user:     " + cfg.user);
-        System.out.println("  schema:   " + cfg.schema);
-        System.out.println("  fixtures: " + fixturesDir);
-        System.out.println("  cases:    " + cases.size());
-        System.out.println();
-
-        int ok = 0, failed = 0;
-        for (Case c : cases) {
-            System.out.print("[ " + c.name + " ] ");
-            try {
-                runCase(c, cfg, fixturesDir);
-                System.out.println("ok");
-                ok++;
-            } catch (Exception e) {
-                System.out.println("FAILED: " + e.getMessage());
-                e.printStackTrace(System.out);
-                failed++;
+        try {
+            List<Case> cases = Cases.all(cfg.schema);
+            if (!cfg.only.isEmpty()) {
+                cases.removeIf(c -> !cfg.only.contains(c.name));
             }
-        }
 
-        System.out.println();
-        System.out.println("Done. " + ok + " ok, " + failed + " failed.");
-        if (failed > 0) {
-            System.exit(1);
+            System.out.println("goJTOpen fixture capture");
+            System.out.println("  host:     " + cfg.host);
+            System.out.println("  user:     " + cfg.user);
+            System.out.println("  schema:   " + cfg.schema);
+            System.out.println("  fixtures: " + fixturesDir);
+            System.out.println("  log:      " + runLog);
+            System.out.println("  cases:    " + cases.size());
+            System.out.println();
+
+            int ok = 0, failed = 0;
+            for (Case c : cases) {
+                System.out.print("[ " + c.name + " ] ");
+                try {
+                    runCase(c, cfg, fixturesDir);
+                    System.out.println("ok");
+                    ok++;
+                } catch (Exception e) {
+                    System.out.println("FAILED: " + e.getMessage());
+                    e.printStackTrace(System.out);
+                    failed++;
+                }
+            }
+
+            System.out.println();
+            System.out.println("Done. " + ok + " ok, " + failed + " failed.");
+            if (failed > 0) {
+                System.exit(1);
+            }
+        } finally {
+            try {
+                teeErr.flush();
+                logOut.close();
+            } catch (IOException ignored) {
+            }
+            System.setErr(originalErr);
+        }
+    }
+
+    /**
+     * Writes to two streams. close() only closes the first ({@code logFile});
+     * the original stderr is left open so the JVM can keep using it.
+     */
+    private static final class TeeOutputStream extends OutputStream {
+        private final OutputStream logFile;
+        private final OutputStream stderr;
+        TeeOutputStream(OutputStream logFile, OutputStream stderr) {
+            this.logFile = logFile;
+            this.stderr = stderr;
+        }
+        @Override public void write(int b) throws IOException {
+            logFile.write(b);
+            stderr.write(b);
+        }
+        @Override public void write(byte[] buf, int off, int len) throws IOException {
+            logFile.write(buf, off, len);
+            stderr.write(buf, off, len);
+        }
+        @Override public void flush() throws IOException {
+            logFile.flush();
+            stderr.flush();
+        }
+        @Override public void close() throws IOException {
+            logFile.close();
         }
     }
 
@@ -91,8 +144,19 @@ public final class Capture {
         // (sign-on -> traced operation -> disconnect).
         try {
             Trace.setFileName(tracePath.toString());
+            // DATASTREAM emits the wire bytes ("Data stream sent
+            // (connID=...)" + hex dumps). ERROR and WARNING surface
+            // anything JTOpen itself flags as an error or warning during
+            // the traced section, so a failure that doesn't bubble up as
+            // a SQLException is still visible in the trace file.
+            //
+            // DIAGNOSTIC is intentionally OFF: it includes JTOpen's
+            // finalize-time "Service disconnected" / "Resetting all
+            // services" log spam, which lands non-deterministically in
+            // whichever case's trace is open when the JVM happens to GC.
             Trace.setTraceDatastreamOn(true);
-            Trace.setTraceDiagnosticOn(true);
+            Trace.setTraceErrorOn(true);
+            Trace.setTraceWarningOn(true);
             Trace.setTraceOn(true);
             try (Connection conn = openConnection(cfg)) {
                 try {
@@ -105,7 +169,8 @@ public final class Capture {
         } finally {
             Trace.setTraceOn(false);
             Trace.setTraceDatastreamOn(false);
-            Trace.setTraceDiagnosticOn(false);
+            Trace.setTraceErrorOn(false);
+            Trace.setTraceWarningOn(false);
             // Switching back to System.out flushes & releases the file handle.
             try {
                 Trace.setFileName(null);
