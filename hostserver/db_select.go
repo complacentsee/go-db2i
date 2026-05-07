@@ -13,13 +13,57 @@ import (
 // SQL function IDs sent over the as-database (server ID 0xE004)
 // service. We only define the ones we use right now.
 const (
-	ReqDBSQLPrepareDescribe    uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
-	ReqDBSQLOpenDescribeFetch  uint16 = 0x180E // OPEN + DESCRIBE + FETCH
-	ReqDBSQLClose              uint16 = 0x180A // CLOSE cursor
-	ReqDBSQLRPBCreate          uint16 = 0x1D00 // CREATE Request Parameter Block
-	ReqDBSQLRPBDelete          uint16 = 0x1D02 // DELETE RPB
-	ReqDBSQLDeleteResultsSet   uint16 = 0x1F01 // DELETE_RESULTS_SET
+	ReqDBSQLPrepareDescribe   uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
+	ReqDBSQLOpenDescribeFetch uint16 = 0x180E // OPEN + DESCRIBE + FETCH
+	ReqDBSQLClose             uint16 = 0x180A // CLOSE cursor
+	ReqDBSQLRPBCreate         uint16 = 0x1D00 // CREATE Request Parameter Block
+	ReqDBSQLRPBDelete         uint16 = 0x1D02 // DELETE RPB (frees RPB slot for next CREATE)
+	ReqDBSQLDeleteResultsSet  uint16 = 0x1F01 // DELETE_RESULTS_SET
 )
+
+// deleteRPB sends an RPB DELETE (0x1D02) for the RPB at slot 1, the
+// only slot SelectStaticSQL/SelectPreparedSQL ever creates. JTOpen
+// emits this frame as the first cleanup step after every SELECT;
+// without it, the next SELECT on the same connection trips because
+// CREATE_RPB silently fails when slot 1 is occupied (and the
+// downstream PREPARE then references stale state). Returns the
+// reply parse so callers can surface non-zero error classes.
+//
+// nextCorrelation is the correlation ID to stamp on the request;
+// caller is responsible for advancing its own counter.
+func deleteRPB(conn io.ReadWriter, nextCorrelation uint32) error {
+	tpl := DBRequestTemplate{
+		ORSBitmap:                 ORSReturnData | 0x00040000,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLRPBDelete, tpl, nil)
+	if err != nil {
+		return fmt.Errorf("hostserver: build RPB DELETE: %w", err)
+	}
+	hdr.CorrelationID = nextCorrelation
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return fmt.Errorf("hostserver: send RPB DELETE: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, nextCorrelation, 4)
+	if err != nil {
+		return fmt.Errorf("hostserver: read RPB DELETE reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return fmt.Errorf("hostserver: RPB DELETE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return fmt.Errorf("hostserver: parse RPB DELETE reply: %w", err)
+	}
+	if rep.ErrorClass != 0 {
+		return fmt.Errorf("hostserver: RPB DELETE errorClass=%d returnCode=%d", rep.ErrorClass, rep.ReturnCode)
+	}
+	return nil
+}
 
 // Per-CP semantics for SQL request flavours.
 const (
@@ -270,6 +314,12 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse row data: %w", err)
+	}
+	// Free the RPB slot so the next SELECT on this connection
+	// can CREATE_RPB at slot 1 without colliding. JTOpen always
+	// emits this; M2 deferred it, M4 wires it in.
+	if err := deleteRPB(conn, corr); err != nil {
+		return nil, fmt.Errorf("hostserver: post-fetch cleanup: %w", err)
 	}
 	return &SelectResult{Columns: cols, Rows: rows}, nil
 }

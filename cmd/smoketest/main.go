@@ -114,12 +114,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warn: NDB ADD_LIBRARY_LIST failed: %v\n", err)
 	}
 
-	// --- Step 5: M3 prepared SELECT with int parameter. ---
-	// Skip the M2 static SELECT step here so the prepared call
-	// gets a clean RPB slot 1 -- we don't yet emit RPB DELETE
-	// between SELECTs, so chaining two on one connection trips
-	// the server. SelectStaticSQL is exercised by its own test;
-	// the smoketest's job is end-to-end M3 validation now.
+	// --- Step 5a: M2 static SELECT (chained -- M4 added RPB DELETE). ---
+	staticSQL := envOr("PUB400_SQL", "SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1")
+	staticRes, err := hostserver.SelectStaticSQL(dbConn, staticSQL, 3)
+	if err != nil {
+		fail("M2 static select: %v", err)
+	}
+	fmt.Printf("\nstatic select (chained): %s\n", staticSQL)
+	for i, r := range staticRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 5b: M3 prepared SELECT with int parameter (still on same connection). ---
 	preparedSQL := "SELECT CAST(? AS INTEGER) AS V FROM SYSIBM.SYSDUMMY1"
 	shapes := []hostserver.PreparedParam{{
 		SQLType:     497, // INTEGER nullable
@@ -128,7 +134,10 @@ func main() {
 		Scale:       0,
 		CCSID:       0,
 	}}
-	pres, err := hostserver.SelectPreparedSQL(dbConn, preparedSQL, shapes, []any{int32(42)}, 3)
+	// Static SELECT consumed correlations 3..6 (CREATE_RPB,
+	// PREPARE_DESCRIBE, OPEN_DESCRIBE_FETCH, RPB DELETE). Start
+	// the prepared SELECT at correlation 7 so they don't collide.
+	pres, err := hostserver.SelectPreparedSQL(dbConn, preparedSQL, shapes, []any{int32(42)}, 7)
 	if err != nil {
 		fail("M3 prepared select (int): %v", err)
 	}

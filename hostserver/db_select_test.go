@@ -91,7 +91,7 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 	// doesn't expect a reply, then PREPARE_DESCRIBE -> reply, then
 	// OPEN_DESCRIBE_FETCH -> reply). The fixture's PREPARE_DESCRIBE
 	// reply is sqlReceiveds[3] (the 4th SQL reply: after XChg, StartServer, SET_SQL_ATTR).
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4])
+	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticRPBDeleteReply(6))
 
 	res, err := SelectStaticSQL(conn,
 		"SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1",
@@ -136,10 +136,11 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 		t.Errorf("col 2 (server) = %q, want %q (from golden)", got, want[2])
 	}
 
-	// Sanity: 3 frames written (CREATE_RPB, PREPARE_DESCRIBE,
-	// OPEN_DESCRIBE_FETCH), each starting with a valid DSS header.
+	// Sanity: 4 frames written (CREATE_RPB, PREPARE_DESCRIBE,
+	// OPEN_DESCRIBE_FETCH, RPB DELETE cleanup), each starting
+	// with a valid DSS header.
 	r := bytes.NewReader(conn.written.Bytes())
-	for i, want := range []uint16{ReqDBSQLRPBCreate, ReqDBSQLPrepareDescribe, ReqDBSQLOpenDescribeFetch} {
+	for i, want := range []uint16{ReqDBSQLRPBCreate, ReqDBSQLPrepareDescribe, ReqDBSQLOpenDescribeFetch, ReqDBSQLRPBDelete} {
 		hdr, _, err := ReadFrame(r)
 		if err != nil {
 			t.Fatalf("re-parse sent frame %d: %v", i, err)

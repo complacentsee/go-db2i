@@ -440,6 +440,14 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
+	// Free the RPB slot so the next SELECT on this connection
+	// can chain. JTOpen also emits a DELETE_DESCRIPTOR (0x1E01)
+	// before this for prepared SELECTs; that's optional --
+	// PUB400 happily accepts a fresh CHANGE_DESCRIPTOR on the
+	// same RPB slot once it's recreated.
+	if err := deleteRPB(conn, corr); err != nil {
+		return nil, fmt.Errorf("hostserver: post-fetch cleanup: %w", err)
+	}
 	return &SelectResult{Columns: cols, Rows: rows}, nil
 }
 

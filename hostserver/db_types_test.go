@@ -71,12 +71,20 @@ func runStaticTypeReplay(t *testing.T, tc typeCase) {
 		}
 	}
 	// Order: XChgRandSeed reply, StartServer reply, SET_SQL_ATTRIBUTES
-	// reply, PREPARE_DESCRIBE reply, OPEN_DESCRIBE_FETCH reply.
-	// SelectStaticSQL only consumes the last two.
+	// reply, PREPARE_DESCRIBE reply, OPEN_DESCRIBE_FETCH reply,
+	// RPB DELETE reply. SelectStaticSQL consumes the PREPARE +
+	// OPEN replies; the M4 RPB-DELETE cleanup adds a third read.
 	if len(sqlReceiveds) < 5 {
 		t.Skipf("fixture %s has only %d SQL receiveds (need >= 5)", tc.trace, len(sqlReceiveds))
 	}
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4])
+	// If the fixture captured the RPB DELETE reply (post-M4
+	// JTOpen runs do), use it; otherwise synthesise a success
+	// stub so the test still validates the row decoding path.
+	rpbDelReply := syntheticRPBDeleteReply(4)
+	if len(sqlReceiveds) >= 6 {
+		rpbDelReply = sqlReceiveds[5]
+	}
+	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], rpbDelReply)
 	res, err := SelectStaticSQL(conn, tc.sql, 3)
 	if err != nil {
 		t.Fatalf("SelectStaticSQL: %v", err)
@@ -179,3 +187,37 @@ func (g *goldenJSON) firstRowCol(i int) any {
 }
 
 var _ = bytes.Equal // keep `bytes` imported for future use without disruption
+
+// syntheticRPBDeleteReply builds a 40-byte 0x2800 (DBReply)
+// frame that mimics a successful RPB DELETE response: ORS bitmap
+// echo, ReqRepID echoes (0x1D02), and zeroed ErrorClass +
+// ReturnCode. fakeConn replays this when the original fixture
+// pre-dates the M4 RPB-DELETE cleanup so type-decoder tests don't
+// need fresh captures.
+func syntheticRPBDeleteReply(corr uint32) []byte {
+	hdr := Header{
+		Length:         40,
+		ServerID:       ServerDatabase,
+		CorrelationID:  corr,
+		TemplateLength: 20,
+		ReqRepID:       RepDBReply,
+	}
+	payload := make([]byte, 20)
+	// ORS bitmap echo (matches what we send): 0x80040000.
+	payload[0] = 0x80
+	payload[1] = 0x04
+	// Handles + function ID echo (0x1D02 twice) at template
+	// offsets 8..13. We zero the rest -- ParseDBReply only
+	// reads ErrorClass (14..15) and ReturnCode (16..19), both
+	// of which stay zero for success.
+	payload[10] = 0x1D
+	payload[11] = 0x02
+	payload[12] = 0x1D
+	payload[13] = 0x02
+
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, hdr, payload); err != nil {
+		panic(fmt.Sprintf("synthesise RPB DELETE reply: %v", err))
+	}
+	return buf.Bytes()
+}
