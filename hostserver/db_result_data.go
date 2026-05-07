@@ -277,6 +277,27 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return int64(binary.BigEndian.Uint64(b[:8])), 8, nil
 
+	case 996, 997: // DECFLOAT -- type 996/997 covers BOTH precision-16
+		// (decimal64, 8 bytes) and precision-34 (decimal128, 16
+		// bytes). JT400 distinguishes by column Length, not by
+		// SQL type code.
+		switch col.Length {
+		case 8:
+			s, err := decodeDecimal64(b[:8])
+			if err != nil {
+				return nil, 0, err
+			}
+			return s, 8, nil
+		case 16:
+			s, err := decodeDecimal128(b[:16])
+			if err != nil {
+				return nil, 0, err
+			}
+			return s, 16, nil
+		default:
+			return nil, 0, fmt.Errorf("decfloat: unexpected column length %d (want 8 or 16)", col.Length)
+		}
+
 	case SQLTypeNumeric, 489: // 488 NN, 489 nullable -- NUMERIC(p, s) zoned decimal
 		// Zoned BCD: one byte per digit; high nibble is zone (0xF
 		// for plain digit), low nibble is the digit 0-9. The
