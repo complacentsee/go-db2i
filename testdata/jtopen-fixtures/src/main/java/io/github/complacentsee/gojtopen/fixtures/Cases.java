@@ -180,6 +180,14 @@ final class Cases {
         // the system commands below fragile.
         private static final String TABLE_SHORT = "GOJT_T1";
 
+        // goJTOpen-specific journal + receiver. Created once in the user's
+        // library and reused by all WithTable cases. Names are chosen so
+        // it's obvious they belong to this project; the journal is left
+        // in place between runs (creating a fresh receiver/journal each
+        // time would just churn the system's catalog).
+        private static final String JRN = "GOJTJRN";
+        private static final String JRNRCV = "GOJTRCV1";
+
         protected final String schema;
         protected final String table;
 
@@ -196,34 +204,37 @@ final class Cases {
                         + "NAME VARCHAR(40) NOT NULL, "
                         + "AMT DECIMAL(11,2) NOT NULL"
                         + ")");
-                // Best-effort: enable journaling so the commitment-control
-                // cases (tx_commit / tx_rollback) can actually exercise the
-                // happy path. PUB400 user libraries created via CREATE
-                // SCHEMA already contain QSQJRN; if not, we attempt to
-                // create one. Any of these calls may fail harmlessly
-                // (already-exists, insufficient authority, etc.); we
-                // swallow the error and let the tx_* cases fall through to
-                // the SQL7008 fixture they had previously.
-                runIgnoring(st, "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
-                        + schema + "/QSQJRN0001)')");
-                runIgnoring(st, "CALL QSYS2.QCMDEXC('CRTJRN JRN("
-                        + schema + "/QSQJRN) JRNRCV("
-                        + schema + "/QSQJRN0001)')");
-                runIgnoring(st, "CALL QSYS2.QCMDEXC('STRJRNPF FILE("
+                // Enable journaling so commitment-control cases work.
+                // CRTJRNRCV / CRTJRN may have already happened on a prior
+                // run -- "already exists" is fine, anything else gets
+                // surfaced to stderr so the user can see what's going on.
+                runOrLog(st, "CRTJRNRCV", "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
+                        + schema + "/" + JRNRCV + ")')");
+                runOrLog(st, "CRTJRN", "CALL QSYS2.QCMDEXC('CRTJRN JRN("
+                        + schema + "/" + JRN + ") JRNRCV("
+                        + schema + "/" + JRNRCV + ")')");
+                runOrLog(st, "STRJRNPF", "CALL QSYS2.QCMDEXC('STRJRNPF FILE("
                         + schema + "/" + TABLE_SHORT + ") JRN("
-                        + schema + "/QSQJRN)')");
+                        + schema + "/" + JRN + ") IMAGES(*BOTH))')");
                 seed(conn);
             }
         }
         @Override public void teardown(Connection conn) throws SQLException {
             try (Statement st = conn.createStatement()) {
+                // ENDJRNPF before DROP so the table can be deleted cleanly.
+                runOrLog(st, "ENDJRNPF", "CALL QSYS2.QCMDEXC('ENDJRNPF FILE("
+                        + schema + "/" + TABLE_SHORT + "))')");
                 try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
             }
         }
         protected void seed(Connection conn) throws SQLException { }
 
-        private static void runIgnoring(Statement st, String sql) {
-            try { st.execute(sql); } catch (SQLException ignored) { }
+        private void runOrLog(Statement st, String label, String sql) {
+            try {
+                st.execute(sql);
+            } catch (SQLException e) {
+                System.err.println("    [" + name + "] " + label + ": " + e.getMessage());
+            }
         }
     }
 
