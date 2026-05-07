@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
 )
@@ -244,6 +245,62 @@ func TestParseConnectOnlyExchangeAttributesReply(t *testing.T) {
 	}
 	if rep.AAFIndicator {
 		t.Errorf("AAFIndicator = true, want false")
+	}
+}
+
+// TestParseConnectOnlySignonInfoReply decodes the second received
+// frame (consolidated) in connect_only.trace -- the SignonInfoRep
+// reply -- and asserts dates, server CCSID, and password expiration
+// warning match what we hand-decoded from the fixture bytes.
+func TestParseConnectOnlySignonInfoReply(t *testing.T) {
+	frames := wirelog.Consolidate(loadFixture(t, "connect_only.trace"))
+
+	var receiveds []wirelog.Frame
+	for _, f := range frames {
+		if f.Direction == wirelog.Received {
+			receiveds = append(receiveds, f)
+		}
+	}
+	if len(receiveds) < 2 {
+		t.Fatalf("expected >= 2 received frames, got %d", len(receiveds))
+	}
+	second := receiveds[1]
+
+	hdr, payload := decodeFrame(t, second.Bytes)
+	if hdr.ServerID != ServerSignon {
+		t.Errorf("ServerID = %s, want as-signon", hdr.ServerID)
+	}
+	if hdr.ReqRepID != RepSignonInfo {
+		t.Errorf("ReqRepID = 0x%04X, want 0x%04X", hdr.ReqRepID, RepSignonInfo)
+	}
+	if hdr.CorrelationID != 1 {
+		t.Errorf("CorrelationID = %d, want 1", hdr.CorrelationID)
+	}
+
+	rep, err := ParseSignonInfoReply(payload)
+	if err != nil {
+		t.Fatalf("ParseSignonInfoReply: %v", err)
+	}
+	if rep.ReturnCode != 0 {
+		t.Errorf("ReturnCode = %d, want 0", rep.ReturnCode)
+	}
+	wantCurrent := time.Date(2026, 5, 7, 19, 8, 0, 0, time.UTC)
+	if !rep.CurrentSignonDate.Equal(wantCurrent) {
+		t.Errorf("CurrentSignonDate = %v, want %v", rep.CurrentSignonDate, wantCurrent)
+	}
+	wantLast := time.Date(2026, 5, 7, 19, 7, 58, 0, time.UTC)
+	if !rep.LastSignonDate.Equal(wantLast) {
+		t.Errorf("LastSignonDate = %v, want %v", rep.LastSignonDate, wantLast)
+	}
+	wantExp := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	if !rep.ExpirationDate.Equal(wantExp) {
+		t.Errorf("ExpirationDate = %v, want %v", rep.ExpirationDate, wantExp)
+	}
+	if rep.ServerCCSID != 273 {
+		t.Errorf("ServerCCSID = %d, want 273 (German)", rep.ServerCCSID)
+	}
+	if rep.PWDExpirationWarningDays != 7 {
+		t.Errorf("PWDExpirationWarningDays = %d, want 7", rep.PWDExpirationWarningDays)
 	}
 }
 

@@ -3,6 +3,7 @@ package hostserver
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
 )
@@ -54,6 +55,13 @@ const (
 	cpAuthToken           uint16 = 0x1115 // GSS / identity / profile token
 	cpReturnErrorMessages uint16 = 0x1128 // 1-byte flag (set when serverLevel >= 5)
 	cpAddAuthFactor       uint16 = 0x112F // 4-byte CCSID + MFA token (serverLevel >= 18)
+
+	// Code points carried in SignonInfoRep (0xF004).
+	cpCurrentSignonDate  uint16 = 0x1106 // 8-byte: yr(2)+mo+day+hr+min+sec+reserved(1)
+	cpLastSignonDate     uint16 = 0x1107
+	cpExpirationDate     uint16 = 0x1108
+	cpPWDExpiryWarnDays  uint16 = 0x112C // 4-byte uint32, days
+	cpServerCCSID        uint16 = 0x1114 // 4-byte uint32
 )
 
 // ExchangeAttributesRequest builds a SIGNON / HOSTCNN exchange-
@@ -297,6 +305,119 @@ func SignonInfoRequest(
 		ReqRepID:       ReqSignonInfo,
 	}
 	return hdr, payload, nil
+}
+
+// SignonInfoReply is the parsed form of a 0xF004 reply payload.
+//
+// The fixed 4-byte template carries the operation status (RC); every
+// other field is a variable-length parameter that may be absent. Zero
+// values mean "the server didn't include this CP."
+type SignonInfoReply struct {
+	// ReturnCode is 0 on success. Non-zero values are documented in
+	// the IBM i sign-on server reference; the [SignonError] type
+	// (TODO) wraps them.
+	ReturnCode uint32
+
+	// CurrentSignonDate is the timestamp the server stamps onto this
+	// sign-on (server local time, no timezone). Zero if absent.
+	CurrentSignonDate time.Time
+
+	// LastSignonDate is when this user last signed on prior to now.
+	// Zero if absent.
+	LastSignonDate time.Time
+
+	// ExpirationDate is when the user's password expires. Zero if
+	// absent (no expiration set, or the server didn't report it).
+	ExpirationDate time.Time
+
+	// PWDExpirationWarningDays is the number of days before
+	// ExpirationDate at which the system would have started warning
+	// about pending expiry. 0 if absent.
+	PWDExpirationWarningDays uint32
+
+	// ServerCCSID is the IBM i job's CCSID (e.g., 37 = US English,
+	// 273 = German). Use this when decoding subsequent EBCDIC strings
+	// returned from the database server. 0 if absent.
+	ServerCCSID uint32
+
+	// UserID is the canonical EBCDIC user ID the server registered for
+	// this sign-on (CP 0x1104). nil if absent. Caller decodes through
+	// CCSID 37.
+	UserID []byte
+}
+
+// ParseSignonInfoReply decodes the payload of a 0xF004 frame. Unknown
+// CPs are silently skipped.
+func ParseSignonInfoReply(payload []byte) (*SignonInfoReply, error) {
+	const fixedLen = 4
+	if len(payload) < fixedLen {
+		return nil, fmt.Errorf("hostserver: signon-info reply too short: %d bytes", len(payload))
+	}
+	be := binary.BigEndian
+	rep := &SignonInfoReply{
+		ReturnCode: be.Uint32(payload[0:4]),
+	}
+
+	for pos := fixedLen; pos+6 <= len(payload); {
+		ll := be.Uint32(payload[pos : pos+4])
+		if ll < 6 || pos+int(ll) > len(payload) {
+			return nil, fmt.Errorf("hostserver: bad LL %d at payload offset %d (frame len %d)", ll, pos, len(payload))
+		}
+		cp := be.Uint16(payload[pos+4 : pos+6])
+		data := payload[pos+6 : pos+int(ll)]
+		switch cp {
+		case cpCurrentSignonDate, cpLastSignonDate, cpExpirationDate:
+			t, err := decodeSignonDate(data)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: decode CP 0x%04X: %w", cp, err)
+			}
+			switch cp {
+			case cpCurrentSignonDate:
+				rep.CurrentSignonDate = t
+			case cpLastSignonDate:
+				rep.LastSignonDate = t
+			case cpExpirationDate:
+				rep.ExpirationDate = t
+			}
+		case cpPWDExpiryWarnDays:
+			if len(data) < 4 {
+				return nil, fmt.Errorf("hostserver: PWD expiration warning CP too short: %d", len(data))
+			}
+			rep.PWDExpirationWarningDays = be.Uint32(data[0:4])
+		case cpServerCCSID:
+			if len(data) < 4 {
+				return nil, fmt.Errorf("hostserver: server CCSID CP too short: %d", len(data))
+			}
+			rep.ServerCCSID = be.Uint32(data[0:4])
+		case cpUserID:
+			rep.UserID = append([]byte(nil), data...)
+		}
+		pos += int(ll)
+	}
+	return rep, nil
+}
+
+// decodeSignonDate parses an 8-byte server-time value:
+// year(uint16) + month(u8) + day(u8) + hour(u8) + minute(u8) + second(u8)
+// + 1 reserved byte. The result is returned in UTC since the server's
+// timezone isn't carried inline; callers needing local time should
+// convert based on the IBM i job's TZ.
+//
+// All-zero fields render as the Go zero time.Time.
+func decodeSignonDate(data []byte) (time.Time, error) {
+	if len(data) < 7 {
+		return time.Time{}, fmt.Errorf("date too short: %d bytes (need >= 7)", len(data))
+	}
+	year := int(binary.BigEndian.Uint16(data[0:2]))
+	month := time.Month(int(data[2]))
+	day := int(data[3])
+	hour := int(data[4])
+	minute := int(data[5])
+	second := int(data[6])
+	if year == 0 && month == 0 && day == 0 {
+		return time.Time{}, nil
+	}
+	return time.Date(year, month, day, hour, minute, second, 0, time.UTC), nil
 }
 
 // authSchemeTemplateByte encodes the auth scheme + password length
