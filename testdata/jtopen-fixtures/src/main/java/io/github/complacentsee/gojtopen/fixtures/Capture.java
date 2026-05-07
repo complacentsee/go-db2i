@@ -198,6 +198,17 @@ public final class Capture {
         props.setProperty("libraries", cfg.schema);
         // Be nice to PUB400; don't leave idle connections lingering.
         props.setProperty("thread used", "false");
+        // Connection-level socket read timeout in ms. Unlike
+        // Statement.setQueryTimeout (which only affects execute, not
+        // prepare or commit), JTOpen's "socket timeout" property bounds
+        // every read off the JDBC socket -- including the PREPARE
+        // round-trip. We had a run wedge for 30+ min inside
+        // commonPrepare on DLTJRN because PUB400 had a held journal;
+        // this caps that to 30s and surfaces an SQLException instead.
+        props.setProperty("socket timeout", "30000");
+        // Login + connect timeouts so a half-open TCP path can't hang
+        // openConnection itself indefinitely.
+        props.setProperty("login timeout", "30");
         // Force the JTOpen driver to load.
         try {
             Class.forName("com.ibm.as400.access.AS400JDBCDriver");

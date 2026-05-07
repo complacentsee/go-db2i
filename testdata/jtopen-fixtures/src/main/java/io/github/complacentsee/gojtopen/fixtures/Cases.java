@@ -180,16 +180,22 @@ final class Cases {
         // the system commands below fragile.
         private static final String TABLE_SHORT = "GOJT_T1";
 
-        // goJTOpen-specific journal + receiver. Created once in the user's
-        // library and reused by all WithTable cases. Names are chosen so
-        // it's obvious they belong to this project; the journal is left
-        // in place between runs (creating a fresh receiver/journal each
-        // time would just churn the system's catalog).
-        private static final String JRN = "GOJTJRN";
-        private static final String JRNRCV = "GOJTRCV1";
+        // Per-command timeout for the QCMDEXC journal calls. Without
+        // this, a CPF9803-style "object locked" condition would hang the
+        // JDBC socket indefinitely (we saw 10+ minute stalls on the
+        // first diagnostic run). The connection-level "socket timeout"
+        // is the actual hard backstop (it covers PREPARE too, which
+        // setQueryTimeout doesn't), but we keep this as a polite extra
+        // bound for execute-phase hangs.
+        private static final int CMD_TIMEOUT_SEC = 15;
 
         protected final String schema;
         protected final String table;
+
+        // Whether this case needs commitment control. Subclasses that do
+        // (TxCommit / TxRollback) opt in by returning true, which
+        // enables the journal-bring-up path in setup.
+        protected boolean needsJournaling() { return false; }
 
         WithTable(String name, String schema) {
             super(name);
@@ -204,42 +210,51 @@ final class Cases {
                         + "NAME VARCHAR(40) NOT NULL, "
                         + "AMT DECIMAL(11,2) NOT NULL"
                         + ")");
-                // Enable journaling so commitment-control cases work.
-                //
-                // We aggressively recreate from scratch every case run.
-                // Reason: across runs, GOJTRCV1 stays attached to the
-                // existing GOJTJRN, so a plain "CRTJRNRCV; CRTJRN" path
-                // hits CPF7010 ("already exists") then CPF7015 ("error
-                // on JRNRCV specs"), STRJRNPF then fails with CPF0006
-                // because the journal isn't ready -- and the tx_* cases
-                // can't exercise commitment control. Tearing down +
-                // rebuilding gives a clean slate every time, at the
-                // cost of a few extra seconds per WithTable case.
-                //
-                // Failures from any single command are logged to stderr
-                // (-> fixtures/run.log) but never abort the run. CPF7010
-                // ("doesn't exist") on the DLT* steps is normal on the
-                // first run and will appear on every fresh PUB400 account.
-                runOrLog(st, "DLTJRN", "CALL QSYS2.QCMDEXC('DLTJRN JRN("
-                        + schema + "/" + JRN + ")')");
-                runOrLog(st, "DLTJRNRCV", "CALL QSYS2.QCMDEXC('DLTJRNRCV JRNRCV("
-                        + schema + "/" + JRNRCV + ")')");
-                runOrLog(st, "CRTJRNRCV", "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
-                        + schema + "/" + JRNRCV + ")')");
-                runOrLog(st, "CRTJRN", "CALL QSYS2.QCMDEXC('CRTJRN JRN("
-                        + schema + "/" + JRN + ") JRNRCV("
-                        + schema + "/" + JRNRCV + ")')");
-                runOrLog(st, "STRJRNPF", "CALL QSYS2.QCMDEXC('STRJRNPF FILE("
-                        + schema + "/" + TABLE_SHORT + ") JRN("
-                        + schema + "/" + JRN + ") IMAGES(*BOTH))')");
+                if (needsJournaling()) {
+                    bringUpJournal(st);
+                }
                 seed(conn);
             }
         }
+
+        // Stand up a fresh per-case journal + receiver. We do NOT try
+        // to delete prior artifacts: PUB400 has been observed to keep
+        // GOJTRCV* receivers in CPF9803 ("Cannot allocate") for hours
+        // after they're orphaned, and DLTJRNRCV against a stuck object
+        // hangs CRTJRN behind it. By picking a fresh suffix each run
+        // we always operate on a clean slate, at the cost of leaving
+        // an orphaned receiver behind in the user's library each time.
+        // Periodic cleanup of GOJTR* objects is the operator's job.
+        //
+        // The receiver name is bounded to 10 chars (system limit):
+        // "GOJTR" prefix (5) + 5-char hex from nanoTime gives 10.
+        private void bringUpJournal(Statement st) {
+            String suffix = String.format("%05X", System.nanoTime() & 0xFFFFF);
+            String jrnRcv = "GOJTR" + suffix;
+            String jrn = "GOJTJ" + suffix;
+            runOrLog(st, "CRTJRNRCV", "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
+                    + schema + "/" + jrnRcv + ")')");
+            runOrLog(st, "CRTJRN", "CALL QSYS2.QCMDEXC('CRTJRN JRN("
+                    + schema + "/" + jrn + ") JRNRCV("
+                    + schema + "/" + jrnRcv + ")')");
+            runOrLog(st, "STRJRNPF", "CALL QSYS2.QCMDEXC('STRJRNPF FILE("
+                    + schema + "/" + TABLE_SHORT + ") JRN("
+                    + schema + "/" + jrn + ") IMAGES(*BOTH))')");
+        }
+
         @Override public void teardown(Connection conn) throws SQLException {
             try (Statement st = conn.createStatement()) {
-                // ENDJRNPF before DROP so the table can be deleted cleanly.
-                runOrLog(st, "ENDJRNPF", "CALL QSYS2.QCMDEXC('ENDJRNPF FILE("
-                        + schema + "/" + TABLE_SHORT + "))')");
+                // Best-effort: ENDJRNPF before DROP only for the cases
+                // that started journaling -- otherwise we'd log a
+                // spurious CPF0006 in run.log on every non-journaled
+                // run. ENDJRN/DLTJRN/DLTJRNRCV are skipped for the
+                // same reason setup() doesn't try to clean prior
+                // runs -- PUB400 holds these objects open and we'd
+                // just hang.
+                if (needsJournaling()) {
+                    runOrLog(st, "ENDJRNPF", "CALL QSYS2.QCMDEXC('ENDJRNPF FILE("
+                            + schema + "/" + TABLE_SHORT + "))')");
+                }
                 try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
             }
         }
@@ -247,7 +262,12 @@ final class Cases {
 
         private void runOrLog(Statement st, String label, String sql) {
             try {
+                st.setQueryTimeout(CMD_TIMEOUT_SEC);
                 st.execute(sql);
+            } catch (java.sql.SQLTimeoutException e) {
+                System.err.println("    [" + name + "] " + label
+                        + ": TIMEOUT after " + CMD_TIMEOUT_SEC + "s ("
+                        + e.getMessage() + ")");
             } catch (SQLException e) {
                 System.err.println("    [" + name + "] " + label + ": " + e.getMessage());
             }
@@ -279,6 +299,7 @@ final class Cases {
 
     private static final class TxCommit extends WithTable {
         TxCommit(String schema) { super("tx_commit", schema); }
+        @Override protected boolean needsJournaling() { return true; }
         @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
             conn.setAutoCommit(false);
             try {
@@ -303,6 +324,7 @@ final class Cases {
 
     private static final class TxRollback extends WithTable {
         TxRollback(String schema) { super("tx_rollback", schema); }
+        @Override protected boolean needsJournaling() { return true; }
         @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
             conn.setAutoCommit(false);
             try {

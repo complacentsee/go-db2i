@@ -1,12 +1,4 @@
-    [multi_row_fetch_1k] CRTJRNRCV: [CPF7010] Object GOJTRCV1 in AFTRAEGE11 type *JRNRCV already exists.
-    [multi_row_fetch_1k] CRTJRN: [CPF7015] Error on JRNRCV specifications.
-    [multi_row_fetch_1k] STRJRNPF: [CPF0006] Errors occurred in command.
-    [multi_row_fetch_1k] ENDJRNPF: [CPF0006] Errors occurred in command.
-    [tx_commit] CRTJRNRCV: [CPF7010] Object GOJTRCV1 in AFTRAEGE11 type *JRNRCV already exists.
-    [tx_commit] CRTJRN: [CPF7015] Error on JRNRCV specifications.
     [tx_commit] STRJRNPF: [CPF0006] Errors occurred in command.
     [tx_commit] ENDJRNPF: [CPF0006] Errors occurred in command.
-    [tx_rollback] CRTJRNRCV: [CPF7010] Object GOJTRCV1 in AFTRAEGE11 type *JRNRCV already exists.
-    [tx_rollback] CRTJRN: [CPF7015] Error on JRNRCV specifications.
     [tx_rollback] STRJRNPF: [CPF0006] Errors occurred in command.
     [tx_rollback] ENDJRNPF: [CPF0006] Errors occurred in command.
