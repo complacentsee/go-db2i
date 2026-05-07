@@ -2,10 +2,38 @@ package hostserver
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
 )
+
+// goldenJSON is just enough of select_dummy.golden.json to extract
+// the row values for comparison. Re-running the fixture-capture
+// harness against PUB400 regenerates these timestamps, so the test
+// reads them from the file rather than hardcoding.
+type goldenJSON struct {
+	Case       string `json:"case"`
+	ResultSets []struct {
+		Rows [][]any `json:"rows"`
+	} `json:"resultSets"`
+}
+
+func loadGolden(t *testing.T, name string) *goldenJSON {
+	t.Helper()
+	path := filepath.Join(fixturesDir, name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("golden %s not present: %v", name, err)
+	}
+	var g goldenJSON
+	if err := json.Unmarshal(b, &g); err != nil {
+		t.Fatalf("parse golden %s: %v", name, err)
+	}
+	return &g
+}
 
 // allReceivedsFromFixture returns every consolidated Received frame
 // in the fixture, regardless of connID. Useful when a test wants to
@@ -89,14 +117,23 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 	if got, want := len(row), 3; got != want {
 		t.Fatalf("Row 0 column count = %d, want %d", got, want)
 	}
-	if got, want := row[0], "2026-05-07T19:08:04.161301"; got != want {
-		t.Errorf("col 0 (timestamp) = %q, want %q", got, want)
+
+	// Compare against select_dummy.golden.json -- read at runtime
+	// so re-captures (which change the timestamp) don't break
+	// the test. The user/server columns are stable.
+	golden := loadGolden(t, "select_dummy.golden.json")
+	if len(golden.ResultSets) != 1 || len(golden.ResultSets[0].Rows) != 1 || len(golden.ResultSets[0].Rows[0]) != 3 {
+		t.Fatalf("golden shape unexpected: %+v", golden)
 	}
-	if got, want := row[1], "AFTRAEGE1"; got != want {
-		t.Errorf("col 1 (user) = %q, want %q", got, want)
+	want := golden.ResultSets[0].Rows[0]
+	if got := row[0]; got != want[0] {
+		t.Errorf("col 0 (timestamp) = %q, want %q (from golden)", got, want[0])
 	}
-	if got, want := row[2], "PUB400"; got != want {
-		t.Errorf("col 2 (server) = %q, want %q", got, want)
+	if got := row[1]; got != want[1] {
+		t.Errorf("col 1 (user) = %q, want %q (from golden)", got, want[1])
+	}
+	if got := row[2]; got != want[2] {
+		t.Errorf("col 2 (server) = %q, want %q (from golden)", got, want[2])
 	}
 
 	// Sanity: 3 frames written (CREATE_RPB, PREPARE_DESCRIBE,
