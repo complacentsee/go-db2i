@@ -115,20 +115,10 @@ func main() {
 	}
 
 	// --- Step 5: M2 static SELECT. ---
-	// NOTE (M2b live blocker, 2026-05-07): the SET_SQL_ATTRIBUTES
-	// + CREATE_RPB + PREPARE_DESCRIBE sequence is byte-identical
-	// to what JTOpen sends in our captured fixture, but PUB400
-	// V7R5 currently returns SQL -401 ("operands not compatible")
-	// on PREPARE_DESCRIBE for any statement -- including
-	// "VALUES 1" with no table at all. The offline parser is
-	// validated against the fixture; the live cause is some
-	// session state difference we haven't pinned down yet.
-	// Print rather than fail() so the M2a + M1 pieces still
-	// demo cleanly.
 	sql := envOr("PUB400_SQL", "SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1")
 	res, err := hostserver.SelectStaticSQL(dbConn, sql, 3)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "M2 static select (currently expected to fail live, parser passes offline): %v\n", err)
+		fail("M2 static select: %v", err)
 	} else {
 		fmt.Printf("\nstatic select: %s\n", sql)
 		fmt.Printf("columns:           %d\n", len(res.Columns))

@@ -104,12 +104,22 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 		tpl := DBRequestTemplate{
 			// JTOpen's CREATE_RPB ORS = 0x00040000 (RLE only,
 			// no reply requested -- it's fire-and-forget).
+			//
+			// Handle layout (verified byte-for-byte against
+			// select_dummy.trace): ReturnORSHandle=1,
+			// FillORSHandle=1, BasedOnORSHandle=0, RPBHandle=1,
+			// ParameterMarkerDescriptor=0. The RPB lands in slot
+			// 1 and the subsequent PREPARE_DESCRIBE /
+			// OPEN_DESCRIBE_FETCH reference RPBHandle=1 to find
+			// it. The earlier draft of this code permuted these
+			// handles, which left the server with no RPB at the
+			// expected slot and made PUB400 return SQL -401.
 			ORSBitmap:                 0x00040000,
-			ReturnORSHandle:           0,
+			ReturnORSHandle:           1,
 			FillORSHandle:             1,
-			BasedOnORSHandle:          1,
-			RPBHandle:                 0,
-			ParameterMarkerDescriptor: 1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
 		}
 		params := []DBParam{
 			DBParamVarString(cpDBPrepareStatementName, 273, stmtNameBytes),
@@ -135,6 +145,8 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	prepCorr := corr
 	{
 		tpl := DBRequestTemplate{
+			// Handle layout matches CREATE_RPB exactly so the
+			// server reuses the RPB it just made (RPBHandle=1).
 			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | 0x00040000,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
@@ -198,7 +210,9 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	{
 		tpl := DBRequestTemplate{
 			// 0x86048000: return data + result data + SQLCA + RLE +
-			// cursor attributes (bit 17 = 0x00008000).
+			// cursor attributes (bit 17 = 0x00008000). Handle
+			// layout matches PREPARE_DESCRIBE so OPEN reuses the
+			// same RPB (RPBHandle=1).
 			ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | 0x00040000 | 0x00008000,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
