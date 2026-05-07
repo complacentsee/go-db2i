@@ -523,6 +523,18 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
+	// Same continuation FETCH loop as SelectStaticSQL.
+	for {
+		more, done, err := fetchMoreRows(conn, cols, corr)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: continuation FETCH: %w", err)
+		}
+		corr++
+		if done {
+			break
+		}
+		rows = append(rows, more...)
+	}
 	// Free the RPB slot so the next SELECT on this connection
 	// can chain. JTOpen also emits a DELETE_DESCRIPTOR (0x1E01)
 	// before this for prepared SELECTs; that's optional --

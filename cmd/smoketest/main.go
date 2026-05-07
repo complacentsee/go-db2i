@@ -408,6 +408,37 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 12: M5 multi-row continuation FETCH. ---
+	// SYSIBM.SYSTABLES has hundreds of system tables on PUB400 --
+	// enough to push the result set past the 32 KB OPEN buffer
+	// and force at least one continuation FETCH. Confirms the
+	// loop terminates on SQLCODE +100 and rows are stitched
+	// together correctly.
+	multiConn := dialOrDie(dbAddr, "as-database (multi-row FETCH)")
+	defer multiConn.Close()
+	if _, _, err := hostserver.StartDatabaseService(multiConn, user, pwd); err != nil {
+		fail("multi-row db open: %v", err)
+	}
+	if _, err := hostserver.SetSQLAttributes(multiConn, hostserver.DefaultDBAttributesOptions()); err != nil {
+		fail("multi-row set-sql-attributes: %v", err)
+	}
+	if err := hostserver.NDBAddLibraryList(multiConn, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: multi-row NDB add-library-list: %v\n", err)
+	}
+	mres, err := hostserver.SelectStaticSQL(multiConn,
+		"SELECT TABLE_SCHEMA, TABLE_NAME FROM QSYS2.SYSTABLES ORDER BY TABLE_SCHEMA, TABLE_NAME FETCH FIRST 5000 ROWS ONLY",
+		3,
+	)
+	if err != nil {
+		fail("M5 multi-row select: %v", err)
+	}
+	fmt.Printf("\nmulti-row select: QSYS2.SYSTABLES (FETCH FIRST 5000)\n")
+	fmt.Printf("  total rows: %d\n", len(mres.Rows))
+	if len(mres.Rows) > 0 {
+		fmt.Printf("  first: %v\n", mres.Rows[0])
+		fmt.Printf("  last:  %v\n", mres.Rows[len(mres.Rows)-1])
+	}
+
 	fmt.Fprintln(os.Stderr, "ok")
 }
 

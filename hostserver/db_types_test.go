@@ -81,14 +81,19 @@ func runStaticTypeReplay(t *testing.T, tc typeCase) {
 	if len(sqlReceiveds) < 5 {
 		t.Skipf("fixture %s has only %d SQL receiveds (need >= 5)", tc.trace, len(sqlReceiveds))
 	}
-	// If the fixture captured the RPB DELETE reply (post-M4
-	// JTOpen runs do), use it; otherwise synthesise a success
-	// stub so the test still validates the row decoding path.
-	rpbDelReply := syntheticRPBDeleteReply(4)
-	if len(sqlReceiveds) >= 6 {
-		rpbDelReply = sqlReceiveds[5]
-	}
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], rpbDelReply)
+	// SelectStaticSQL with start corr=3 sends:
+	//   corr 3 CREATE_RPB, corr 4 PREPARE_DESCRIBE,
+	//   corr 5 OPEN_DESCRIBE_FETCH, corr 6 continuation FETCH,
+	//   corr 7 RPB DELETE.
+	// PREPARE+OPEN replies come from the fixture; FETCH-end and
+	// RPB-DELETE replies are synthesised because JTOpen captured
+	// these traces before the M5 continuation loop existed.
+	conn := newFakeConn(
+		sqlReceiveds[3],
+		sqlReceiveds[4],
+		syntheticFetchEndReply(6),
+		syntheticRPBDeleteReply(7),
+	)
 	res, err := SelectStaticSQL(conn, tc.sql, 3)
 	if err != nil {
 		t.Fatalf("SelectStaticSQL: %v", err)
@@ -191,6 +196,43 @@ func (g *goldenJSON) firstRowCol(i int) any {
 }
 
 var _ = bytes.Equal // keep `bytes` imported for future use without disruption
+
+// syntheticFetchEndReply builds a 0x2800 (DBReply) frame whose
+// SQLCA carries SQLCODE +100 (end-of-data). M5 SelectStaticSQL /
+// SelectPreparedSQL now loop continuation FETCHes after the initial
+// OPEN; replaying captured fixtures where JTOpen got everything in
+// a single batch needs a synthetic "no more rows" reply so the
+// continuation loop terminates cleanly. corr is the FETCH
+// correlation ID we expect back.
+func syntheticFetchEndReply(corr uint32) []byte {
+	hdr := Header{
+		Length:         40,
+		ServerID:       ServerDatabase,
+		CorrelationID:  corr,
+		TemplateLength: 20,
+		ReqRepID:       RepDBReply,
+	}
+	payload := make([]byte, 20)
+	// Echo ORS bitmap fields used by FETCH so a future stricter
+	// reply parser accepts the frame too.
+	payload[0] = 0x86
+	payload[1] = 0x04
+	payload[10] = 0x18 // function ID echo
+	payload[11] = 0x0B
+	payload[12] = 0x18
+	payload[13] = 0x0B
+	// ReturnCode = 100 (SQLCODE end-of-data). Bytes 16..19.
+	payload[16] = 0x00
+	payload[17] = 0x00
+	payload[18] = 0x00
+	payload[19] = 0x64
+
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, hdr, payload); err != nil {
+		panic(fmt.Sprintf("synthesise FETCH end-of-data reply: %v", err))
+	}
+	return buf.Bytes()
+}
 
 // syntheticRPBDeleteReply builds a 40-byte 0x2800 (DBReply)
 // frame that mimics a successful RPB DELETE response: ORS bitmap

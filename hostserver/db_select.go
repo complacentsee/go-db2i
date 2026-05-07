@@ -14,12 +14,96 @@ import (
 // service. We only define the ones we use right now.
 const (
 	ReqDBSQLPrepareDescribe   uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
+	ReqDBSQLFetch             uint16 = 0x180B // continuation FETCH from existing cursor
 	ReqDBSQLOpenDescribeFetch uint16 = 0x180E // OPEN + DESCRIBE + FETCH
 	ReqDBSQLClose             uint16 = 0x180A // CLOSE cursor
 	ReqDBSQLRPBCreate         uint16 = 0x1D00 // CREATE Request Parameter Block
 	ReqDBSQLRPBDelete         uint16 = 0x1D02 // DELETE RPB (frees RPB slot for next CREATE)
 	ReqDBSQLDeleteResultsSet  uint16 = 0x1F01 // DELETE_RESULTS_SET
 )
+
+// SQLCode constants we treat specially across the result-set
+// parser. JT400 + IBM i return positive SQLCODE values in the
+// SQLCA template's ReturnCode field (low 32 bits) and signal
+// "no more rows" with +100.
+const (
+	SQLCodeEndOfData int32 = 100
+	// SQLCodeCursorNotOpen is what PUB400 returns when we issue a
+	// continuation FETCH after the initial OPEN_DESCRIBE_FETCH
+	// already drained the cursor (single-batch result). We treat
+	// it as "done", not an error.
+	SQLCodeCursorNotOpen int32 = -501
+)
+
+// fetchMoreRows issues a continuation FETCH (0x180B) on the cursor
+// our SelectStaticSQL/SelectPreparedSQL just opened, parses the
+// reply, and returns the next batch. On end-of-data the returned
+// rows slice is empty and done == true. Caller is expected to keep
+// calling until done is true.
+//
+// nextCorrelation is the correlation ID to stamp on the request;
+// caller advances its own counter.
+//
+// The blocking factor and buffer size mirror what we requested in
+// the original OPEN: 32 KB buffer, server-chosen blocking factor.
+func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32) (rows []SelectRow, done bool, err error) {
+	tpl := DBRequestTemplate{
+		// 0x86040000: ReturnData + ResultData + SQLCA + RLE.
+		// (Bit 17 = 0x00008000 from OPEN is "cursor attributes"
+		// which only applies on initial open; FETCH leaves it off.)
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | 0x00040000,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
+	}
+	params := []DBParam{
+		DBParamShort(cpDBScrollableCursorFlag, 0x0000),                          // 0x380D
+		{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},       // 0x3834: 32KB
+		DBParamByte(cpDBVariableFieldCompr, 0xE8),                               // 0x3833: VLF on
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
+	if err != nil {
+		return nil, false, fmt.Errorf("hostserver: build FETCH: %w", err)
+	}
+	hdr.CorrelationID = nextCorrelation
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return nil, false, fmt.Errorf("hostserver: send FETCH: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, nextCorrelation, 4)
+	if err != nil {
+		return nil, false, fmt.Errorf("hostserver: read FETCH reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return nil, false, fmt.Errorf("hostserver: FETCH reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return nil, false, fmt.Errorf("hostserver: parse FETCH reply: %w", err)
+	}
+	// SQLCODE +100 = end of data; -501 = cursor not in OPEN state
+	// (PUB400 reports this when the initial OPEN already drained
+	// the cursor). Both signal "stop iterating" without an error.
+	rc := int32(rep.ReturnCode)
+	if rc == SQLCodeEndOfData || rc == SQLCodeCursorNotOpen {
+		return nil, true, nil
+	}
+	if rc != 0 && !isSQLWarning(rep.ReturnCode) {
+		return nil, false, fmt.Errorf("hostserver: FETCH RC=%d errorClass=0x%04X", rc, rep.ErrorClass)
+	}
+	rows, err = rep.findExtendedResultData(cols)
+	if err != nil {
+		return nil, false, fmt.Errorf("hostserver: parse FETCH row data: %w", err)
+	}
+	// Empty batch with non-+100 RC also signals "end of data" --
+	// some PUB400 paths don't set +100 explicitly but stop sending
+	// rows. Treat zero rows as done.
+	if len(rows) == 0 {
+		return nil, true, nil
+	}
+	return rows, false, nil
+}
 
 // deleteRPB sends an RPB DELETE (0x1D02) for the RPB at slot 1, the
 // only slot SelectStaticSQL/SelectPreparedSQL ever creates. JTOpen
@@ -314,6 +398,22 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse row data: %w", err)
+	}
+	// Continuation FETCH loop: keep pulling batches until the
+	// server signals end-of-data (SQLCODE +100 or empty batch).
+	// The initial OPEN_DESCRIBE_FETCH reply may already carry all
+	// rows when the result fits the 32 KB buffer; in that case
+	// fetchMoreRows returns done=true on the first call.
+	for {
+		more, done, err := fetchMoreRows(conn, cols, corr)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: continuation FETCH: %w", err)
+		}
+		corr++
+		if done {
+			break
+		}
+		rows = append(rows, more...)
 	}
 	// Free the RPB slot so the next SELECT on this connection
 	// can CREATE_RPB at slot 1 without colliding. JTOpen always
