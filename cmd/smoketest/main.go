@@ -439,6 +439,33 @@ func main() {
 		fmt.Printf("  last:  %v\n", mres.Rows[len(mres.Rows)-1])
 	}
 
+	// --- Step 13: M5 autocommit toggle. ---
+	// AutocommitOff/On send small SET_SQL_ATTRIBUTES frames; the
+	// COMMIT (0x1807) and ROLLBACK (0x1808) frames themselves are
+	// covered by TestCommitFrameShape / TestRollbackFrameShape but
+	// can't be live-verified here without write privileges (PUB400
+	// rejects committing a read-only transaction with SQL -211 /
+	// -7008). M6 acceptance picks them up via database/sql.Tx
+	// once we wire the driver.
+	txConn := dialOrDie(dbAddr, "as-database (tx)")
+	defer txConn.Close()
+	if _, _, err := hostserver.StartDatabaseService(txConn, user, pwd); err != nil {
+		fail("tx db open: %v", err)
+	}
+	if _, err := hostserver.SetSQLAttributes(txConn, hostserver.DefaultDBAttributesOptions()); err != nil {
+		fail("tx set-sql-attributes: %v", err)
+	}
+	if err := hostserver.NDBAddLibraryList(txConn, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: tx NDB add-library-list: %v\n", err)
+	}
+	if err := hostserver.AutocommitOff(txConn, 3); err != nil {
+		fail("AutocommitOff: %v", err)
+	}
+	if err := hostserver.AutocommitOn(txConn, 4); err != nil {
+		fail("AutocommitOn: %v", err)
+	}
+	fmt.Printf("\nautocommit OFF/ON toggle: ok\n")
+
 	fmt.Fprintln(os.Stderr, "ok")
 }
 

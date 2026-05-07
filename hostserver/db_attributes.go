@@ -49,6 +49,13 @@ type DBAttributesOptions struct {
 	// guesswork in the decoder; or to DateFormatJOB to keep the
 	// fixture-compatible default.
 	DateFormat byte
+	// IsolationLevel controls CP 0x380E (commitment control level)
+	// in SET_SQL_ATTRIBUTES. Default IsolationDefault leaves the CP
+	// unchanged (matches the long-standing fixture-compat default
+	// of *NONE). Set to IsolationReadCommitted for transactions
+	// that need rollback support; IsolationCommitNone disables
+	// transactions entirely (suitable for non-journaled tables).
+	IsolationLevel int16
 }
 
 // DateFormat constants for DBAttributesOptions.DateFormat. EBCDIC
@@ -63,6 +70,29 @@ const (
 	DateFormatMDY byte = 0xF5 // MM/DD/YY (8 chars)
 	DateFormatDMY byte = 0xF6 // DD/MM/YY (8 chars)
 	DateFormatYMD byte = 0xF7 // YY-MM-DD (8 chars)
+)
+
+// isolationLevelWireValue maps an IsolationLevel option (which uses
+// -1 to mean "leave at default") to the int16 we send on the wire.
+// The wire CP is always present; -1 just means "use 0 (default)".
+func isolationLevelWireValue(level int16) int16 {
+	if level == IsolationDefault {
+		return 0
+	}
+	return level
+}
+
+// CommitmentControlLevel values for DBAttributesOptions.IsolationLevel.
+// CP 0x380E (short). Maps the standard JDBC isolation constants to
+// IBM i's commitment control names; values per JT400's
+// DBSQLAttributesDS.setCommitmentControlLevelParserOption.
+const (
+	IsolationDefault       int16 = -1 // don't send the CP -- server picks
+	IsolationCommitNone    int16 = 0  // *NONE -- no isolation, no journaling
+	IsolationReadCommitted int16 = 1  // *CS   -- cursor stability (JDBC TRANSACTION_READ_COMMITTED)
+	IsolationAllCS         int16 = 2  // *ALL  -- read uncommitted (TRANSACTION_READ_UNCOMMITTED, ish)
+	IsolationRepeatableRd  int16 = 3  // *RR   -- repeatable read
+	IsolationSerializable  int16 = 4  // *RS   -- serializable
 )
 
 // DefaultDBAttributesOptions returns the minimum-acceptable defaults
@@ -86,6 +116,10 @@ func DefaultDBAttributesOptions() DBAttributesOptions {
 		// DateFormatISO so dates come back already-ISO and the
 		// decoder skips the YMD-to-ISO conversion.
 		DateFormat: DateFormatJOB,
+		// IsolationLevel: leave unset, server picks. Tests rely
+		// on this for fixture parity; transaction-using callers
+		// flip to IsolationReadCommitted via WithIsolation.
+		IsolationLevel: IsolationDefault,
 	}
 }
 
@@ -136,7 +170,12 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		DBParamByte(0x3805, opts.DateFormat),
 		DBParamShort(0x3806, 0x0001),
 		DBParamByte(0x3824, 0xE8),
-		DBParamShort(0x380E, 0x0000),
+		// CP 0x380E: commitment control level. 0 = server default
+		// (matches fixtures); explicit values come from
+		// IsolationLevel. We always send the CP -- the value
+		// changes based on the option, but JT400 always emits the
+		// CP so byte-equality tests rely on it being present.
+		DBParamShort(0x380E, isolationLevelWireValue(opts.IsolationLevel)),
 		DBParamShort(0x380C, 0x0000),
 		DBParamShort(0x3823, 0x0000),
 	}
