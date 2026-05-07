@@ -1,0 +1,9 @@
+{
+  "case" : "connect_only",
+  "resultSets" : [ ],
+  "notes" : {
+    "autoCommit" : "true",
+    "catalog" : "PUB400",
+    "readOnly" : "false"
+  }
+}

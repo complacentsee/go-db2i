@@ -1,0 +1,22 @@
+{
+  "case" : "types_decfloat_16",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "DECFLOAT",
+      "sqlType" : 1111,
+      "displaySize" : 23,
+      "precision" : 16,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ {
+      "sqlType" : 1111,
+      "string" : "123456.7890123456"
+    } ] ]
+  } ]
+}

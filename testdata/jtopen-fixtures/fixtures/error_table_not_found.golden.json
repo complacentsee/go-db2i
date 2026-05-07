@@ -1,0 +1,9 @@
+{
+  "case" : "error_table_not_found",
+  "resultSets" : [ ],
+  "error" : {
+    "sqlState" : "42704",
+    "errorCode" : -204,
+    "message" : "[SQL0204] GOJTOPEN_NOPE_NOT_HERE in SYSIBM type *FILE not found."
+  }
+}

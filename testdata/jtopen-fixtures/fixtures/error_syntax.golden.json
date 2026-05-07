@@ -1,0 +1,9 @@
+{
+  "case" : "error_syntax",
+  "resultSets" : [ ],
+  "error" : {
+    "sqlState" : "42601",
+    "errorCode" : -104,
+    "message" : "[SQL0104] Token SELEKT was not valid. Valid tokens: ( CL END GET SET TAG CALL DROP FREE HOLD LOCK OPEN WITH."
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "case" : "prepared_decimal_param",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "V",
+      "label" : "V",
+      "typeName" : "DECIMAL",
+      "sqlType" : 3,
+      "displaySize" : 9,
+      "precision" : 7,
+      "scale" : 3,
+      "nullable" : 1,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "-1234.567" ] ]
+  } ]
+}

@@ -1,0 +1,19 @@
+{
+  "case" : "types_smallint",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "SMALLINT",
+      "sqlType" : 5,
+      "displaySize" : 6,
+      "precision" : 5,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ -12345 ] ]
+  } ]
+}

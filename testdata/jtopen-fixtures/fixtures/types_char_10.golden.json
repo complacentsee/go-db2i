@@ -1,0 +1,19 @@
+{
+  "case" : "types_char_10",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "CHAR",
+      "sqlType" : 1,
+      "displaySize" : 10,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "hello     " ] ]
+  } ]
+}

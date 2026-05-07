@@ -1,0 +1,19 @@
+{
+  "case" : "types_timestamp",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "TIMESTAMP",
+      "sqlType" : 93,
+      "displaySize" : 26,
+      "precision" : 26,
+      "scale" : 6,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "2026-05-07T13:45:09.123456" ] ]
+  } ]
+}

@@ -1,0 +1,19 @@
+{
+  "case" : "prepared_string_param",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "V",
+      "label" : "V",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 50,
+      "precision" : 50,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "hello, IBM i" ] ]
+  } ]
+}

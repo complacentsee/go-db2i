@@ -1,0 +1,19 @@
+{
+  "case" : "types_decimal_negative_31_5",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "DECIMAL",
+      "sqlType" : 3,
+      "displaySize" : 33,
+      "precision" : 31,
+      "scale" : 5,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "-99999999999999999999999999.12345" ] ]
+  } ]
+}

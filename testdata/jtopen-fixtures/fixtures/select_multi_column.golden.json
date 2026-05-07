@@ -1,0 +1,55 @@
+{
+  "case" : "select_multi_column",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "A",
+      "label" : "A",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "B",
+      "label" : "B",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 10,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "C",
+      "label" : "C",
+      "typeName" : "DECIMAL",
+      "sqlType" : 3,
+      "displaySize" : 7,
+      "precision" : 5,
+      "scale" : 2,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "D",
+      "label" : "D",
+      "typeName" : "DATE",
+      "sqlType" : 91,
+      "displaySize" : 10,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ 1, "two", "3.14", "2026-05-07" ] ]
+  } ]
+}

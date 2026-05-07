@@ -1,0 +1,19 @@
+{
+  "case" : "types_double",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "DOUBLE",
+      "sqlType" : 8,
+      "displaySize" : 22,
+      "precision" : 53,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ 2.718281828459045 ] ]
+  } ]
+}

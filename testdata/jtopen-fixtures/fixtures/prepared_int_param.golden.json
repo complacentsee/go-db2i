@@ -1,0 +1,19 @@
+{
+  "case" : "prepared_int_param",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "V",
+      "label" : "V",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ 42 ] ]
+  } ]
+}

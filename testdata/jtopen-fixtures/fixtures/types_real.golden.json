@@ -1,0 +1,19 @@
+{
+  "case" : "types_real",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "REAL",
+      "sqlType" : 7,
+      "displaySize" : 13,
+      "precision" : 24,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ 3.1415927 ] ]
+  } ]
+}

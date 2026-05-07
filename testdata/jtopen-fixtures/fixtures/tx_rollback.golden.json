@@ -1,0 +1,9 @@
+{
+  "case" : "tx_rollback",
+  "resultSets" : [ ],
+  "error" : {
+    "sqlState" : "55019",
+    "errorCode" : -7008,
+    "message" : "[SQL7008] GOJTO00001 in AFTRAEGE11 not valid for operation."
+  }
+}

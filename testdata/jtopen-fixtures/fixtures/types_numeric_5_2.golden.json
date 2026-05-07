@@ -1,0 +1,19 @@
+{
+  "case" : "types_numeric_5_2",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "NUMERIC",
+      "sqlType" : 2,
+      "displaySize" : 7,
+      "precision" : 5,
+      "scale" : 2,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "-123.45" ] ]
+  } ]
+}
