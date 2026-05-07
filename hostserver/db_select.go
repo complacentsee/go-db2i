@@ -340,11 +340,16 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
 	if prepRep.ReturnCode != 0 && !isSQLWarning(prepRep.ReturnCode) {
+		// Free the RPB so the next SELECT on this connection
+		// can chain. Don't fail on cleanup -- the original error
+		// is what the caller cares about.
+		_ = deleteRPB(conn, corr)
 		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE RC=%d (0x%08X) errorClass=0x%04X",
 			prepRep.ReturnCode, prepRep.ReturnCode, prepRep.ErrorClass)
 	}
 	cols, err := prepRep.findSuperExtendedDataFormat()
 	if err != nil {
+		_ = deleteRPB(conn, corr)
 		return nil, fmt.Errorf("hostserver: parse column descriptors: %w", err)
 	}
 	if len(cols) == 0 {
