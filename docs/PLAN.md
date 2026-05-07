@@ -272,12 +272,16 @@ BCD sign nibbles cover both directions.
 
 **Deferred from M4:**
 
-- **Live INSERT/UPDATE/DELETE round-trip** — every type now has a
-  Go encoder, but live-validating the bind-and-write path requires
-  PUB400 write privileges (we read-only in the current account).
-  The bind encoders are exercised via SELECT CAST(? AS T) loopback
-  in the smoketest; full I/U/D verification picks up in M6 once
-  database/sql.Tx is wired and we capture write fixtures.
+- **Live INSERT/UPDATE/DELETE round-trip via prepared bind** — every
+  type now has a Go encoder, and live writes work via
+  `ExecuteImmediate` (0x1806) against `AFTRAEGE11.DCLVRP02` on
+  PUB400 (validated 2026-05-07: INSERT a row, SELECT it back,
+  DELETE it cleanly). The static-SQL write path is covered.
+  What's still deferred is **prepared-statement bind for I/U/D**
+  with parameter markers — the bind encoders are exercised via
+  `SELECT CAST(? AS T)` loopback today; per-type bind on
+  INSERT/UPDATE picks up in M6 alongside `database/sql.Stmt.Exec`
+  and write fixtures.
 - **DATE format negotiation for non-default formats** — encoder
   supports ISO and YMD output widths; USA/EUR/JIS/MDY/DMY bind
   not implemented (8-char DATE bind only emits YMD). Decoder
@@ -314,12 +318,25 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
 
 **Deferred from M5:**
 
-- **Live COMMIT / ROLLBACK on a journaled table** — frame shapes
-  verified via `TestCommitFrameShape` / `TestRollbackFrameShape`
-  but PUB400 rejects committing a read-only transaction with SQL
-  -211 / -7008. Need a journaled writeable table to validate
-  semantics; acceptance picks up in M6 once `database/sql.Tx`
-  wraps these primitives.
+- **Live COMMIT / ROLLBACK semantics on a journaled table** —
+  frame shapes verified via `TestCommitFrameShape` /
+  `TestRollbackFrameShape`, and the live INSERT path proven
+  against `DCLVRP02` (123,410 rows; writes succeed under
+  autocommit-on). But:
+  - COMMIT (0x1807) and ROLLBACK (0x1808) both return SQL -211
+    errorClass=2 on PUB400, **even with a real INSERT pending**.
+  - `AutocommitOff` succeeds at the protocol layer, but a
+    subsequent INSERT + ROLLBACK leaves the row in the table
+    (verified on a fresh connection). The "rollback" is a no-op
+    because the file isn't under commitment control.
+  - Catalog probes for `JOURNALED` / `JOURNAL_NAME` columns fail
+    with -206 on PUB400's i version, so we can't confirm via SQL,
+    but the persistence behaviour is conclusive: **DCLVRP02 is
+    not journaled on PUB400.**
+  Real semantic validation needs a journaled table — either
+  `STRJRNPF` on PUB400 (requires *OBJMGT we may not have) or a
+  production IBM i with established journaling. Acceptance picks
+  up in M6 once `database/sql.Tx` wraps these primitives.
 - **Re-capture fixtures with M5 RPB DELETE in scope** — every
   fakeConn-driven test currently appends a `syntheticFetchEndReply`
   + `syntheticRPBDeleteReply` because the captured `.trace`
@@ -402,11 +419,13 @@ authoritative list. Items below are cross-cutting concerns that
 don't slot into a single milestone.
 
 - **`tx_commit` / `tx_rollback` fixtures** — currently SQL7008
-  error-path captures because PUB400 won't journal our test table for
-  this account. The SQL7008 wire path is still useful (for
-  M5 error handling). Re-capture against a real IBM i with
-  journaling enabled to get the happy commit/rollback wire trace.
-  (Same blocker as M5's "live COMMIT/ROLLBACK" deferred item.)
+  error-path captures because PUB400 doesn't journal user tables
+  by default. The SQL7008 wire path is still useful (for M5 error
+  handling). Re-capture against a journaled table — either after
+  `STRJRNPF` on PUB400 or against a production IBM i with
+  established journaling — to get the happy commit/rollback wire
+  trace. (Same blocker as M5's "live COMMIT/ROLLBACK" deferred
+  item; see that entry for the live evidence.)
 - **CCSID 65535 binary handling** — make sure every type-decoding
   path checks the column CCSID before attempting EBCDIC decode.
   No captured fixture exercises this today, so it's untested.
