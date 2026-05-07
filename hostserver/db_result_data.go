@@ -248,6 +248,26 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return int64(binary.BigEndian.Uint64(b[:8])), 8, nil
 
+	case SQLTypeDecimal, 485: // 484 NN, 485 nullable -- DECIMAL(p, s) packed BCD
+		// Packed BCD: ceil((precision+1)/2) bytes; each byte
+		// holds two BCD digits (high then low nibble); the
+		// final nibble is sign (0xC/0xF = positive, 0xD =
+		// negative). We return a decimal string ("-123.45")
+		// because DECIMAL(31,5) overflows int64/float64; the
+		// caller can lift to math/big or shopspring/decimal.
+		nbytes := int(col.Precision+1) / 2
+		if (int(col.Precision)+1)%2 != 0 {
+			nbytes = (int(col.Precision) + 2) / 2
+		}
+		if len(b) < nbytes {
+			return nil, 0, fmt.Errorf("decimal(%d,%d) wants %d bytes, have %d", col.Precision, col.Scale, nbytes, len(b))
+		}
+		s, err := decodePackedBCD(b[:nbytes], int(col.Precision), int(col.Scale))
+		if err != nil {
+			return nil, 0, err
+		}
+		return s, nbytes, nil
+
 	case SQLTypeFloat8, 481: // 480 NN (REAL or DOUBLE), 481 nullable
 		// IEEE 754 big-endian; REAL is 4 bytes (float32),
 		// DOUBLE is 8 bytes (float64). The SQL type is the same
@@ -270,6 +290,81 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 	}
 	return nil, 0, fmt.Errorf("unsupported SQL type %d (col len=%d, ccsid=%d)", col.SQLType, col.Length, col.CCSID)
+}
+
+// decodePackedBCD turns DB2 for i's packed-BCD bytes into a decimal
+// string ("[-]integer[.fraction]"). precision is the total digit
+// count and scale is the number of fractional digits, both as
+// declared by the column descriptor. The byte stream contains
+// 2*len(b) nibbles; the last nibble is the sign (0xC/0xF = positive,
+// 0xD = negative); the leading 2*len(b) - 1 nibbles are the digits
+// in big-endian order.
+func decodePackedBCD(b []byte, precision, scale int) (string, error) {
+	totalNibbles := 2 * len(b)
+	if totalNibbles < 2 {
+		return "", fmt.Errorf("decimal: byte count %d too small", len(b))
+	}
+	// Sign nibble lives in the low half of the last byte.
+	signNibble := b[len(b)-1] & 0x0F
+	negative := false
+	switch signNibble {
+	case 0x0A, 0x0C, 0x0E, 0x0F: // 0xA, 0xC, 0xE, 0xF = positive (per IBM packed BCD spec)
+		// positive
+	case 0x0B, 0x0D: // 0xB, 0xD = negative
+		negative = true
+	default:
+		return "", fmt.Errorf("decimal: bad sign nibble 0x%X in last byte 0x%02X", signNibble, b[len(b)-1])
+	}
+
+	// Walk all digit nibbles (everything except the sign).
+	digits := make([]byte, 0, totalNibbles-1)
+	for i, by := range b {
+		hi := (by >> 4) & 0x0F
+		lo := by & 0x0F
+		// First nibble of the byte is always a digit.
+		if hi > 9 {
+			return "", fmt.Errorf("decimal: byte %d high nibble 0x%X > 9", i, hi)
+		}
+		digits = append(digits, '0'+hi)
+		// Last byte's low nibble is sign, not a digit.
+		if i == len(b)-1 {
+			break
+		}
+		if lo > 9 {
+			return "", fmt.Errorf("decimal: byte %d low nibble 0x%X > 9", i, lo)
+		}
+		digits = append(digits, '0'+lo)
+	}
+	// Right-trim to the declared precision in case the wire
+	// happened to carry a leading zero pad (it does for
+	// odd-precision DECIMALs where the high nibble of byte 0 is a
+	// pad zero).
+	if len(digits) > precision {
+		// Strip leading pad nibble(s).
+		digits = digits[len(digits)-precision:]
+	}
+	// Insert the decimal point if scale > 0.
+	var out []byte
+	if negative {
+		out = append(out, '-')
+	}
+	if scale == 0 {
+		out = append(out, digits...)
+	} else if scale >= len(digits) {
+		// "0.00...digits" -- pad zeros after the dot.
+		out = append(out, '0', '.')
+		for i := 0; i < scale-len(digits); i++ {
+			out = append(out, '0')
+		}
+		out = append(out, digits...)
+	} else {
+		intPart := digits[:len(digits)-scale]
+		fracPart := digits[len(digits)-scale:]
+		out = append(out, intPart...)
+		out = append(out, '.')
+		out = append(out, fracPart...)
+	}
+	return string(out), nil
 }
 
 // ibmTimestampToISO converts IBM i's wire timestamp string

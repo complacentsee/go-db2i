@@ -215,6 +215,67 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 10: M4 REAL bind. ---
+	realRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS REAL) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     481, // REAL nullable (480 NN); same code, FieldLength=4 picks REAL
+			FieldLength: 4,
+			Precision:   24,
+			Scale:       0,
+		}},
+		[]any{float32(3.14)},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS REAL) ... [3.14]\n")
+	fmt.Printf("rows:              %d\n", len(realRes.Rows))
+	for i, r := range realRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.5: M4 static DECIMAL(p,s) read. ---
+	// Decimal isn't bound here (M4 binding lands later); we
+	// confirm the row decoder works live by SELECTing a
+	// DECIMAL(31,5) literal.
+	decConn := dialOrDie(dbAddr, "as-database (decimal read)")
+	defer decConn.Close()
+	if _, _, err := hostserver.StartDatabaseService(decConn, user, pwd); err != nil {
+		fail("decimal db open: %v", err)
+	}
+	if _, err := hostserver.SetSQLAttributes(decConn, hostserver.DefaultDBAttributesOptions()); err != nil {
+		fail("decimal set-sql-attributes: %v", err)
+	}
+	if err := hostserver.NDBAddLibraryList(decConn, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: decimal NDB add-library-list: %v\n", err)
+	}
+	dres, err := hostserver.SelectStaticSQL(decConn,
+		"VALUES CAST(-99999999999999999999999999.12345 AS DECIMAL(31,5))",
+		3,
+	)
+	if err != nil {
+		fail("decimal static select: %v", err)
+	}
+	fmt.Printf("\nstatic select: VALUES CAST(... AS DECIMAL(31,5))\n")
+	for i, r := range dres.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11: M4 SMALLINT bind. ---
+	smallintRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS SMALLINT) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     501, // SMALLINT nullable
+			FieldLength: 2,
+			Precision:   5,
+			Scale:       0,
+		}},
+		[]any{int32(-12345)},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS SMALLINT) ... [-12345]\n")
+	fmt.Printf("rows:              %d\n", len(smallintRes.Rows))
+	for i, r := range smallintRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
 	fmt.Fprintln(os.Stderr, "ok")
 }
 
