@@ -110,6 +110,65 @@ func TestExchangeAttributesRequestMatchesFixture(t *testing.T) {
 	}
 }
 
+// TestParseConnectOnlyExchangeAttributesReply decodes the first
+// received frame in connect_only.trace (JTOpen's
+// SignonExchangeAttributeRep) and validates every field.
+func TestParseConnectOnlyExchangeAttributesReply(t *testing.T) {
+	frames := wirelog.Consolidate(loadFixture(t, "connect_only.trace"))
+	var first wirelog.Frame
+	for _, f := range frames {
+		if f.Direction == wirelog.Received {
+			first = f
+			break
+		}
+	}
+	if first.Bytes == nil {
+		t.Fatal("no received frames in connect_only.trace")
+	}
+
+	hdr, payload := decodeFrame(t, first.Bytes)
+	if hdr.ServerID != ServerSignon {
+		t.Errorf("ServerID = %s, want as-signon", hdr.ServerID)
+	}
+	if hdr.ReqRepID != RepExchangeAttributesSignon {
+		t.Errorf("ReqRepID = 0x%04X, want 0x%04X", hdr.ReqRepID, RepExchangeAttributesSignon)
+	}
+	if hdr.TemplateLength != 4 {
+		t.Errorf("TemplateLength = %d, want 4", hdr.TemplateLength)
+	}
+
+	rep, err := ParseExchangeAttributesReply(payload)
+	if err != nil {
+		t.Fatalf("ParseExchangeAttributesReply: %v", err)
+	}
+	if rep.ReturnCode != 0 {
+		t.Errorf("ReturnCode = %d, want 0", rep.ReturnCode)
+	}
+	// Server version 0x00070500 = V7R5M0 (PUB400 is on IBM i 7.5).
+	if rep.ServerVersion != 0x00070500 {
+		t.Errorf("ServerVersion = 0x%08X, want 0x00070500", rep.ServerVersion)
+	}
+	if rep.ServerLevel != 15 {
+		t.Errorf("ServerLevel = %d, want 15", rep.ServerLevel)
+	}
+	if rep.PasswordLevel != 3 {
+		t.Errorf("PasswordLevel = %d, want 3", rep.PasswordLevel)
+	}
+	wantSeed := []byte{0x2C, 0x16, 0x0B, 0xFE, 0x9E, 0x75, 0x85, 0x2C}
+	if !bytes.Equal(rep.ServerSeed, wantSeed) {
+		t.Errorf("ServerSeed = %x, want %x", rep.ServerSeed, wantSeed)
+	}
+	// EBCDIC "341513/QUSER/QZSOSIGN" -- cross-check just by length and
+	// a couple of distinctive bytes; full EBCDIC decode lives in the
+	// future ebcdic package.
+	if len(rep.JobName) != 21 {
+		t.Errorf("JobName len = %d, want 21", len(rep.JobName))
+	}
+	if rep.AAFIndicator {
+		t.Errorf("AAFIndicator = true, want false")
+	}
+}
+
 // ---- helpers ----
 
 func loadFixture(t *testing.T, name string) []wirelog.Frame {

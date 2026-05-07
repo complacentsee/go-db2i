@@ -124,7 +124,48 @@ func tryParseHexLine(text string) ([]byte, bool) {
 	return out, true
 }
 
-// Sent returns only the frames the client wrote.
+// Consolidate merges adjacent frames that share a (Direction, ConnID)
+// pair, returning the byte stream as the caller will see it on the
+// socket rather than the chunking JTOpen happened to log.
+//
+// JTOpen's [com.ibm.as400.access.Trace] emits one "Data stream sent"
+// or "Data stream data received" event per socket I/O. A logical
+// host-server frame is often delivered across two reads (a 20-byte
+// header followed by the rest of the payload), producing two adjacent
+// Received frames in the trace. Merging them lets a replay harness or
+// frame parser treat the trace as a continuous wire stream.
+//
+// Frames are merged only when they are immediate neighbors and agree
+// on direction + connID. A direction change, a connID change, or a
+// gap (any non-Frame text in between is already filtered by the
+// scanner, so "gap" only matters at the call boundary) terminates the
+// current run.
+func Consolidate(frames []Frame) []Frame {
+	if len(frames) == 0 {
+		return nil
+	}
+	out := make([]Frame, 0, len(frames))
+	out = append(out, Frame{
+		Direction: frames[0].Direction,
+		ConnID:    frames[0].ConnID,
+		Bytes:     append([]byte(nil), frames[0].Bytes...),
+	})
+	for _, f := range frames[1:] {
+		last := &out[len(out)-1]
+		if last.Direction == f.Direction && last.ConnID == f.ConnID {
+			last.Bytes = append(last.Bytes, f.Bytes...)
+			continue
+		}
+		out = append(out, Frame{
+			Direction: f.Direction,
+			ConnID:    f.ConnID,
+			Bytes:     append([]byte(nil), f.Bytes...),
+		})
+	}
+	return out
+}
+
+// Sents returns only the frames the client wrote, in order.
 func Sents(frames []Frame) []Frame {
 	out := make([]Frame, 0, len(frames))
 	for _, f := range frames {
@@ -135,7 +176,7 @@ func Sents(frames []Frame) []Frame {
 	return out
 }
 
-// Receiveds returns only the frames the server wrote back.
+// Receiveds returns only the frames the server wrote back, in order.
 func Receiveds(frames []Frame) []Frame {
 	out := make([]Frame, 0, len(frames))
 	for _, f := range frames {

@@ -89,6 +89,36 @@ func TestParseAllFixtures(t *testing.T) {
 	}
 }
 
+// TestConsolidateMergesSplitReceivedFrames verifies that the
+// header-then-payload reply pattern (where JTOpen logs the 20-byte
+// header and the rest of the body as two Receiveds) becomes one
+// logical frame after consolidation.
+func TestConsolidateMergesSplitReceivedFrames(t *testing.T) {
+	frames := loadFrames(t, "connect_only.trace")
+	consolidated := Consolidate(frames)
+	if len(consolidated) >= len(frames) {
+		t.Errorf("expected fewer consolidated frames; got %d (originally %d)",
+			len(consolidated), len(frames))
+	}
+	// First Received in connect_only is JTOpen's
+	// SignonExchangeAttributeRep, total wire size 94 bytes
+	// (length field 0x5E in the first 4 bytes of the frame).
+	for _, f := range consolidated {
+		if f.Direction != Received {
+			continue
+		}
+		if len(f.Bytes) < 4 {
+			t.Errorf("first received frame too short: %d bytes", len(f.Bytes))
+			break
+		}
+		want := uint32(f.Bytes[0])<<24 | uint32(f.Bytes[1])<<16 | uint32(f.Bytes[2])<<8 | uint32(f.Bytes[3])
+		if int(want) != len(f.Bytes) {
+			t.Errorf("first received frame: header length %d != actual %d", want, len(f.Bytes))
+		}
+		break
+	}
+}
+
 func loadFrames(t *testing.T, name string) []Frame {
 	t.Helper()
 	path := filepath.Join(fixturesDir, name)
