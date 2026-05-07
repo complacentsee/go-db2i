@@ -3,7 +3,38 @@ package hostserver
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 )
+
+// ReadDBReplyMatching reads frames from r and returns the first one
+// whose CorrelationID matches wantCorrelation. Any frames with a
+// different correlation are drained silently (they're typically
+// server-side trailers like an empty 40-byte template-only reply
+// PUB400 sends after a successful SET_SQL_ATTRIBUTES with
+// 0x3825/0x3821 client-support flags).
+//
+// Returns the matching frame's Header + payload, or the underlying
+// I/O error if r drops before a matching frame arrives. maxDrain
+// caps how many stale frames we'll skip; if exceeded, the function
+// returns an error so a runaway server doesn't lock the caller in
+// a read loop.
+func ReadDBReplyMatching(r io.Reader, wantCorrelation uint32, maxDrain int) (Header, []byte, error) {
+	if maxDrain <= 0 {
+		maxDrain = 8
+	}
+	for skipped := 0; skipped <= maxDrain; skipped++ {
+		hdr, payload, err := ReadFrame(r)
+		if err != nil {
+			return Header{}, nil, err
+		}
+		if hdr.CorrelationID == wantCorrelation {
+			return hdr, payload, nil
+		}
+		// Stale (out-of-order or trailer) reply -- drop it.
+	}
+	return Header{}, nil, fmt.Errorf("hostserver: no reply with correlation %d after %d frames",
+		wantCorrelation, maxDrain)
+}
 
 // DB-server reply CPs that we surface in M2..M5. The full set is in
 // JTOpen's DBBaseReplyDS#parseInfo (~150 cases); we add entries here

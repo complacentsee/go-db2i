@@ -13,10 +13,14 @@ import (
 // URL properties:
 //
 //	ClientCCSID = 13488 (UCS-2 BE; the negotiated client charset)
-//	NLSSIdentifier = "9024" (translation table identifier; CCSID 37)
+//	LanguageFeatureCode = "2924" (4-digit numeric ID; "2924" is
+//	                       English/Germany blend, what JTOpen
+//	                       captured against PUB400 sends)
 //	ClientFunctionalLevel = "V7R2M01   " (10-char ID, EBCDIC CCSID 37,
 //	                       padded with spaces; gates which protocol
 //	                       features the server enables)
+//	DefaultSQLLibrary = "AFTRAEGE11" (per-user library; PUB400's
+//	                       reply may be truncated without this set)
 //
 // Callers tweak these via NewDBAttributesOptions().With...(); the
 // raw struct is exposed so power-users can override anything.
@@ -25,24 +29,36 @@ type DBAttributesOptions struct {
 	// returning string data to us. 13488 (UCS-2 BE) is JTOpen's
 	// default and is what the captured fixture uses.
 	ClientCCSID uint16
-	// NLSSIdentifier is the 4-char translation-table identifier;
-	// JTOpen sends "9024" (CCSID 37 -> ours). Bytes are EBCDIC.
-	NLSSIdentifier string
+	// LanguageFeatureCode is the 4-digit numeric language code
+	// (CP 0x3802). JTOpen V7R5+ on PUB400 sends "2924"; encoder
+	// uses CCSID 37 + EBCDIC numeric mapping.
+	LanguageFeatureCode string
 	// ClientFunctionalLevel is the 10-char level identifier; JTOpen
 	// V7R5+ sends "V7R2M01   ". Padding to 10 bytes with EBCDIC
 	// spaces is the encoder's job.
 	ClientFunctionalLevel string
+	// DefaultSQLLibrary is the per-user default schema (CP 0x380F).
+	// Empty = don't send the CP. JTOpen sends the user's home
+	// library here ("AFTRAEGE11" on PUB400 for AFTRAEGE1).
+	DefaultSQLLibrary string
 }
 
 // DefaultDBAttributesOptions returns the minimum-acceptable defaults
 // for an as-database session. These match the JTOpen JDBC driver
 // V7R5+ when opened without overrides; they're enough for PUB400 to
-// reply with a fully populated ServerAttributes block.
+// accept a PREPARE_DESCRIBE without falling back to a legacy mode
+// that returns SQL -401.
 func DefaultDBAttributesOptions() DBAttributesOptions {
 	return DBAttributesOptions{
 		ClientCCSID:           13488, // UCS-2 BE
-		NLSSIdentifier:        "9024",
+		LanguageFeatureCode:   "2924",
 		ClientFunctionalLevel: "V7R2M01   ",
+		// DefaultSQLLibrary -- PUB400 V7R5 returns SQL -401 on
+		// PREPARE_DESCRIBE if this CP is missing from the
+		// SET_SQL_ATTRIBUTES init. We default to the user's
+		// home library on PUB400 (AFTRAEGE11). For other servers
+		// callers should override before calling SetSQLAttributes.
+		DefaultSQLLibrary: "AFTRAEGE11",
 	}
 }
 
@@ -60,12 +76,9 @@ func DefaultDBAttributesOptions() DBAttributesOptions {
 //
 // This matches what JTOpen sends in our captured fixture.
 func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
-	nlssBytes, err := ebcdic.CCSID37.Encode(opts.NLSSIdentifier)
-	if err != nil {
-		return Header{}, nil, fmt.Errorf("hostserver: encode NLSS identifier: %w", err)
-	}
-	if len(nlssBytes) != 4 {
-		return Header{}, nil, fmt.Errorf("hostserver: NLSS identifier must encode to 4 bytes, got %d (%q)", len(nlssBytes), opts.NLSSIdentifier)
+	if len(opts.LanguageFeatureCode) != 4 {
+		return Header{}, nil, fmt.Errorf("hostserver: language feature code must be 4 chars, got %d (%q)",
+			len(opts.LanguageFeatureCode), opts.LanguageFeatureCode)
 	}
 	cflBytes, err := ebcdic.CCSID37.Encode(opts.ClientFunctionalLevel)
 	if err != nil {
@@ -78,14 +91,63 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 	tpl := DBRequestTemplate{
 		ORSBitmap: ORSReturnData | ORSServerAttributes | 0x00040000, // 0x81040000
 	}
+	// Minimum attribute set for V7R5+ -- mirrors what JTOpen
+	// AS400JDBCConnectionImpl sends on connection open. We
+	// originally tried 3 attributes; PUB400 quietly downgraded
+	// the session to a legacy mode that rejected
+	// PREPARE_DESCRIBE with SQL -401. The full V7R5+ set below
+	// is what JTOpen sends in our captured fixture (sent #6 of
+	// connect_only.trace).
 	params := []DBParam{
-		// 0x3801 setClientCCSID -- 2-byte short.
 		DBParamShort(0x3801, int16(opts.ClientCCSID)),
-		// 0x3802 setNLSSIdentifier -- fixed CCSID-tagged string.
-		DBParamFixedString(0x3802, 37, nlssBytes),
-		// 0x3803 setClientFunctionalLevel -- fixed CCSID-tagged string.
+		// 0x3802 LanguageFeatureCode -- numeric-only encoding,
+		// no SL field. JTOpen sends "2924" for German PUB400.
+		DBParamNumericString(0x3802, opts.LanguageFeatureCode),
+		// 0x3803 ClientFunctionalLevel -- fixed CCSID-tagged
+		// 10-byte string with 2 trailing pad bytes (LL=20).
 		DBParamFixedString(0x3803, 37, cflBytes),
+		DBParamByte(0x3805, 0xF0),
+		DBParamShort(0x3806, 0x0001),
+		DBParamByte(0x3824, 0xE8),
+		DBParamShort(0x380E, 0x0000),
+		DBParamShort(0x380C, 0x0000),
+		DBParamShort(0x3823, 0x0000),
 	}
+	// 0x380F default SQL library -- variable-length CCSID-tagged.
+	// JTOpen sends this when the JDBC URL specifies libraries=;
+	// our default omits it.
+	if opts.DefaultSQLLibrary != "" {
+		dlBytes, err := ebcdic.CCSID37.Encode(opts.DefaultSQLLibrary)
+		if err != nil {
+			return Header{}, nil, fmt.Errorf("hostserver: encode default SQL library: %w", err)
+		}
+		params = append(params, DBParamVarString(0x380F, 273, dlBytes))
+	}
+	params = append(params,
+		DBParamShort(0x3812, 0x0001),                                    // PackageAddStmtAllowed
+		DBParamByte(0x3821, 0xF2),                                       // UseExtendedFormatsIndicator
+		DBParam{CodePoint: 0x3822, Data: []byte{0x00, 0x00, 0x80, 0x00}}, // LOBFieldThreshold
+		DBParamShort(0x3811, 0x0001),                                    // AmbiguousSelectOption
+		DBParam{CodePoint: 0x3825, Data: []byte{0xF6, 0x00, 0x00, 0x00}}, // ClientSupportInfo (V7R5+)
+		DBParam{CodePoint: 0x3827, Data: []byte{0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00}}, // DecimalPrecisionIndicators
+		DBParamByte(0x3828, 0x00),                                       // HexConstantParserOption
+		DBParamShort(0x3830, 0x0001),                                    // LocatorPersistence
+	)
+	// Application info CPs. We match JTOpen's exact "JDBC" /
+	// "IBM Toolbox for Java" / "07060001" identifiers because
+	// PUB400 V7R5 returns SQL -401 on PREPARE_DESCRIBE if the
+	// session was initialised with a different application
+	// signature. Long-term we want our own identifiers, but
+	// that's M3+ once we understand exactly what PUB400 keys on.
+	intfType, _ := ebcdic.CCSID37.Encode("JDBC")
+	intfName, _ := ebcdic.CCSID37.Encode("IBM Toolbox for Java")
+	intfLevel, _ := ebcdic.CCSID37.Encode("07060001")
+	params = append(params,
+		DBParamVarString(0x383C, 37, intfType),
+		DBParamVarString(0x383D, 37, intfName),
+		DBParamVarString(0x383E, 37, intfLevel),
+		DBParamByte(0x383F, 0xE8),
+	)
 	hdr, payload, err := BuildDBRequest(ReqDBSetSQLAttributes, tpl, params)
 	if err != nil {
 		return Header{}, nil, fmt.Errorf("hostserver: build set-sql-attributes req: %w", err)

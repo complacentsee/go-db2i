@@ -105,6 +105,43 @@ func main() {
 	dbJob, _ := ebcdic.CCSID37.Decode(attrs.ServerJobIdentifier)
 	fmt.Printf("sql server job:    %s\n", strings.TrimSpace(dbJob))
 
+	// --- Step 4: NDB ADD_LIBRARY_LIST. ---
+	// JTOpen sends this as a session-init handshake between
+	// SET_SQL_ATTRIBUTES and the first PREPARE; we mirror the
+	// flow so the SQL service has fully-initialised session
+	// state before any PREPARE_DESCRIBE.
+	if err := hostserver.NDBAddLibraryList(dbConn, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: NDB ADD_LIBRARY_LIST failed: %v\n", err)
+	}
+
+	// --- Step 5: M2 static SELECT. ---
+	// NOTE (M2b live blocker, 2026-05-07): the SET_SQL_ATTRIBUTES
+	// + CREATE_RPB + PREPARE_DESCRIBE sequence is byte-identical
+	// to what JTOpen sends in our captured fixture, but PUB400
+	// V7R5 currently returns SQL -401 ("operands not compatible")
+	// on PREPARE_DESCRIBE for any statement -- including
+	// "VALUES 1" with no table at all. The offline parser is
+	// validated against the fixture; the live cause is some
+	// session state difference we haven't pinned down yet.
+	// Print rather than fail() so the M2a + M1 pieces still
+	// demo cleanly.
+	sql := envOr("PUB400_SQL", "SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1")
+	res, err := hostserver.SelectStaticSQL(dbConn, sql, 3)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "M2 static select (currently expected to fail live, parser passes offline): %v\n", err)
+	} else {
+		fmt.Printf("\nstatic select: %s\n", sql)
+		fmt.Printf("columns:           %d\n", len(res.Columns))
+		for i, c := range res.Columns {
+			fmt.Printf("  col %d: name=%q sql_type=%d length=%d ccsid=%d\n",
+				i, c.Name, c.SQLType, c.Length, c.CCSID)
+		}
+		fmt.Printf("rows:              %d\n", len(res.Rows))
+		for i, r := range res.Rows {
+			fmt.Printf("  row %d: %v\n", i, r)
+		}
+	}
+
 	fmt.Fprintln(os.Stderr, "ok")
 }
 

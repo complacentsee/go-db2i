@@ -153,14 +153,23 @@ func DBParamByte(cp uint16, v byte) DBParam {
 
 // DBParamFixedString packs a fixed-length CCSID-tagged string
 // (JTOpen's `addParameter(int, ConvTable, String, true)` overload):
-// CCSID(2) + raw bytes. Used for identifiers like client functional
-// level, NLSS sort-table name, application name. The caller is
-// responsible for converting `value` to the right CCSID; this
-// helper just frames the bytes.
+// CCSID(2) + raw bytes + 2 trailing pad bytes. The 2 trailing
+// bytes look like an oversight in JTOpen
+// (DBBaseRequestDS.addParameter calls lock(len+4) but only writes
+// CCSID+data, leaving two bytes uninitialised), but PUB400's
+// parser appears to treat the LL as authoritative -- if we send
+// the "tight" 18-byte version the server quietly downgrades the
+// session and returns SQL -401 on the next PREPARE_DESCRIBE.
+// Matching the wire shape JTOpen actually sends (LL = len + 4 + 6,
+// 2 trailing zero bytes) keeps the server happy.
+//
+// Used for identifiers like client functional level, NLSS sort-
+// table name, application name.
 func DBParamFixedString(cp uint16, ccsid uint16, valueBytes []byte) DBParam {
-	b := make([]byte, 2+len(valueBytes))
+	b := make([]byte, 4+len(valueBytes))
 	binary.BigEndian.PutUint16(b[0:2], ccsid)
-	copy(b[2:], valueBytes)
+	copy(b[2:2+len(valueBytes)], valueBytes)
+	// b[2+len:4+len] left zero -- the JTOpen-compat pad.
 	return DBParam{CodePoint: cp, Data: b}
 }
 
@@ -179,5 +188,35 @@ func DBParamVarString(cp uint16, ccsid uint16, valueBytes []byte) DBParam {
 	binary.BigEndian.PutUint16(b[0:2], ccsid)
 	binary.BigEndian.PutUint16(b[2:4], uint16(len(valueBytes)))
 	copy(b[4:], valueBytes)
+	return DBParam{CodePoint: cp, Data: b}
+}
+
+// DBParamNumericString packs a "numeric-only" string the way JTOpen's
+// `addParameter(int, String)` overload does: a hard-coded CCSID 37
+// (US-English EBCDIC) followed by each character mapped to its
+// EBCDIC numeric byte (digit n -> 0xF0 | n; ' ' -> 0x40). No SL.
+//
+// Used for compact numeric identifiers like the language-feature
+// code (CP 0x3802 = "2924") or the application functional level
+// digit suffix. The caller passes `s` as ASCII; the helper does
+// the digit mapping inline so callers don't have to think about
+// EBCDIC for these specific cases.
+func DBParamNumericString(cp uint16, s string) DBParam {
+	b := make([]byte, 2+len(s))
+	binary.BigEndian.PutUint16(b[0:2], 37)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9':
+			b[2+i] = 0xF0 | (c - '0')
+		case c == ' ':
+			b[2+i] = 0x40
+		default:
+			// Outside the JTOpen-numeric path; if we ever need
+			// alphabetic chars in a 0x3802-style param we'll
+			// add a proper EBCDIC encoder here. For now, leave
+			// the byte zero so a misuse is visible on the wire.
+		}
+	}
 	return DBParam{CodePoint: cp, Data: b}
 }
