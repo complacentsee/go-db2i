@@ -197,6 +197,35 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return ibmTimestampToISO(s), int(col.Length), nil
 
+	case SQLTypeDate, SQLTypeDateNN:
+		// PUB400 default date format is YMD ("YY-MM-DD" = 8 chars);
+		// JDBC always returns ISO ("YYYY-MM-DD"). Translate
+		// inline using the 1940 century boundary JTOpen uses
+		// (YY 00..39 -> 20YY, 40..99 -> 19YY). When we wire up
+		// SET_SQL_ATTRIBUTES date-format negotiation in M5, this
+		// fall-through will land iff the server still picks YMD.
+		if len(b) < int(col.Length) {
+			return nil, 0, fmt.Errorf("date wants %d bytes, have %d", col.Length, len(b))
+		}
+		s, err := ebcdic.CCSID37.Decode(b[:col.Length])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode date ebcdic: %w", err)
+		}
+		return ymdToISODate(s), int(col.Length), nil
+
+	case SQLTypeTime, SQLTypeTimeNN:
+		// ISO time format on the wire: "HH:MM:SS" (8 EBCDIC chars).
+		// IBM-format ("HH.MM.SS") shows up if the connection asked
+		// for it via SET_SQL_ATTRIBUTES; not currently exposed.
+		if len(b) < int(col.Length) {
+			return nil, 0, fmt.Errorf("time wants %d bytes, have %d", col.Length, len(b))
+		}
+		s, err := ebcdic.CCSID37.Decode(b[:col.Length])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode time ebcdic: %w", err)
+		}
+		return s, int(col.Length), nil
+
 	case SQLTypeChar, SQLTypeCharNonBlank:
 		// Fixed-length CHAR. EBCDIC.
 		if len(b) < int(col.Length) {
@@ -365,6 +394,25 @@ func decodePackedBCD(b []byte, precision, scale int) (string, error) {
 		out = append(out, fracPart...)
 	}
 	return string(out), nil
+}
+
+// ymdToISODate widens "YY-MM-DD" (8 chars) to "YYYY-MM-DD" using
+// the 1940 century boundary JT400 chooses by default. If s already
+// looks like ISO ("YYYY-MM-DD"), return it unchanged. Other formats
+// (USA, EUR, JIS) round-trip unchanged today; M5 wires up the
+// per-format converters once the server attribute is honoured.
+func ymdToISODate(s string) string {
+	if len(s) == 10 && s[4] == '-' && s[7] == '-' {
+		return s
+	}
+	if len(s) == 8 && s[2] == '-' && s[5] == '-' {
+		century := "20"
+		if s[0] >= '4' { // YY >= 40 -> 19YY
+			century = "19"
+		}
+		return century + s
+	}
+	return s
 }
 
 // ibmTimestampToISO converts IBM i's wire timestamp string

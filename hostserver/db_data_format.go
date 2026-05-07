@@ -17,11 +17,15 @@ const (
 	SQLTypeInteger         uint16 = 496
 	SQLTypeSmallInt        uint16 = 500
 	SQLTypeBigInt          uint16 = 492
-	SQLTypeTimestamp       uint16 = 392
-	SQLTypeTimestampNN     uint16 = 388
-	SQLTypeDate            uint16 = 384
-	SQLTypeDateNN          uint16 = 388 // alias; some servers use this
-	SQLTypeTime            uint16 = 388
+	// JTOpen pairs each SQL type with two adjacent codes: even = NN
+	// (not nullable), odd = nullable. The "NN" suffix on legacy
+	// constants below is the not-nullable form.
+	SQLTypeDateNN      uint16 = 384
+	SQLTypeDate        uint16 = 385
+	SQLTypeTimeNN      uint16 = 388
+	SQLTypeTime        uint16 = 389
+	SQLTypeTimestampNN uint16 = 392
+	SQLTypeTimestamp   uint16 = 393
 	SQLTypeFloat4          uint16 = 480
 	SQLTypeFloat8          uint16 = 480 // distinguished by length
 	SQLTypeDecimal         uint16 = 484

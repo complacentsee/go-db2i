@@ -103,8 +103,8 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 	if got, want := len(res.Columns), 3; got != want {
 		t.Fatalf("Columns count = %d, want %d", got, want)
 	}
-	if res.Columns[0].SQLType != SQLTypeTimestamp {
-		t.Errorf("col 0 SQL type = %d, want %d (TIMESTAMP)", res.Columns[0].SQLType, SQLTypeTimestamp)
+	if res.Columns[0].SQLType != SQLTypeTimestampNN {
+		t.Errorf("col 0 SQL type = %d, want %d (TIMESTAMP NN)", res.Columns[0].SQLType, SQLTypeTimestampNN)
 	}
 	if res.Columns[1].SQLType != SQLTypeVarChar {
 		t.Errorf("col 1 SQL type = %d, want %d (VARCHAR)", res.Columns[1].SQLType, SQLTypeVarChar)
