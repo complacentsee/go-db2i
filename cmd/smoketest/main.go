@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
@@ -84,6 +85,25 @@ func main() {
 	fmt.Printf("db RC:           %d\n", ss.ReturnCode)
 	dbJobName, _ := ebcdic.CCSID37.Decode(ss.JobName)
 	fmt.Printf("db job:          %s\n", dbJobName)
+
+	// --- Step 3: SET_SQL_ATTRIBUTES -- exchange capabilities with
+	// the SQL service, learn the server's CCSID + default schema
+	// + functional level. This is the entry to M2 (static SELECT).
+	attrs, err := hostserver.SetSQLAttributes(dbConn, hostserver.DefaultDBAttributesOptions())
+	if err != nil {
+		fail("set-sql-attributes: %v", err)
+	}
+	fmt.Printf("sql server CCSID:  %d\n", attrs.ServerCCSID)
+	level, _ := ebcdic.CCSID37.Decode(attrs.ServerFunctionalLevel)
+	fmt.Printf("sql functional lvl:%s (VRM=0x%08X)\n", level, attrs.VRM())
+	rdb, _ := ebcdic.CCSID37.Decode(attrs.RelationalDBName)
+	fmt.Printf("sql RDB name:      %s\n", strings.TrimSpace(rdb))
+	defLib, _ := ebcdic.CCSID37.Decode(attrs.DefaultSQLLibraryName)
+	fmt.Printf("sql default lib:   %s\n", strings.TrimSpace(defLib))
+	defSchema, _ := ebcdic.CCSID37.Decode(attrs.DefaultSQLSchemaName)
+	fmt.Printf("sql default schema:%s\n", defSchema)
+	dbJob, _ := ebcdic.CCSID37.Decode(attrs.ServerJobIdentifier)
+	fmt.Printf("sql server job:    %s\n", strings.TrimSpace(dbJob))
 
 	fmt.Fprintln(os.Stderr, "ok")
 }
