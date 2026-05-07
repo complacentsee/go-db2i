@@ -205,9 +205,25 @@ final class Cases {
                         + "AMT DECIMAL(11,2) NOT NULL"
                         + ")");
                 // Enable journaling so commitment-control cases work.
-                // CRTJRNRCV / CRTJRN may have already happened on a prior
-                // run -- "already exists" is fine, anything else gets
-                // surfaced to stderr so the user can see what's going on.
+                //
+                // We aggressively recreate from scratch every case run.
+                // Reason: across runs, GOJTRCV1 stays attached to the
+                // existing GOJTJRN, so a plain "CRTJRNRCV; CRTJRN" path
+                // hits CPF7010 ("already exists") then CPF7015 ("error
+                // on JRNRCV specs"), STRJRNPF then fails with CPF0006
+                // because the journal isn't ready -- and the tx_* cases
+                // can't exercise commitment control. Tearing down +
+                // rebuilding gives a clean slate every time, at the
+                // cost of a few extra seconds per WithTable case.
+                //
+                // Failures from any single command are logged to stderr
+                // (-> fixtures/run.log) but never abort the run. CPF7010
+                // ("doesn't exist") on the DLT* steps is normal on the
+                // first run and will appear on every fresh PUB400 account.
+                runOrLog(st, "DLTJRN", "CALL QSYS2.QCMDEXC('DLTJRN JRN("
+                        + schema + "/" + JRN + ")')");
+                runOrLog(st, "DLTJRNRCV", "CALL QSYS2.QCMDEXC('DLTJRNRCV JRNRCV("
+                        + schema + "/" + JRNRCV + ")')");
                 runOrLog(st, "CRTJRNRCV", "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
                         + schema + "/" + JRNRCV + ")')");
                 runOrLog(st, "CRTJRN", "CALL QSYS2.QCMDEXC('CRTJRN JRN("
