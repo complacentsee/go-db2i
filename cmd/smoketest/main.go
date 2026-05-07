@@ -1,12 +1,16 @@
 // Command smoketest exercises whatever the current goJTOpen milestone
-// has wired up against a real IBM i. M1: connect to the as-signon
-// host server, do the exchange-attributes + signon-info handshake,
-// print server VRM / CCSID / sign-on dates, disconnect.
+// has wired up against a real IBM i. M1 (signon side): connect to
+// the as-signon host server (port 8476), do the exchange-attributes
+// + signon-info handshake, print server VRM / CCSID / sign-on dates.
+// M1 (database side): then open a second connection to the
+// as-database host server (port 8471), do the xchg-rand-seed +
+// start-server handshake, print the database prestart-job name.
 //
 // Configuration (env vars):
 //
 //	PUB400_HOST  (default: pub400.com)
 //	PUB400_PORT  (default: 8476 -- the as-signon port)
+//	PUB400_DBPORT (default: 8471 -- the as-database port)
 //	PUB400_USER  (required)
 //	PUB400_PWD   (required)
 package main
@@ -24,7 +28,8 @@ import (
 
 func main() {
 	host := envOr("PUB400_HOST", "pub400.com")
-	port := envOr("PUB400_PORT", "8476")
+	signonPort := envOr("PUB400_PORT", "8476")
+	dbPort := envOr("PUB400_DBPORT", "8471")
 	user, ok := requireEnv("PUB400_USER")
 	if !ok {
 		os.Exit(2)
@@ -34,21 +39,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	addr := net.JoinHostPort(host, port)
-	fmt.Fprintf(os.Stderr, "goJTOpen smoketest -> %s as %s\n", addr, user)
+	signonAddr := net.JoinHostPort(host, signonPort)
+	fmt.Fprintf(os.Stderr, "goJTOpen smoketest -> %s as %s\n", signonAddr, user)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	d := net.Dialer{Timeout: 30 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		fail("dial: %v", err)
-	}
+	// --- Step 1: as-signon. ---
+	conn := dialOrDie(signonAddr, "as-signon")
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		fail("set deadline: %v", err)
-	}
 
 	xa, si, err := hostserver.SignOn(conn, user, pwd)
 	if err != nil {
@@ -73,7 +69,42 @@ func main() {
 		si.ExpirationDate.Format("2006-01-02"),
 		si.PWDExpirationWarningDays)
 
+	// --- Step 2: as-database. ---
+	dbAddr := net.JoinHostPort(host, dbPort)
+	fmt.Fprintf(os.Stderr, "goJTOpen smoketest -> %s (as-database)\n", dbAddr)
+	dbConn := dialOrDie(dbAddr, "as-database")
+	defer dbConn.Close()
+
+	xs, ss, err := hostserver.StartDatabaseService(dbConn, user, pwd)
+	if err != nil {
+		fail("start db service: %v", err)
+	}
+
+	fmt.Printf("db pwd level:    %d\n", xs.PasswordLevel)
+	fmt.Printf("db RC:           %d\n", ss.ReturnCode)
+	dbJobName, _ := ebcdic.CCSID37.Decode(ss.JobName)
+	fmt.Printf("db job:          %s\n", dbJobName)
+
 	fmt.Fprintln(os.Stderr, "ok")
+}
+
+// dialOrDie connects to addr and applies a 30s deadline; on any
+// error it calls fail(). label appears in error messages for clarity
+// when both signon + database connections are in flight.
+func dialOrDie(addr, label string) net.Conn {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	d := net.Dialer{Timeout: 30 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		fail("dial %s (%s): %v", label, addr, err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		conn.Close()
+		fail("set deadline (%s): %v", label, err)
+	}
+	return conn
 }
 
 func envOr(key, def string) string {
