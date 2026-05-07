@@ -1,194 +1,61 @@
 Toolbox for Java - JDBC 4.2 Open Source Software, JTOpen 21.0.4 codebase 5770-SS1 V7R6M0.00 built=2025-05-29 12:35:53 (GMT)
 java.home=/usr/lib/jvm/java-21-openjdk-arm64 java.vm.vendor=Ubuntu java.vm.info=mixed mode, sharing java.runtime.version=21.0.10+7-Ubuntu-122.04 java.fullversion=null java.vm.version=21.0.10+7-Ubuntu-122.04 java.version=21.0.10 os.name=Linux os.version=5.15.185-tegra
-Thu May 7 14:14:56:235 UTC 2026  Getting system property: 'com.ibm.as400.access.AS400.proxyServer'
-Thu May 7 14:14:56:235 UTC 2026  Value found in system properties:  'null'
-Thu May 7 14:14:56:235 UTC 2026  Value found in jt400.properties file: 'null'
-Thu May 7 14:14:56:235 UTC 2026  Value not found.
-Thu May 7 14:14:56:235 UTC 2026  Getting system property: 'com.ibm.as400.access.JDBC.secureCurrentUser'
-Thu May 7 14:14:56:236 UTC 2026  Value found in system properties:  'null'
-Thu May 7 14:14:56:236 UTC 2026  Value found in jt400.properties file: 'null'
-Thu May 7 14:14:56:236 UTC 2026  Value not found.
-Thu May 7 14:14:56:236 UTC 2026  Getting NLV.
-Thu May 7 14:14:56:236 UTC 2026  NLV Locale: en_US
-Thu May 7 14:14:56:236 UTC 2026  NLV for Locale: en, NLV: 2924
-Thu May 7 14:14:56:236 UTC 2026  Constructing AS400 object with password[], system name: 'pub400.com' user ID: 'AFTRAEGE1'
-Thu May 7 14:14:56:236 UTC 2026  Getting system property: 'com.ibm.as400.access.AS400.proxyServer'
-Thu May 7 14:14:56:236 UTC 2026  Value found in system properties:  'null'
-Thu May 7 14:14:56:236 UTC 2026  Value found in jt400.properties file: 'null'
-Thu May 7 14:14:56:236 UTC 2026  Value not found.
-Thu May 7 14:14:56:236 UTC 2026  Setting additional authentication factor. Length: 0
-Thu May 7 14:14:56:236 UTC 2026  Setting thread used:  false
-Thu May 7 14:14:56:236 UTC 2026  Checking if properties are frozen:  false
-Thu May 7 14:14:56:236 UTC 2026  Getting socket properties.
-Thu May 7 14:14:56:236 UTC 2026  Setting socket login timeout:  0
-Thu May 7 14:14:56:236 UTC 2026  Setting socket properties: com.ibm.as400.access.SocketProperties@63
-Thu May 7 14:14:56:236 UTC 2026  Connecting service:  4
-Thu May 7 14:14:56:236 UTC 2026  Not using native optimizations. Reason follows:
-Thu May 7 14:14:56:236 UTC 2026    onAS400:  false
-Thu May 7 14:14:56:236 UTC 2026    systemNameLocal:  false
-Thu May 7 14:14:56:241 UTC 2026    nativeVersion:  0
-Thu May 7 14:14:56:241 UTC 2026  Setting up AS400 implementation object:
-Thu May 7 14:14:56:241 UTC 2026    Enable SSL connections: null
-Thu May 7 14:14:56:242 UTC 2026    Native optimizations allowed:  false
-Thu May 7 14:14:56:242 UTC 2026    Use threaded communications:  false
-Thu May 7 14:14:56:242 UTC 2026    User specified CCSID:  0
-Thu May 7 14:14:56:242 UTC 2026    NLV:  2924
-Thu May 7 14:14:56:242 UTC 2026    Socket properties: com.ibm.as400.access.SocketProperties@63
-Thu May 7 14:14:56:242 UTC 2026    DDM RDB:  (null)
-Thu May 7 14:14:56:242 UTC 2026    Must use net sockets:  false
-Thu May 7 14:14:56:242 UTC 2026    Must use supplied profile:  false
-Thu May 7 14:14:56:242 UTC 2026    Must add language library:  false
-Thu May 7 14:14:56:242 UTC 2026  User ID: 'AFTRAEGE1'
-Thu May 7 14:14:56:242 UTC 2026  Validate security...
-Thu May 7 14:14:56:242 UTC 2026  Signing-on without prompting...
-Thu May 7 14:14:56:242 UTC 2026  Attempting to connect to as-signon server.
-Thu May 7 14:14:56:242 UTC 2026  Opening socket for service 7 to system...pub400.com port:8476
-Thu May 7 14:14:56:242 UTC 2026  Getting socket login timeout is set:  true
-Thu May 7 14:14:56:242 UTC 2026  Getting so socket login timeout:  0
-Thu May 7 14:14:56:242 UTC 2026  Connect to socket: system 'pub400.com', port 8476, login timeout 0 ms.
-Thu May 7 14:14:56:360 UTC 2026  Setting socket options...
-Thu May 7 14:14:56:360 UTC 2026  Socket properties:
-Thu May 7 14:14:56:361 UTC 2026      Remote address: pub400.com/185.113.5.134
-Thu May 7 14:14:56:361 UTC 2026      Remote port:  8476
-Thu May 7 14:14:56:361 UTC 2026      Local address: /10.0.0.128
-Thu May 7 14:14:56:361 UTC 2026      Local port:  45938
-Thu May 7 14:14:56:361 UTC 2026      Keep alive:  false
-Thu May 7 14:14:56:361 UTC 2026      Receive buffer size:  65536
-Thu May 7 14:14:56:361 UTC 2026      Send buffer size:  43520
-Thu May 7 14:14:56:361 UTC 2026      So linger:  -1
-Thu May 7 14:14:56:361 UTC 2026      So timeout:  0
-Thu May 7 14:14:56:361 UTC 2026      TCP no delay:  false
-Thu May 7 14:14:56:361 UTC 2026  Starting an inet socket to as-signon
-Thu May 7 14:14:56:362 UTC 2026  Sending exchange client/server attributes request...
-Thu May 7 14:14:56:362 UTC 2026  Data stream sent (connID=676968818) ...
+Thu May 7 14:33:01:844 UTC 2026  Data stream sent (connID=885099613) ...
 00 00 00 34 00 00 E0 09 00 00 00 00 00 00 00 00 
 00 00 70 03 00 00 00 0A 11 01 00 00 00 01 00 00 
 00 08 11 02 00 0A 00 00 00 0E 11 03 00 00 01 9E 
-02 CA A8 6A 
-Thu May 7 14:14:56:362 UTC 2026  Receiving exchange client/server attributes reply...
-Thu May 7 14:14:56:479 UTC 2026  Data stream data received (connID=676968818) ...
+02 DB 38 94 
+Thu May 7 14:33:01:963 UTC 2026  Data stream data received (connID=885099613) ...
 00 00 00 5E 00 00 E0 09 00 00 00 00 00 00 00 00 
 00 04 F0 03 
-Thu May 7 14:14:56:479 UTC 2026  Data stream data received (connID=676968818) ...
+Thu May 7 14:33:01:964 UTC 2026  Data stream data received (connID=885099613) ...
 00 00 00 00 00 00 00 0A 11 01 00 07 05 00 00 00 
-00 08 11 02 00 0F 00 00 00 0E 11 03 7F 3B 16 DA 
-C7 9D 26 80 00 00 00 07 11 19 03 00 00 00 1F 11 
-1F 00 00 00 00 F3 F2 F9 F6 F4 F9 61 D8 E4 E2 C5 
+00 08 11 02 00 0F 00 00 00 0E 11 03 FB 6B A2 98 
+73 D6 EC 38 00 00 00 07 11 19 03 00 00 00 1F 11 
+1F 00 00 00 00 F3 F3 F2 F2 F1 F2 61 D8 E4 E2 C5 
 D9 61 D8 E9 E2 D6 E2 C9 C7 D5 
-Thu May 7 14:14:56:480 UTC 2026    Server vrm:
-00 07 05 00 
-Thu May 7 14:14:56:480 UTC 2026    Server level:   15
-Thu May 7 14:14:56:480 UTC 2026  Socket opened successfully - as-signon server job is 329649/QUSER/QZSOSIGN
-Thu May 7 14:14:56:480 UTC 2026  Retrieving encrypted password.
-Thu May 7 14:14:56:480 UTC 2026  send and receive(): ...
-Thu May 7 14:14:56:480 UTC 2026  send(): send request to job 329649/QUSER/QZSOSIGN
-Thu May 7 14:14:56:480 UTC 2026  Sending retrieve signon information request...
-Thu May 7 14:14:56:480 UTC 2026  Data stream sent (connID=676968818) ...
+Thu May 7 14:33:01:964 UTC 2026  Data stream sent (connID=885099613) ...
 00 00 00 50 00 00 E0 09 00 00 00 00 00 00 00 01 
 00 01 70 04 03 00 00 00 0A 11 13 00 00 04 B0 00 
-00 00 1A 11 05 F4 3E 05 70 37 CB B2 F7 94 14 68 
-F6 4D 8C 7C D1 D1 E1 A0 FF 00 00 00 10 11 04 C1 
+00 00 1A 11 05 EF 6E 8C E7 47 8B 63 2E 61 12 64 
+31 1C 9A E1 6D 0D AD DD 0D 00 00 00 10 11 04 C1 
 C6 E3 D9 C1 C5 C7 C5 F1 40 00 00 00 07 11 28 01 
-Thu May 7 14:14:56:481 UTC 2026  AS400Server receive from job 329649/QUSER/QZSOSIGN
-Thu May 7 14:14:56:481 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:56:599 UTC 2026  Data stream data received (connID=676968818) ...
+Thu May 7 14:33:02:084 UTC 2026  Data stream data received (connID=885099613) ...
 00 00 00 8F 00 00 E0 09 00 00 00 00 00 00 00 01 
 00 04 F0 04 
-Thu May 7 14:14:56:600 UTC 2026  Data stream data received (connID=676968818) ...
-00 00 00 00 00 00 00 0E 11 06 07 EA 05 07 10 0E 
-38 00 00 00 00 0E 11 07 07 EA 05 07 10 0E 37 00 
+Thu May 7 14:33:02:084 UTC 2026  Data stream data received (connID=885099613) ...
+00 00 00 00 00 00 00 0E 11 06 07 EA 05 07 10 21 
+02 00 00 00 00 0E 11 07 07 EA 05 07 10 21 01 00 
 00 00 00 0E 11 08 07 EA 0B 02 00 00 00 00 00 00 
 00 08 11 09 00 00 00 00 00 08 11 0A 00 05 00 00 
 00 07 11 0E F1 00 00 00 0A 11 2C 00 00 00 07 00 
-00 00 0A 11 14 00 00 01 11 00 00 00 1A 11 1A 70 
-DF 6C FB 15 21 3D 29 57 2F E5 41 6A F9 6F 5D 8D 
-D0 6B 1A 00 00 00 08 11 2A 00 00 
-Thu May 7 14:14:56:600 UTC 2026  run(): reply received...com.ibm.as400.access.SignonInfoRep@f004
-Thu May 7 14:14:56:600 UTC 2026  adding reply...  1
-Thu May 7 14:14:56:600 UTC 2026  received(): valid reply received...  1
-Thu May 7 14:14:56:600 UTC 2026  Read security validation reply...
-Thu May 7 14:14:56:600 UTC 2026  Security validated successfully.
-Thu May 7 14:14:56:600 UTC 2026  Sign-on completed.
-Thu May 7 14:14:56:600 UTC 2026  Checking if within the password expiration warning days for the system. 
-Thu May 7 14:14:56:600 UTC 2026  Getting the password expiration warning days:  7
-Thu May 7 14:14:56:600 UTC 2026  In password expiration warning days: false
-Thu May 7 14:14:56:600 UTC 2026  Checking for service connection implementation:  7
-Thu May 7 14:14:56:600 UTC 2026  Disconnecting temporary connection for validating signon.
-Thu May 7 14:14:56:600 UTC 2026  Decrement: reference count for com.ibm.as400.access.AS400NoThreadServer@91519a8 is 0
-Thu May 7 14:14:56:600 UTC 2026  Sending end job request...
-Thu May 7 14:14:56:600 UTC 2026  Data stream sent (connID=676968818) ...
+00 00 0A 11 14 00 00 01 11 00 00 00 1A 11 1A 20 
+09 AF 40 5E B3 8B 35 1B 26 0E 57 4A 4F FC 85 03 
+71 C3 82 00 00 00 08 11 2A 00 00 
+Thu May 7 14:33:02:085 UTC 2026  Data stream sent (connID=885099613) ...
 00 00 00 14 00 00 E0 09 00 00 00 00 00 00 00 00 
 00 00 70 06 
-Thu May 7 14:14:56:601 UTC 2026  Service disconnected implementation:  as-signon
-Thu May 7 14:14:56:601 UTC 2026  Handling request for host server job connection: as-database
-Thu May 7 14:14:56:601 UTC 2026  The service as-hostcnn is not available to use or service is DDM
-Thu May 7 14:14:56:601 UTC 2026  Opening socket for service 4 to system...pub400.com port:8471
-Thu May 7 14:14:56:601 UTC 2026  Getting socket login timeout is set:  true
-Thu May 7 14:14:56:601 UTC 2026  Getting so socket login timeout:  0
-Thu May 7 14:14:56:601 UTC 2026  Connect to socket: system 'pub400.com', port 8471, login timeout 0 ms.
-Thu May 7 14:14:56:718 UTC 2026  Setting socket options...
-Thu May 7 14:14:56:718 UTC 2026  Socket properties:
-Thu May 7 14:14:56:718 UTC 2026      Remote address: pub400.com/185.113.5.134
-Thu May 7 14:14:56:718 UTC 2026      Remote port:  8471
-Thu May 7 14:14:56:718 UTC 2026      Local address: /10.0.0.128
-Thu May 7 14:14:56:718 UTC 2026      Local port:  45194
-Thu May 7 14:14:56:718 UTC 2026      Keep alive:  false
-Thu May 7 14:14:56:718 UTC 2026      Receive buffer size:  65536
-Thu May 7 14:14:56:718 UTC 2026      Send buffer size:  43520
-Thu May 7 14:14:56:718 UTC 2026      So linger:  -1
-Thu May 7 14:14:56:718 UTC 2026      So timeout:  0
-Thu May 7 14:14:56:718 UTC 2026      TCP no delay:  false
-Thu May 7 14:14:56:718 UTC 2026  Starting an inet socket to as-database
-Thu May 7 14:14:56:719 UTC 2026  Sending exchange random seeds request...
-Thu May 7 14:14:56:719 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:202 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 1C 03 00 E0 04 00 00 00 00 00 00 00 00 
-00 08 70 01 00 00 01 9E 02 CA A9 CF 
-Thu May 7 14:14:56:719 UTC 2026  Receiving exchange random seeds reply...
-Thu May 7 14:14:56:836 UTC 2026  Data stream data received (connID=22917684) ...
+00 08 70 01 00 00 01 9E 02 DB 39 FA 
+Thu May 7 14:33:02:320 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 20 03 03 E0 04 00 00 00 00 00 00 00 00 
 00 0C F0 01 
-Thu May 7 14:14:56:836 UTC 2026  Data stream data received (connID=22917684) ...
-00 00 00 00 EA C7 D6 B5 61 8F 20 7F 
-Thu May 7 14:14:56:836 UTC 2026  Exchange of random seeds successful.
-Thu May 7 14:14:56:836 UTC 2026  Retrieving encrypted password.
-Thu May 7 14:14:56:836 UTC 2026  [AS400ImplRemote@234256412] getAdditionalAuthInfo() Verification ID: null
-Thu May 7 14:14:56:836 UTC 2026  [AS400ImplRemote@234256412] getAdditionalAuthInfo() Remote IP address: null
-Thu May 7 14:14:56:836 UTC 2026  Sending start server request for AS400StrSvrDS ...
-Thu May 7 14:14:56:837 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:320 UTC 2026  Data stream data received (connID=383811406) ...
+00 00 00 00 13 3B 3B C4 C7 79 C1 19 
+Thu May 7 14:33:02:320 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 40 02 00 E0 04 00 00 00 00 00 00 00 00 
-00 02 70 02 03 01 00 00 00 1A 11 05 F7 BF 6D B4 
-F9 34 6A 8C 30 F3 90 05 41 AC 49 A6 88 96 63 54 
+00 02 70 02 03 01 00 00 00 1A 11 05 FA 1E E4 D3 
+A9 06 0B 3A 5F 8D 4B 96 AE 13 71 59 65 B6 95 32 
 00 00 00 10 11 04 C1 C6 E3 D9 C1 C5 C7 C5 F1 40 
-Thu May 7 14:14:56:837 UTC 2026  Receiving start server reply...
-Thu May 7 14:14:56:954 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:438 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 39 02 00 E0 04 00 00 00 00 00 00 00 00 
 00 04 F0 02 
-Thu May 7 14:14:56:954 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:438 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 00 00 00 00 21 11 1F 00 00 00 00 F3 F3 
-F1 F2 F5 F6 61 D8 E4 E2 C5 D9 61 D8 E9 C4 C1 E2 
+F2 F2 F8 F8 61 D8 E4 E2 C5 D9 61 D8 E9 C4 C1 E2 
 D6 C9 D5 C9 E3 
-Thu May 7 14:14:56:954 UTC 2026  Server started successfully. Job: 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:56:955 UTC 2026  Service connected:  as-database
-Thu May 7 14:14:56:955 UTC 2026  Getting system name: pub400.com, is local:  false
-Thu May 7 14:14:56:955 UTC 2026  Getting implementation VRM.
-Thu May 7 14:14:56:955 UTC 2026  Implementation VRM:
-00 07 05 00 
-Thu May 7 14:14:56:955 UTC 2026  Getting implementation VRM.
-Thu May 7 14:14:56:955 UTC 2026  Implementation VRM:
-00 07 05 00 
-Thu May 7 14:14:56:955 UTC 2026  Getting implementation VRM.
-Thu May 7 14:14:56:955 UTC 2026  Implementation VRM:
-00 07 05 00 
-Thu May 7 14:14:56:955 UTC 2026  Handling request for host server job connection: as-database
-Thu May 7 14:14:56:955 UTC 2026  Reusing previous server object...
-Thu May 7 14:14:56:955 UTC 2026  Getting implementation VRM.
-Thu May 7 14:14:56:955 UTC 2026  Implementation VRM:
-00 07 05 00 
-Thu May 7 14:14:56:955 UTC 2026  AS400ImplRemote.getCcsid(): CCSID=273, howObtained=1
-Thu May 7 14:14:56:955 UTC 2026  Getting NLV implementation:  2924
-Thu May 7 14:14:56:955 UTC 2026  send and receive(): ...
-Thu May 7 14:14:56:955 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:56:956 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:439 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 01 1D 00 00 E0 04 00 00 00 00 00 00 00 01 
 00 14 1F 80 81 04 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 16 00 00 00 08 38 01 34 B0 
@@ -207,12 +74,10 @@ F2 00 00 00 0A 38 22 00 00 80 00 00 00 00 08 38
 C9 C2 D4 40 E3 96 96 93 82 96 A7 40 86 96 99 40 
 D1 81 A5 81 00 00 00 12 38 3E 00 25 00 08 F0 F7 
 F0 F6 F0 F0 F0 F1 00 00 00 07 38 3F E8 
-Thu May 7 14:14:56:956 UTC 2026  AS400Server receive from job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:56:956 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:57:075 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:558 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 AE 00 00 E0 04 00 00 00 00 00 00 00 01 
 00 14 28 00 
-Thu May 7 14:14:57:076 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:558 UTC 2026  Data stream data received (connID=383811406) ...
 81 04 00 00 00 00 00 00 00 00 1F 80 1F 80 00 00 
 00 00 00 00 00 00 00 86 38 04 00 00 00 03 00 01 
 00 00 00 00 00 00 00 00 00 01 00 00 00 01 F0 01 
@@ -221,44 +86,26 @@ Thu May 7 14:14:57:076 UTC 2026  Data stream data received (connID=22917684) ...
 D9 F5 D4 F0 F0 F0 F1 F6 D7 E4 C2 F4 F0 F0 40 40 
 40 40 40 40 40 40 40 40 40 40 C1 C6 E3 D9 C1 C5 
 C7 C5 F1 F1 D8 E9 C4 C1 E2 D6 C9 D5 C9 E3 D8 E4 
-E2 C5 D9 40 40 40 40 40 F3 F3 F1 F2 F5 F6 00 0A 
+E2 C5 D9 40 40 40 40 40 F3 F3 F2 F2 F8 F8 00 0A 
 C1 C6 E3 D9 C1 C5 C7 C5 F1 F1 
-Thu May 7 14:14:57:076 UTC 2026  run(): reply received...com.ibm.as400.access.DBReplyRequestedDS@2800
-Thu May 7 14:14:57:076 UTC 2026  adding reply...  1
-Thu May 7 14:14:57:076 UTC 2026  received(): valid reply received...  1
-Thu May 7 14:14:57:076 UTC 2026  send and receive(): ...
-Thu May 7 14:14:57:076 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:076 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:559 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 3F 00 00 E0 05 00 00 00 00 00 00 00 02 
 00 14 18 0C 80 04 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 01 00 00 00 17 38 13 01 11 
 00 01 C3 00 0A C1 C6 E3 D9 C1 C5 C7 C5 F1 F1 
-Thu May 7 14:14:57:076 UTC 2026  AS400Server receive from job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:076 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:57:193 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:675 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 28 00 00 E0 05 00 00 00 00 00 00 00 02 
 00 14 28 00 
-Thu May 7 14:14:57:193 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:02:675 UTC 2026  Data stream data received (connID=383811406) ...
 80 04 00 00 00 00 00 00 00 00 18 0C 18 0C 00 00 
 00 00 00 00 
-Thu May 7 14:14:57:193 UTC 2026  run(): reply received...com.ibm.as400.access.DBReplyRequestedDS@2800
-Thu May 7 14:14:57:193 UTC 2026  adding reply...  2
-Thu May 7 14:14:57:193 UTC 2026  received(): valid reply received...  2
-Thu May 7 14:14:57:193 UTC 2026  Getting CCSID.
-Thu May 7 14:14:57:193 UTC 2026  Retrieving CCSID from system...
-Thu May 7 14:14:57:194 UTC 2026  CCSID:  273
-Thu May 7 14:14:57:194 UTC 2026  Getting version level.
-Thu May 7 14:14:57:194 UTC 2026  Version level:  7
-Thu May 7 14:14:57:194 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:194 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:676 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 4C 00 00 E0 04 00 00 00 00 00 00 00 03 
 00 14 1D 00 00 04 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 00 00 02 00 00 00 12 38 06 01 11 
 00 08 E2 E3 D4 E3 F0 F0 F0 F1 00 00 00 12 38 0B 
 01 11 00 08 C3 D9 E2 D9 F0 F0 F0 F1 
-Thu May 7 14:14:57:194 UTC 2026  send and receive(): ...
-Thu May 7 14:14:57:194 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:195 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:02:677 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 B3 00 00 E0 04 00 00 00 00 00 00 00 04 
 00 14 18 03 8A 84 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 00 00 03 00 00 00 7C 38 31 34 B0 
@@ -271,12 +118,10 @@ Thu May 7 14:14:57:195 UTC 2026  Data stream sent (connID=22917684) ...
 00 2E 00 53 00 59 00 53 00 44 00 55 00 4D 00 4D 
 00 59 00 31 00 00 00 08 38 12 00 02 00 00 00 07 
 38 08 00 
-Thu May 7 14:14:57:195 UTC 2026  AS400Server receive from job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:195 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:57:647 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:104 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 01 58 00 00 E0 04 00 00 00 00 00 00 00 04 
 00 14 28 00 
-Thu May 7 14:14:57:647 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:104 UTC 2026  Data stream data received (connID=383811406) ...
 8A 84 00 00 00 00 00 00 00 01 18 03 18 03 00 00 
 00 00 00 00 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
 40 40 00 00 00 88 00 00 00 00 00 14 00 12 E2 E3 
@@ -298,11 +143,7 @@ E5 00 00 00 53 38 13 00 00 00 00 00 00 00 01 00
 00 00 00 00 00 00 00 00 00 00 30 00 00 00 0D 00 
 00 00 00 00 00 00 00 00 00 00 0D 38 40 00 00 F0 
 F0 F0 F0 F1 
-Thu May 7 14:14:57:648 UTC 2026  run(): reply received...com.ibm.as400.access.DBReplyRequestedDS@2800
-Thu May 7 14:14:57:648 UTC 2026  adding reply...  4
-Thu May 7 14:14:57:648 UTC 2026  received(): valid reply received...  4
-Thu May 7 14:14:57:648 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:648 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:105 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 7E 00 00 E0 04 00 00 00 00 00 00 00 05 
 00 14 1E 00 00 04 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 01 00 01 00 00 00 56 38 1E 00 00 
@@ -311,9 +152,7 @@ Thu May 7 14:14:57:648 UTC 2026  Data stream sent (connID=22917684) ...
 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
-Thu May 7 14:14:57:648 UTC 2026  send and receive(): ...
-Thu May 7 14:14:57:648 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:648 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:106 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 AF 00 00 E0 04 00 00 00 00 00 00 00 06 
 00 14 18 0E 86 04 80 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 01 00 08 00 00 00 07 38 09 80 00 
@@ -325,12 +164,10 @@ Thu May 7 14:14:57:648 UTC 2026  Data stream sent (connID=22917684) ...
 89 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 00 00 00 08 38 14 00 00 
-Thu May 7 14:14:57:649 UTC 2026  AS400Server receive from job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:649 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:57:883 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:340 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 FC 00 00 E0 04 00 00 00 00 00 00 00 06 
 00 14 28 00 
-Thu May 7 14:14:57:883 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:340 UTC 2026  Data stream data received (connID=383811406) ...
 86 05 80 00 00 00 00 00 00 01 18 0E 18 0E 00 02 
 00 00 02 BC 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
 40 40 00 00 00 88 00 00 00 00 00 1C 00 12 C3 D9 
@@ -346,40 +183,25 @@ F0 F0 00 00 00 10 38 14 F1 F0 F0 F0 F0 00 00 00
 00 01 00 02 00 00 00 00 00 00 00 34 00 00 00 00 
 00 16 00 00 00 01 00 0C 88 85 93 93 96 6B 40 C9 
 C2 D4 40 89 00 00 00 08 
-Thu May 7 14:14:57:883 UTC 2026  run(): reply received...com.ibm.as400.access.DBReplyRequestedDS@2800
-Thu May 7 14:14:57:883 UTC 2026  adding reply...  6
-Thu May 7 14:14:57:883 UTC 2026  received(): valid reply received...  6
-Thu May 7 14:14:57:884 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:884 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:341 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 07 
 00 14 1E 01 00 04 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 01 00 00 
-Thu May 7 14:14:57:884 UTC 2026  send and receive(): ...
-Thu May 7 14:14:57:884 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:885 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:341 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 08 
 00 14 1D 02 80 04 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 00 00 00 
-Thu May 7 14:14:57:885 UTC 2026  AS400Server receive from job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:57:885 UTC 2026  run(): wait for reply...
-Thu May 7 14:14:58:116 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:573 UTC 2026  Data stream data received (connID=383811406) ...
 00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 08 
 00 14 28 00 
-Thu May 7 14:14:58:117 UTC 2026  Data stream data received (connID=22917684) ...
+Thu May 7 14:33:03:573 UTC 2026  Data stream data received (connID=383811406) ...
 80 04 00 00 00 00 00 00 00 01 1D 02 1D 02 00 00 
 00 00 00 00 
-Thu May 7 14:14:58:117 UTC 2026  run(): reply received...com.ibm.as400.access.DBReplyRequestedDS@2800
-Thu May 7 14:14:58:117 UTC 2026  adding reply...  8
-Thu May 7 14:14:58:117 UTC 2026  received(): valid reply received...  8
-Thu May 7 14:14:58:117 UTC 2026  send(): send request to job 331256/QUSER/QZDASOINIT
-Thu May 7 14:14:58:117 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:573 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 09 
 00 14 1F 01 00 04 00 00 00 00 00 00 00 01 00 01 
 00 00 00 01 00 00 00 00 
-Thu May 7 14:14:58:117 UTC 2026  Decrement: reference count for com.ibm.as400.access.AS400NoThreadServer@6881c2f9 is 0
-Thu May 7 14:14:58:117 UTC 2026  Sending end job request...
-Thu May 7 14:14:58:117 UTC 2026  Data stream sent (connID=22917684) ...
+Thu May 7 14:33:03:574 UTC 2026  Data stream sent (connID=383811406) ...
 00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 00 
 00 14 1F FF 00 00 00 00 00 00 00 00 00 00 00 00 
 00 00 00 00 00 00 00 00 
-Thu May 7 14:14:58:118 UTC 2026  Server disconnected. Job: 331256/QUSER/QZDASOINIT
