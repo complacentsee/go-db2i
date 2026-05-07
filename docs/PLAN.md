@@ -319,24 +319,29 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
 **Deferred from M5:**
 
 - **Live COMMIT / ROLLBACK semantics on a journaled table** —
-  frame shapes verified via `TestCommitFrameShape` /
-  `TestRollbackFrameShape`, and the live INSERT path proven
+  **deferred (environmental, not driver gap).** Frame shapes are
+  verified via `TestCommitFrameShape` /
+  `TestRollbackFrameShape`, and the live INSERT path is proven
   against `DCLVRP02` (123,410 rows; writes succeed under
-  autocommit-on). But:
+  autocommit-on via `ExecuteImmediate`). But:
   - COMMIT (0x1807) and ROLLBACK (0x1808) both return SQL -211
     errorClass=2 on PUB400, **even with a real INSERT pending**.
   - `AutocommitOff` succeeds at the protocol layer, but a
     subsequent INSERT + ROLLBACK leaves the row in the table
     (verified on a fresh connection). The "rollback" is a no-op
     because the file isn't under commitment control.
-  - Catalog probes for `JOURNALED` / `JOURNAL_NAME` columns fail
-    with -206 on PUB400's i version, so we can't confirm via SQL,
-    but the persistence behaviour is conclusive: **DCLVRP02 is
-    not journaled on PUB400.**
-  Real semantic validation needs a journaled table — either
-  `STRJRNPF` on PUB400 (requires *OBJMGT we may not have) or a
-  production IBM i with established journaling. Acceptance picks
-  up in M6 once `database/sql.Tx` wraps these primitives.
+  - JTOpen hits the same wall: the captured `tx_commit.trace` /
+    `tx_rollback.trace` fixtures are SQL7008 error-path captures
+    because the Java reference client also can't get a clean
+    happy-path commit on PUB400.
+  Same root cause for both clients: **DCLVRP02 (and PUB400 user
+  tables generally) are not journaled.** This is not a goJTOpen
+  bug; it's a PUB400 environmental constraint. Real semantic
+  validation needs a journaled table on a different IBM i (a
+  production target with established journaling), and acceptance
+  defers to that deployment. M6 wraps these primitives in
+  `database/sql.Tx` regardless; the wire-frame correctness is
+  already test-pinned.
 - **Re-capture fixtures with M5 RPB DELETE in scope** — every
   fakeConn-driven test currently appends a `syntheticFetchEndReply`
   + `syntheticRPBDeleteReply` because the captured `.trace`
