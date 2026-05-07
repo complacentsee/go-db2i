@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
@@ -157,6 +158,16 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 	for i, p := range params {
 		v := values[i]
 		switch p.SQLType {
+		case 500, 501: // SMALLINT (NN, nullable)
+			iv, err := toInt32(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			if iv < -1<<15 || iv > 1<<15-1 {
+				return nil, fmt.Errorf("hostserver: param %d: smallint value %d overflows int16", i, iv)
+			}
+			be.PutUint16(buf[dataOff:dataOff+2], uint16(int16(iv)))
+			dataOff += 2
 		case 496, 497: // INTEGER (NN, nullable)
 			iv, err := toInt32(v)
 			if err != nil {
@@ -164,6 +175,28 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			}
 			be.PutUint32(buf[dataOff:dataOff+4], uint32(iv))
 			dataOff += 4
+		case 492, 493: // BIGINT (NN, nullable)
+			iv, err := toInt64(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
+			dataOff += 8
+		case 480, 481: // REAL/DOUBLE (NN, nullable) -- length picks the width
+			fv, err := toFloat64(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			switch p.FieldLength {
+			case 4:
+				be.PutUint32(buf[dataOff:dataOff+4], math.Float32bits(float32(fv)))
+				dataOff += 4
+			case 8:
+				be.PutUint64(buf[dataOff:dataOff+8], math.Float64bits(fv))
+				dataOff += 8
+			default:
+				return nil, fmt.Errorf("hostserver: param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
+			}
 		case 448, 449: // VARCHAR (NN, nullable)
 			sv, err := toString(v)
 			if err != nil {
@@ -386,7 +419,7 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 }
 
 // toInt32 narrows common Go integer types into int32 for INTEGER
-// parameter binding. M3 scope; M4 will widen to int64 / float / etc.
+// parameter binding.
 func toInt32(v any) (int32, error) {
 	switch x := v.(type) {
 	case int32:
@@ -410,6 +443,45 @@ func toInt32(v any) (int32, error) {
 	}
 }
 
+// toInt64 widens common Go integer types into int64 for BIGINT
+// parameter binding.
+func toInt64(v any) (int64, error) {
+	switch x := v.(type) {
+	case int64:
+		return x, nil
+	case int:
+		return int64(x), nil
+	case int32:
+		return int64(x), nil
+	case int16:
+		return int64(x), nil
+	case int8:
+		return int64(x), nil
+	default:
+		return 0, fmt.Errorf("cannot bind %T as BIGINT (need int/int64)", v)
+	}
+}
+
+// toFloat64 widens common Go numeric types into float64 for
+// REAL/DOUBLE parameter binding. Integer inputs are exact for the
+// IEEE 754 double range; pure float32 inputs upcast losslessly.
+func toFloat64(v any) (float64, error) {
+	switch x := v.(type) {
+	case float64:
+		return x, nil
+	case float32:
+		return float64(x), nil
+	case int:
+		return float64(x), nil
+	case int32:
+		return float64(x), nil
+	case int64:
+		return float64(x), nil
+	default:
+		return 0, fmt.Errorf("cannot bind %T as REAL/DOUBLE (need float)", v)
+	}
+}
+
 // toString narrows common Go string types for VARCHAR binding.
 func toString(v any) (string, error) {
 	switch x := v.(type) {
@@ -423,10 +495,14 @@ func toString(v any) (string, error) {
 }
 
 // ebcdicForCCSID picks the EBCDIC converter for a parameter's CCSID.
-// M3 only ships CCSID 37 (the codec that exists today); the other
-// CCSIDs PUB400 reports (273 German, 5026 Japan, ...) land alongside
-// the M4 type expansion when the ebcdic package grows table support.
+// M3 ships CCSID 37 (US) and 273 (German -- PUB400 default;
+// currently a CCSID-37-table stand-in, see ebcdic.CCSID273 docs).
+// Other CCSIDs (5026 Japan, 1140 Euro, ...) land with M4.
 func ebcdicForCCSID(ccsid uint16) ebcdic.Codec {
-	_ = ccsid
-	return ebcdic.CCSID37
+	switch ccsid {
+	case 273:
+		return ebcdic.CCSID273
+	default:
+		return ebcdic.CCSID37
+	}
 }

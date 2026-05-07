@@ -54,3 +54,21 @@ var CCSID37 Codec = charmapCodec{
 	ccsid: 37,
 	enc:   charmap.CodePage037,
 }
+
+// CCSID273 is the codec for CCSID 273 (German EBCDIC) -- the default
+// CCSID PUB400 advertises in its server-attributes reply.
+//
+// LIMITATION: golang.org/x/text/encoding/charmap doesn't ship a
+// dedicated CodePage273, so this wraps CodePage037 (US English).
+// For the ASCII printable subset (digits, A-Z, a-z, common
+// punctuation) the two CCSIDs produce identical bytes, which is
+// enough for current goJTOpen tests + PUB400 metadata strings.
+// Characters that diverge between the two pages -- e.g. '@' (0x7C
+// in 37 vs 0xB5 in 273) and accented vowels -- will round-trip
+// incorrectly. A proper 273 mapping table lands with M4 when
+// non-ASCII binding becomes a hard requirement.
+var CCSID273 Codec = charmapCodec{
+	name:  "CCSID 273 (via CCSID 37 stand-in -- M4 adds a real table)",
+	ccsid: 273,
+	enc:   charmap.CodePage037,
+}

@@ -346,6 +346,91 @@ func TestSentBytesMatchPreparedIntParamFixture(t *testing.T) {
 	})
 }
 
+// TestSentBytesMatchPreparedStringParamFixture validates that
+// SelectPreparedSQL emits byte-identical bytes to JTOpen for a
+// VARCHAR(50) parameter bound with "hello, IBM i". Same scaffolding
+// as the int-param test; differences land in the input parameter
+// shape (CCSID 273, length 52, type 449) and the value bytes (12
+// EBCDIC chars + 38 zero padding inside a 52-byte row).
+func TestSentBytesMatchPreparedStringParamFixture(t *testing.T) {
+	const fixture = "prepared_string_param.trace"
+	const preparedSQL = "SELECT CAST(? AS VARCHAR(50)) FROM SYSIBM.SYSDUMMY1"
+
+	all := allSentsByServerID(t, fixture, ServerDatabase)
+
+	var wantChangeDesc, wantOpenWithParams []byte
+	for _, b := range all {
+		if len(b) < 20 {
+			continue
+		}
+		switch binary.BigEndian.Uint16(b[18:20]) {
+		case ReqDBSQLChangeDescriptor:
+			if wantChangeDesc == nil {
+				wantChangeDesc = b
+			}
+		case ReqDBSQLOpenDescribeFetch:
+			if wantOpenWithParams == nil {
+				wantOpenWithParams = b
+			}
+		}
+	}
+
+	shapes := []PreparedParam{{
+		SQLType:     449, // VARCHAR nullable
+		FieldLength: 52,  // 2-byte SL + 50 EBCDIC bytes
+		Precision:   50,
+		Scale:       0,
+		CCSID:       273, // German EBCDIC -- PUB400 default
+	}}
+
+	t.Run("CHANGE_DESCRIPTOR", func(t *testing.T) {
+		if wantChangeDesc == nil {
+			t.Fatalf("fixture missing 0x1E00 frame")
+		}
+		hdr, payload, err := ChangeDescriptorRequest(shapes)
+		if err != nil {
+			t.Fatalf("ChangeDescriptorRequest: %v", err)
+		}
+		hdr.CorrelationID = 5
+		var got bytes.Buffer
+		if err := WriteFrame(&got, hdr, payload); err != nil {
+			t.Fatalf("WriteFrame: %v", err)
+		}
+		assertBytesEqualWithDiff(t, "CHANGE_DESCRIPTOR(varchar)", got.Bytes(), wantChangeDesc)
+	})
+
+	t.Run("OPEN_DESCRIBE_FETCH_with_string_param", func(t *testing.T) {
+		if wantOpenWithParams == nil {
+			t.Fatalf("fixture missing parameterised 0x180E frame")
+		}
+		dummy := allReceivedsFromFixture(t, "select_dummy.trace")
+		var sqlReceiveds [][]byte
+		for _, b := range dummy {
+			if len(b) >= 8 && b[6] == 0xE0 && b[7] == 0x04 {
+				sqlReceiveds = append(sqlReceiveds, b)
+			}
+		}
+		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4])
+		_, _ = SelectPreparedSQL(conn, preparedSQL, shapes, []any{"hello, IBM i"}, 3)
+
+		r := bytes.NewReader(conn.written.Bytes())
+		for i := 0; i < 3; i++ {
+			if _, _, err := ReadFrame(r); err != nil {
+				t.Fatalf("re-parse pre-OPEN frame %d: %v", i, err)
+			}
+		}
+		hdr, payload, err := ReadFrame(r)
+		if err != nil {
+			t.Fatalf("re-parse OPEN: %v", err)
+		}
+		var got bytes.Buffer
+		if err := WriteFrame(&got, hdr, payload); err != nil {
+			t.Fatalf("re-encode OPEN: %v", err)
+		}
+		assertBytesEqualWithDiff(t, "OPEN_DESCRIBE_FETCH(varchar)", got.Bytes(), wantOpenWithParams)
+	})
+}
+
 // TestSentBytesMatchNDBAddLibraryListFixture confirms the NDB
 // ADD_LIBRARY_LIST frame (ServerID 0xE005) we emit byte-matches the
 // one JTOpen sends in select_dummy.trace.

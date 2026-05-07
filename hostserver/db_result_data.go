@@ -3,6 +3,7 @@ package hostserver
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
 )
@@ -166,7 +167,7 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 // 2-byte length prefix.
 func (c SelectColumn) wireLength() uint32 {
 	switch c.SQLType {
-	case SQLTypeVarChar, SQLTypeVarCharNonBlank:
+	case SQLTypeVarChar, SQLTypeVarCharNonBlank, 449:
 		return c.Length + 2
 	}
 	return c.Length
@@ -207,7 +208,7 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return s, int(col.Length), nil
 
-	case SQLTypeVarChar, SQLTypeVarCharNonBlank:
+	case SQLTypeVarChar, SQLTypeVarCharNonBlank, 449:
 		// 2-byte BE length prefix followed by N bytes EBCDIC.
 		// The slot occupies col.Length+2 bytes on the wire (in
 		// non-VLF layouts), but in VLF-compressed result data
@@ -246,6 +247,27 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, fmt.Errorf("bigint wants 8 bytes, have %d", len(b))
 		}
 		return int64(binary.BigEndian.Uint64(b[:8])), 8, nil
+
+	case SQLTypeFloat8, 481: // 480 NN (REAL or DOUBLE), 481 nullable
+		// IEEE 754 big-endian; REAL is 4 bytes (float32),
+		// DOUBLE is 8 bytes (float64). The SQL type is the same
+		// (480) for both -- column length distinguishes them.
+		switch col.Length {
+		case 4:
+			if len(b) < 4 {
+				return nil, 0, fmt.Errorf("real wants 4 bytes, have %d", len(b))
+			}
+			bits := binary.BigEndian.Uint32(b[:4])
+			return math.Float32frombits(bits), 4, nil
+		case 8:
+			if len(b) < 8 {
+				return nil, 0, fmt.Errorf("double wants 8 bytes, have %d", len(b))
+			}
+			bits := binary.BigEndian.Uint64(b[:8])
+			return math.Float64frombits(bits), 8, nil
+		default:
+			return nil, 0, fmt.Errorf("float type 480 has unexpected length %d (want 4 or 8)", col.Length)
+		}
 	}
 	return nil, 0, fmt.Errorf("unsupported SQL type %d (col len=%d, ccsid=%d)", col.SQLType, col.Length, col.CCSID)
 }

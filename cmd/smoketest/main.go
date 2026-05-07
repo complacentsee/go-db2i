@@ -130,7 +130,7 @@ func main() {
 	}}
 	pres, err := hostserver.SelectPreparedSQL(dbConn, preparedSQL, shapes, []any{int32(42)}, 3)
 	if err != nil {
-		fail("M3 prepared select: %v", err)
+		fail("M3 prepared select (int): %v", err)
 	}
 	fmt.Printf("\nprepared select: %s [42]\n", preparedSQL)
 	fmt.Printf("columns:           %d\n", len(pres.Columns))
@@ -143,7 +143,102 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 7: M3 prepared SELECT with VARCHAR parameter. ---
+	// Each prepared call needs its own connection until RPB
+	// DELETE between statements lands; reopen for the second.
+	dbConn.Close()
+	dbConn2 := dialOrDie(dbAddr, "as-database (varchar bind)")
+	defer dbConn2.Close()
+	if _, _, err := hostserver.StartDatabaseService(dbConn2, user, pwd); err != nil {
+		fail("re-open db for varchar bind: %v", err)
+	}
+	if _, err := hostserver.SetSQLAttributes(dbConn2, hostserver.DefaultDBAttributesOptions()); err != nil {
+		fail("set-sql-attributes (varchar): %v", err)
+	}
+	if err := hostserver.NDBAddLibraryList(dbConn2, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: NDB add-library-list (varchar): %v\n", err)
+	}
+	varcharSQL := "SELECT CAST(? AS VARCHAR(50)) FROM SYSIBM.SYSDUMMY1"
+	varcharShapes := []hostserver.PreparedParam{{
+		SQLType:     449, // VARCHAR nullable
+		FieldLength: 52,
+		Precision:   50,
+		Scale:       0,
+		CCSID:       273,
+	}}
+	vres, err := hostserver.SelectPreparedSQL(dbConn2, varcharSQL, varcharShapes, []any{"hello, IBM i"}, 3)
+	if err != nil {
+		fail("M3 prepared select (varchar): %v", err)
+	}
+	fmt.Printf("\nprepared select: %s [\"hello, IBM i\"]\n", varcharSQL)
+	fmt.Printf("columns:           %d\n", len(vres.Columns))
+	for i, c := range vres.Columns {
+		fmt.Printf("  col %d: name=%q sql_type=%d length=%d ccsid=%d\n",
+			i, c.Name, c.SQLType, c.Length, c.CCSID)
+	}
+	fmt.Printf("rows:              %d\n", len(vres.Rows))
+	for i, r := range vres.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 8: M4 BIGINT bind. ---
+	bigintRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS BIGINT) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     493, // BIGINT nullable
+			FieldLength: 8,
+			Precision:   19,
+			Scale:       0,
+		}},
+		[]any{int64(9223372036854775807)},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS BIGINT) ... [9223372036854775807]\n")
+	fmt.Printf("rows:              %d\n", len(bigintRes.Rows))
+	for i, r := range bigintRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 9: M4 DOUBLE bind. ---
+	doubleRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS DOUBLE) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     481, // DOUBLE nullable
+			FieldLength: 8,
+			Precision:   53,
+			Scale:       0,
+		}},
+		[]any{2.718281828459045},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS DOUBLE) ... [2.718281828459045]\n")
+	fmt.Printf("rows:              %d\n", len(doubleRes.Rows))
+	for i, r := range doubleRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
 	fmt.Fprintln(os.Stderr, "ok")
+}
+
+// freshPreparedSelect opens a clean db connection, runs the prepared
+// SELECT, and returns the result. Dedicated connection per call works
+// around the missing RPB DELETE between prepared statements
+// (deferred follow-up).
+func freshPreparedSelect(addr, user, pwd, sql string, shapes []hostserver.PreparedParam, vals []any) *hostserver.SelectResult {
+	c := dialOrDie(addr, "as-database "+sql)
+	defer c.Close()
+	if _, _, err := hostserver.StartDatabaseService(c, user, pwd); err != nil {
+		fail("re-open db: %v", err)
+	}
+	if _, err := hostserver.SetSQLAttributes(c, hostserver.DefaultDBAttributesOptions()); err != nil {
+		fail("set-sql-attributes: %v", err)
+	}
+	if err := hostserver.NDBAddLibraryList(c, "AFTRAEGE11", 2); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: NDB add-library-list: %v\n", err)
+	}
+	r, err := hostserver.SelectPreparedSQL(c, sql, shapes, vals, 3)
+	if err != nil {
+		fail("prepared select %q: %v", sql, err)
+	}
+	return r
 }
 
 // dialOrDie connects to addr and applies a 30s deadline; on any
