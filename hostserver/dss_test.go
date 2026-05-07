@@ -2,6 +2,7 @@ package hostserver
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -107,6 +108,83 @@ func TestExchangeAttributesRequestMatchesFixture(t *testing.T) {
 	if !bytes.Equal(got, first.Bytes) {
 		t.Errorf("wire bytes mismatch.\n got: %s\nwant: %s",
 			hex.EncodeToString(got), hex.EncodeToString(first.Bytes))
+	}
+}
+
+// TestSignonInfoRequestMatchesFixture: same wire-compatibility test as
+// TestExchangeAttributesRequestMatchesFixture but for the second sent
+// frame in connect_only -- JTOpen's SignonInfoReq. We pull the
+// 20-byte SHA-1 encrypted password out of the fixture (we don't know
+// the plaintext or the algorithm yet -- that lands in M1's auth
+// package) and feed it back into our SignonInfoRequest builder; the
+// resulting bytes must match JTOpen's output byte-for-byte.
+func TestSignonInfoRequestMatchesFixture(t *testing.T) {
+	frames := wirelog.Consolidate(loadFixture(t, "connect_only.trace"))
+
+	var sent []wirelog.Frame
+	for _, f := range frames {
+		if f.Direction == wirelog.Sent {
+			sent = append(sent, f)
+		}
+	}
+	if len(sent) < 2 {
+		t.Fatalf("expected >= 2 sent frames in connect_only, got %d", len(sent))
+	}
+
+	second := sent[1]
+	if int(binary.BigEndian.Uint32(second.Bytes[0:4])) != len(second.Bytes) {
+		t.Fatalf("second sent frame length header doesn't match bytes: %d vs %d",
+			binary.BigEndian.Uint32(second.Bytes[0:4]), len(second.Bytes))
+	}
+
+	hdr, payload := decodeFrame(t, second.Bytes)
+	if hdr.ReqRepID != ReqSignonInfo {
+		t.Fatalf("ReqRepID = 0x%04X, want 0x%04X (SignonInfo)", hdr.ReqRepID, ReqSignonInfo)
+	}
+
+	// Extract the encrypted password from the fixture so we can feed it
+	// back into our builder. Parameters in the payload after the
+	// 1-byte template:
+	//   offset 1:  CCSID param (10 bytes)
+	//   offset 11: auth bytes param: LL (4) | CP (2) | password (LL-6)
+	//   ...
+	if len(payload) < 17 {
+		t.Fatalf("payload too short: %d", len(payload))
+	}
+	authLL := binary.BigEndian.Uint32(payload[11:15])
+	authCP := binary.BigEndian.Uint16(payload[15:17])
+	if authCP != cpPassword {
+		t.Fatalf("auth CP = 0x%04X, want password 0x%04X", authCP, cpPassword)
+	}
+	authBytes := append([]byte(nil), payload[17:17+(authLL-6)]...)
+	if len(authBytes) != 20 {
+		t.Fatalf("expected 20-byte SHA-1 password, got %d", len(authBytes))
+	}
+
+	// Reconstruct.
+	req, reqPayload, err := SignonInfoRequest(
+		AuthSchemePassword,
+		"AFTRAEGE1",
+		authBytes,
+		15,   // serverLevel
+		1200, // clientCCSID = UTF-16 BE
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("SignonInfoRequest: %v", err)
+	}
+	// Match the fixture's correlation ID (this is the second request on
+	// the connection, JTOpen counted from 0 for exchange-attributes).
+	req.CorrelationID = 1
+
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, req, reqPayload); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	got := buf.Bytes()
+	if !bytes.Equal(got, second.Bytes) {
+		t.Errorf("wire bytes mismatch.\n got: %s\nwant: %s",
+			hex.EncodeToString(got), hex.EncodeToString(second.Bytes))
 	}
 }
 
