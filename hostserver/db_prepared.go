@@ -237,6 +237,29 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			}
 			copy(buf[dataOff:dataOff+len(ebc)], ebc)
 			dataOff += int(p.FieldLength)
+		case 996, 997: // DECFLOAT -- decimal64 (FieldLength 8) or decimal128 (16)
+			s, err := toString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			negative, digs, exp, err := parseDecFloatString(s)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			var packed []byte
+			switch p.FieldLength {
+			case 8:
+				packed, err = encodeDecimal64(negative, digs, exp)
+			case 16:
+				packed, err = encodeDecimal128(negative, digs, exp)
+			default:
+				return nil, fmt.Errorf("hostserver: param %d: decfloat FieldLength %d unsupported (need 8 or 16)", i, p.FieldLength)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			copy(buf[dataOff:dataOff+len(packed)], packed)
+			dataOff += len(packed)
 		case 488, 489: // NUMERIC(p,s) zoned decimal
 			s, err := toDecimalString(v)
 			if err != nil {

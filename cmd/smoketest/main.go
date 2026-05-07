@@ -284,6 +284,36 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 11.6: M4 DECFLOAT(16) bind (decimal64). ---
+	df16Res := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS DECFLOAT(16)) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     997,
+			FieldLength: 8,
+			Precision:   16,
+		}},
+		[]any{"123456.7890123456"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS DECFLOAT(16)) ... [\"123456.7890123456\"]\n")
+	for i, r := range df16Res.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.61: M4 DECFLOAT(34) bind (decimal128). ---
+	df34Res := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS DECFLOAT(34)) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     997,
+			FieldLength: 16,
+			Precision:   34,
+		}},
+		[]any{"1.234567890123456789012345678901234E+100"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS DECFLOAT(34)) ... [scientific]\n")
+	for i, r := range df34Res.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
 	// --- Step 11.65: M4 NUMERIC(5,2) bind. ---
 	numBindRes := freshPreparedSelect(dbAddr, user, pwd,
 		"SELECT CAST(? AS NUMERIC(5,2)) FROM SYSIBM.SYSDUMMY1",

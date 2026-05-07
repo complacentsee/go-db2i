@@ -42,6 +42,13 @@ import (
 // decode to the same 3-digit values as their canonical forms.
 var dpdToBCD [1024]uint16
 
+// bcdToDPD maps a 3-digit decimal value (d2*100 + d1*10 + d0, in
+// [0, 999]) to its canonical 10-bit DPD encoding. Built by
+// inverting dpdToBCD at init: among the redundant codes for any
+// 8/9-containing 3-digit value we pick the smallest DPD value,
+// which is the canonical form per IEEE 754-2008.
+var bcdToDPD [1000]uint16
+
 func init() {
 	for d := uint16(0); d < 1024; d++ {
 		// Bits b9..b0 (b9 = MSB).
@@ -96,6 +103,244 @@ func init() {
 		}
 		dpdToBCD[d] = (d2 << 8) | (d1 << 4) | d0
 	}
+	// Invert dpdToBCD into bcdToDPD. Iterate DPD values in
+	// ascending order so the FIRST DPD that produces each
+	// (d2, d1, d0) wins -- that's the canonical encoding.
+	var seen [1000]bool
+	for d := uint16(0); d < 1024; d++ {
+		bcd := dpdToBCD[d]
+		idx := int((bcd>>8)&0xF)*100 + int((bcd>>4)&0xF)*10 + int(bcd&0xF)
+		if !seen[idx] {
+			bcdToDPD[idx] = d
+			seen[idx] = true
+		}
+	}
+}
+
+// encodeDecimal64 packs a sign + decimal digit string + exponent
+// into the 8-byte IEEE 754-2008 decimal64 wire format. The caller
+// supplies the digits as ASCII '0'..'9'; this function:
+//
+//   - left-pads with zeros to exactly 16 digits if shorter (no
+//     rounding -- caller is responsible for fitting in the
+//     precision)
+//   - applies the standard +398 exponent bias
+//   - splits the leading digit into the combination field's MSD
+//     and pulls the top 2 exponent bits in alongside it
+//   - encodes the remaining 15 digits as 5 DPD declets MSB-first
+//
+// Rejects coefficients with more than 16 significant digits or
+// exponents outside the [-383, 384] biased-encodable range.
+func encodeDecimal64(negative bool, digits []byte, exponent int) ([]byte, error) {
+	const (
+		precision  = 16
+		bias       = 398
+		expContBits = 8
+		expMin     = -bias                       // -398
+		expMax     = (1<<(2+expContBits) - 1) - bias // 1023 - 398 = 625? actually max = 384
+	)
+	if len(digits) > precision {
+		return nil, fmt.Errorf("decimal64: %d digits exceeds precision %d", len(digits), precision)
+	}
+	for len(digits) < precision {
+		digits = append([]byte{'0'}, digits...)
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return nil, fmt.Errorf("decimal64: non-digit %q in coefficient", c)
+		}
+	}
+	biasedExp := exponent + bias
+	if biasedExp < 0 || biasedExp >= (1 << (2 + expContBits)) {
+		return nil, fmt.Errorf("decimal64: biased exponent %d out of range", biasedExp)
+	}
+
+	combo, expCont := encodeCombination(byte(digits[0]-'0'), uint16(biasedExp), expContBits)
+
+	var hi uint64
+	if negative {
+		hi |= 1 << 63
+	}
+	hi |= uint64(combo) << 58
+	hi |= uint64(expCont) << 50
+
+	// 5 declets, MSB-first; declet 4 is digits[1..3], ..., declet 0 is digits[13..15].
+	for i := 0; i < 5; i++ {
+		off := 1 + i*3
+		d2 := uint16(digits[off] - '0')
+		d1 := uint16(digits[off+1] - '0')
+		d0 := uint16(digits[off+2] - '0')
+		idx := int(d2)*100 + int(d1)*10 + int(d0)
+		dpd := uint64(bcdToDPD[idx])
+		// declet 4 sits at bits 40..49, declet 0 at bits 0..9.
+		hi |= dpd << uint((4-i)*10)
+	}
+
+	out := make([]byte, 8)
+	binary.BigEndian.PutUint64(out, hi)
+	return out, nil
+}
+
+// encodeDecimal128 mirrors encodeDecimal64 for the 16-byte
+// (precision 34) wire format. Layout: 1 sign + 5 combo + 12
+// exp-cont + 110 coef-cont (= 33 trailing digits as 11 declets).
+// The 110-bit coefficient continuation straddles the hi/lo uint64
+// boundary, same as the decoder.
+func encodeDecimal128(negative bool, digits []byte, exponent int) ([]byte, error) {
+	const (
+		precision  = 34
+		bias       = 6176
+		expContBits = 12
+	)
+	if len(digits) > precision {
+		return nil, fmt.Errorf("decimal128: %d digits exceeds precision %d", len(digits), precision)
+	}
+	for len(digits) < precision {
+		digits = append([]byte{'0'}, digits...)
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return nil, fmt.Errorf("decimal128: non-digit %q in coefficient", c)
+		}
+	}
+	biasedExp := exponent + bias
+	if biasedExp < 0 || biasedExp >= (1 << (2 + expContBits)) {
+		return nil, fmt.Errorf("decimal128: biased exponent %d out of range", biasedExp)
+	}
+
+	combo, expCont := encodeCombination(byte(digits[0]-'0'), uint16(biasedExp), expContBits)
+
+	var hi, lo uint64
+	if negative {
+		hi |= 1 << 63
+	}
+	hi |= uint64(combo) << 58
+	hi |= uint64(expCont) << 46
+
+	// 11 declets; declet 10 at bits 100..109 of the 128-bit value.
+	for i := 0; i < 11; i++ {
+		off := 1 + i*3
+		d2 := uint16(digits[off] - '0')
+		d1 := uint16(digits[off+1] - '0')
+		d0 := uint16(digits[off+2] - '0')
+		idx := int(d2)*100 + int(d1)*10 + int(d0)
+		dpd := uint64(bcdToDPD[idx])
+		// declet i (i = 10..0) sits at bits (10-i)*10 .. (10-i)*10+9
+		// counted from MSB of the coefficient continuation. Since
+		// declet 10 is the most significant, its bit position is
+		// 100..109 in the full 128-bit value.
+		bitOff := (10 - i) * 10
+		// Actually map to wire: declet at bitOff in coefficient
+		// continuation == bits (bitOff) of decimal128 coefficient,
+		// where coefficient occupies bits 0..109.
+		coefBitOff := uint(100 - i*10)
+		if coefBitOff >= 64 {
+			hi |= dpd << (coefBitOff - 64)
+		} else if coefBitOff+10 <= 64 {
+			lo |= dpd << coefBitOff
+		} else {
+			// Straddles boundary: low part to lo, high part to hi.
+			lo |= dpd << coefBitOff
+			hi |= dpd >> (64 - coefBitOff)
+		}
+		_ = bitOff
+	}
+
+	out := make([]byte, 16)
+	binary.BigEndian.PutUint64(out[0:8], hi)
+	binary.BigEndian.PutUint64(out[8:16], lo)
+	return out, nil
+}
+
+// encodeCombination is the inverse of decodeCombination for finite
+// values. Given a single MSD (0..9) and a biased exponent, it
+// returns the 5-bit combination field and the (expContBits)-bit
+// exponent continuation that go into the wire layout.
+func encodeCombination(msd byte, biasedExp uint16, expContBits uint) (combo byte, expCont uint16) {
+	expMSB := byte((biasedExp >> expContBits) & 0x03) // top 2 bits of biased exp
+	expCont = biasedExp & ((1 << expContBits) - 1)
+	if msd < 8 {
+		// 00..10 followed by 3-bit MSD.
+		combo = (expMSB << 3) | (msd & 0x07)
+	} else {
+		// 11 prefix, then 2-bit expMSB, then bottom bit of MSD.
+		combo = 0x18 | (expMSB << 1) | (msd & 0x01)
+	}
+	return combo, expCont
+}
+
+// parseDecFloatString teases apart "[-+]?D+(\.D+)?([Ee][-+]?D+)?"
+// into (sign, coefficient digits with leading zeros stripped,
+// power-of-ten exponent). The returned exponent is such that the
+// numeric value equals (-1)^sign * coefficient * 10^exponent.
+//
+// "0" -> (false, "0", 0); "0.001" -> (false, "1", -3);
+// "1.5e10" -> (false, "15", 9); "-99.9" -> (true, "999", -1).
+func parseDecFloatString(s string) (negative bool, digits []byte, exponent int, err error) {
+	if s == "" {
+		return false, nil, 0, fmt.Errorf("empty decimal string")
+	}
+	if s[0] == '+' || s[0] == '-' {
+		negative = s[0] == '-'
+		s = s[1:]
+	}
+	expPart := ""
+	hasExp := false
+	if i := strings.IndexAny(s, "Ee"); i >= 0 {
+		expPart = s[i+1:]
+		s = s[:i]
+		hasExp = true
+	}
+	intPart := s
+	fracPart := ""
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		intPart = s[:dot]
+		fracPart = s[dot+1:]
+	}
+	if intPart == "" && fracPart == "" {
+		return false, nil, 0, fmt.Errorf("no digits in %q", s)
+	}
+	for _, c := range intPart {
+		if c < '0' || c > '9' {
+			return false, nil, 0, fmt.Errorf("bad digit %q in integer part", c)
+		}
+	}
+	for _, c := range fracPart {
+		if c < '0' || c > '9' {
+			return false, nil, 0, fmt.Errorf("bad digit %q in fractional part", c)
+		}
+	}
+	digits = append(digits, intPart...)
+	digits = append(digits, fracPart...)
+	exponent = -len(fracPart)
+	// Trim leading zeros (keep at least one).
+	for len(digits) > 1 && digits[0] == '0' {
+		digits = digits[1:]
+	}
+	if len(digits) == 0 {
+		digits = []byte{'0'}
+	}
+	if hasExp {
+		expSign := 1
+		if len(expPart) > 0 && expPart[0] == '+' {
+			expPart = expPart[1:]
+		} else if len(expPart) > 0 && expPart[0] == '-' {
+			expSign = -1
+			expPart = expPart[1:]
+		}
+		if expPart == "" {
+			return false, nil, 0, fmt.Errorf("missing exponent digits")
+		}
+		var v int
+		for _, c := range expPart {
+			if c < '0' || c > '9' {
+				return false, nil, 0, fmt.Errorf("bad digit %q in exponent", c)
+			}
+			v = v*10 + int(c-'0')
+		}
+		exponent += expSign * v
+	}
+	return negative, digits, exponent, nil
 }
 
 // decodeDecimal64 turns 8 wire bytes (big-endian decimal64) into a
