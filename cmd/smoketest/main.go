@@ -114,22 +114,33 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warn: NDB ADD_LIBRARY_LIST failed: %v\n", err)
 	}
 
-	// --- Step 5: M2 static SELECT. ---
-	sql := envOr("PUB400_SQL", "SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1")
-	res, err := hostserver.SelectStaticSQL(dbConn, sql, 3)
+	// --- Step 5: M3 prepared SELECT with int parameter. ---
+	// Skip the M2 static SELECT step here so the prepared call
+	// gets a clean RPB slot 1 -- we don't yet emit RPB DELETE
+	// between SELECTs, so chaining two on one connection trips
+	// the server. SelectStaticSQL is exercised by its own test;
+	// the smoketest's job is end-to-end M3 validation now.
+	preparedSQL := "SELECT CAST(? AS INTEGER) AS V FROM SYSIBM.SYSDUMMY1"
+	shapes := []hostserver.PreparedParam{{
+		SQLType:     497, // INTEGER nullable
+		FieldLength: 4,
+		Precision:   10,
+		Scale:       0,
+		CCSID:       0,
+	}}
+	pres, err := hostserver.SelectPreparedSQL(dbConn, preparedSQL, shapes, []any{int32(42)}, 3)
 	if err != nil {
-		fail("M2 static select: %v", err)
-	} else {
-		fmt.Printf("\nstatic select: %s\n", sql)
-		fmt.Printf("columns:           %d\n", len(res.Columns))
-		for i, c := range res.Columns {
-			fmt.Printf("  col %d: name=%q sql_type=%d length=%d ccsid=%d\n",
-				i, c.Name, c.SQLType, c.Length, c.CCSID)
-		}
-		fmt.Printf("rows:              %d\n", len(res.Rows))
-		for i, r := range res.Rows {
-			fmt.Printf("  row %d: %v\n", i, r)
-		}
+		fail("M3 prepared select: %v", err)
+	}
+	fmt.Printf("\nprepared select: %s [42]\n", preparedSQL)
+	fmt.Printf("columns:           %d\n", len(pres.Columns))
+	for i, c := range pres.Columns {
+		fmt.Printf("  col %d: name=%q sql_type=%d length=%d\n",
+			i, c.Name, c.SQLType, c.Length)
+	}
+	fmt.Printf("rows:              %d\n", len(pres.Rows))
+	for i, r := range pres.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
 	fmt.Fprintln(os.Stderr, "ok")

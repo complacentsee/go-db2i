@@ -253,19 +253,96 @@ func TestSentBytesMatchPreparedIntParamFixture(t *testing.T) {
 		assertBytesEqualWithDiff(t, "PREPARE_DESCRIBE", got.Bytes(), want[ReqDBSQLPrepareDescribe])
 	})
 
-	// ---- M3 frames (EXECUTE with parameters etc.) ----
-	// The remaining database-side frames in prepared_int_param
-	// exercise EXECUTE with bound parameters:
-	//
-	//	0x1E00 + parameter-bind CP (input descriptor + values)
-	//	0x180E variant carrying input parameter info
-	//	0x1D02 RPB delete + 0x1FFF END_CONVERSATION
-	//
-	// None of these encoders exist yet. Once M3 lands, drop the
-	// t.Skip and add per-frame assertions; the fixture already
-	// has the byte-exact targets to compare against.
-	t.Run("EXECUTE_with_parameters", func(t *testing.T) {
-		t.Skip("M3 (prepared params) not yet implemented; fixture frames at corr 5+ are byte-exact targets")
+	// ---- M3: CHANGE_DESCRIPTOR (0x1E00) + OPEN_DESCRIBE_FETCH with input params ----
+	// Pull these targets from the fixture using the same Sent-by-
+	// ServerID walker. CHANGE_DESCRIPTOR sits on ServerID 0xE004
+	// like the SQL frames; we filter on ReqRepID and pick the
+	// first occurrence.
+	var wantChangeDesc, wantOpenWithParams []byte
+	for _, b := range all {
+		if len(b) < 20 {
+			continue
+		}
+		switch binary.BigEndian.Uint16(b[18:20]) {
+		case ReqDBSQLChangeDescriptor:
+			if wantChangeDesc == nil {
+				wantChangeDesc = b
+			}
+		case ReqDBSQLOpenDescribeFetch:
+			if wantOpenWithParams == nil {
+				wantOpenWithParams = b
+			}
+		}
+	}
+
+	t.Run("CHANGE_DESCRIPTOR", func(t *testing.T) {
+		if wantChangeDesc == nil {
+			t.Fatalf("fixture missing 0x1E00 frame")
+		}
+		shapes := []PreparedParam{{
+			SQLType:     497, // INTEGER nullable
+			FieldLength: 4,
+			Precision:   10,
+			Scale:       0,
+			CCSID:       0,
+		}}
+		hdr, payload, err := ChangeDescriptorRequest(shapes)
+		if err != nil {
+			t.Fatalf("ChangeDescriptorRequest: %v", err)
+		}
+		hdr.CorrelationID = 5
+		var got bytes.Buffer
+		if err := WriteFrame(&got, hdr, payload); err != nil {
+			t.Fatalf("WriteFrame: %v", err)
+		}
+		assertBytesEqualWithDiff(t, "CHANGE_DESCRIPTOR", got.Bytes(), wantChangeDesc)
+	})
+
+	t.Run("OPEN_DESCRIBE_FETCH_with_params", func(t *testing.T) {
+		if wantOpenWithParams == nil {
+			t.Fatalf("fixture missing parameterised 0x180E frame")
+		}
+		// SelectPreparedSQL writes 4 frames; we want the last
+		// (OPEN_DESCRIBE_FETCH with bound INTEGER value 42).
+		// We borrow a successful PREPARE_DESCRIBE reply so
+		// SelectPreparedSQL doesn't bail on its own read; we
+		// don't care about the parsed result here, only the
+		// wire bytes it emitted.
+		dummy := allReceivedsFromFixture(t, "select_dummy.trace")
+		var sqlReceiveds [][]byte
+		for _, b := range dummy {
+			if len(b) >= 8 && b[6] == 0xE0 && b[7] == 0x04 {
+				sqlReceiveds = append(sqlReceiveds, b)
+			}
+		}
+		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4])
+		shapes := []PreparedParam{{
+			SQLType:     497,
+			FieldLength: 4,
+			Precision:   10,
+			Scale:       0,
+			CCSID:       0,
+		}}
+		_, _ = SelectPreparedSQL(conn, preparedSQL, shapes, []any{int32(42)}, 3)
+
+		// Walk the four frames (CREATE_RPB / PREPARE_DESCRIBE /
+		// CHANGE_DESCRIPTOR / OPEN) and assert byte-equality on
+		// the OPEN frame.
+		r := bytes.NewReader(conn.written.Bytes())
+		for i := 0; i < 3; i++ {
+			if _, _, err := ReadFrame(r); err != nil {
+				t.Fatalf("re-parse pre-OPEN frame %d: %v", i, err)
+			}
+		}
+		hdr, payload, err := ReadFrame(r)
+		if err != nil {
+			t.Fatalf("re-parse OPEN: %v", err)
+		}
+		var got bytes.Buffer
+		if err := WriteFrame(&got, hdr, payload); err != nil {
+			t.Fatalf("re-encode OPEN: %v", err)
+		}
+		assertBytesEqualWithDiff(t, "OPEN_DESCRIBE_FETCH(prepared)", got.Bytes(), wantOpenWithParams)
 	})
 }
 

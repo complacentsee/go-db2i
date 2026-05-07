@@ -53,11 +53,10 @@ func parseExtendedResultData(data []byte, cols []SelectColumn) ([]SelectRow, err
 	rowCount := int(be.Uint32(data[4:8]))
 	colCount := int(be.Uint16(data[8:10]))
 	indicatorSize := int(be.Uint16(data[10:12]))
-	// Bytes 12..15 are reserved on V5R1+ servers and zero in
-	// observed traces; some older docs call them a flag word.
-	// Row size at 16..19 is the uncompressed-row size; we don't
-	// rely on it in VLF-compressed mode but we read it for sanity.
-	_ = be.Uint32(data[16:20])
+	rowSize := int(be.Uint32(data[16:20]))
+	// Bytes 12..15 are reserved/compression-flag in JTOpen but
+	// PUB400 leaves them zero in both VLF and non-VLF replies, so
+	// we detect format by length instead.
 
 	if colCount != len(cols) {
 		return nil, fmt.Errorf("hostserver: result data column count %d != format column count %d", colCount, len(cols))
@@ -70,29 +69,58 @@ func parseExtendedResultData(data []byte, cols []SelectColumn) ([]SelectRow, err
 	if fixedLen+indicatorBytes > len(data) {
 		return nil, fmt.Errorf("hostserver: indicators (%d bytes) past end of result data (%d bytes)", indicatorBytes, len(data))
 	}
-	// Per-row indicator: indicators[(row*colCount + col) * indicatorSize : ...]
 	indicators := data[fixedLen : fixedLen+indicatorBytes]
 
+	// Detect VLF vs non-VLF by total size. Non-VLF stores rows
+	// concatenated immediately after indicators with each row
+	// taking exactly rowSize bytes; VLF additionally inserts a
+	// row-info header (8 bytes) and a row-info array (4 bytes per
+	// row) so rows can be variable-length packed. PUB400 picks
+	// non-VLF for fixed-width single-row results (e.g. SELECT of
+	// a single INTEGER) and VLF when any column is variable-length.
+	expectedNonVLF := fixedLen + indicatorBytes + rowSize*rowCount
+	if len(data) == expectedNonVLF {
+		return parseNonVLF(data[fixedLen+indicatorBytes:], cols, indicators, indicatorSize, rowSize, rowCount)
+	}
+
+	// VLF path.
 	rowInfoHeaderStart := fixedLen + indicatorBytes
 	if rowInfoHeaderStart+8 > len(data) {
-		return nil, fmt.Errorf("hostserver: row info header overruns result data")
+		return nil, fmt.Errorf("hostserver: row info header overruns result data (have %d, need %d for VLF; non-VLF expected %d)",
+			len(data), rowInfoHeaderStart+8, expectedNonVLF)
 	}
 	rowInfoArrayOffset := int(be.Uint32(data[rowInfoHeaderStart : rowInfoHeaderStart+4]))
-	// rowsFetched at rowInfoHeaderStart+4..7 (must equal rowCount in current scope).
 
 	rows := make([]SelectRow, rowCount)
 	for i := 0; i < rowCount; i++ {
-		// Row offset is absolute relative to rowInfoHeaderStart.
 		offEntry := rowInfoHeaderStart + rowInfoArrayOffset + i*4
 		if offEntry+4 > len(data) {
 			return nil, fmt.Errorf("hostserver: row info array entry %d overruns result data", i)
 		}
 		rowOff := rowInfoHeaderStart + int(be.Uint32(data[offEntry:offEntry+4]))
-		// Each row is decoded sequentially. We don't know the
-		// exact end (next row's offset, or end of result data),
-		// so we slice generously and let column decoders consume
-		// what they need.
 		row, _, err := decodeRow(data[rowOff:], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize)
+		if err != nil {
+			return nil, fmt.Errorf("row %d: %w", i, err)
+		}
+		rows[i] = row
+	}
+	return rows, nil
+}
+
+// parseNonVLF decodes the plain (no row info header / array) result
+// data layout PUB400 ships when the row size is fixed and small.
+// rowsBytes points at the start of the row data block (right after
+// indicators); each row consumes exactly rowSize bytes.
+func parseNonVLF(rowsBytes []byte, cols []SelectColumn, indicators []byte, indicatorSize, rowSize, rowCount int) ([]SelectRow, error) {
+	rows := make([]SelectRow, rowCount)
+	for i := 0; i < rowCount; i++ {
+		start := i * rowSize
+		end := start + rowSize
+		if end > len(rowsBytes) {
+			return nil, fmt.Errorf("non-VLF row %d (offset %d..%d) overruns row block (%d bytes)", i, start, end, len(rowsBytes))
+		}
+		colCount := len(cols)
+		row, _, err := decodeRow(rowsBytes[start:end], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", i, err)
 		}
@@ -201,19 +229,19 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return s, 2 + n, nil
 
-	case SQLTypeInteger:
+	case SQLTypeInteger, 497: // 496 NN, 497 nullable
 		if len(b) < 4 {
 			return nil, 0, fmt.Errorf("integer wants 4 bytes, have %d", len(b))
 		}
 		return int32(binary.BigEndian.Uint32(b[:4])), 4, nil
 
-	case SQLTypeSmallInt:
+	case SQLTypeSmallInt, 501: // 500 NN, 501 nullable
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("smallint wants 2 bytes, have %d", len(b))
 		}
 		return int16(binary.BigEndian.Uint16(b[:2])), 2, nil
 
-	case SQLTypeBigInt:
+	case SQLTypeBigInt, 493: // 492 NN, 493 nullable
 		if len(b) < 8 {
 			return nil, 0, fmt.Errorf("bigint wants 8 bytes, have %d", len(b))
 		}
