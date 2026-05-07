@@ -284,6 +284,68 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 11.65: M4 NUMERIC(5,2) bind. ---
+	numBindRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS NUMERIC(5,2)) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     489, // NUMERIC nullable
+			FieldLength: 5,   // one byte per digit
+			Precision:   5,
+			Scale:       2,
+		}},
+		[]any{"-123.45"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS NUMERIC(5,2)) ... [\"-123.45\"]\n")
+	for i, r := range numBindRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.7: M4 DATE bind. ---
+	dateRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS DATE) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     385, // DATE nullable
+			FieldLength: 10,  // ISO format
+			Precision:   10,
+		}},
+		[]any{"2026-05-08"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS DATE) ... [\"2026-05-08\"]\n")
+	for i, r := range dateRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.8: M4 TIME bind. ---
+	timeRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS TIME) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     389, // TIME nullable
+			FieldLength: 8,
+			Precision:   8,
+		}},
+		[]any{"13:45:09"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS TIME) ... [\"13:45:09\"]\n")
+	for i, r := range timeRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.9: M4 TIMESTAMP bind. ---
+	tsRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS TIMESTAMP) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     393, // TIMESTAMP nullable
+			FieldLength: 26,
+			Precision:   26,
+			Scale:       6,
+		}},
+		[]any{"2026-05-08T13:45:09.123456"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS TIMESTAMP) ... [\"2026-05-08T13:45:09.123456\"]\n")
+	for i, r := range tsRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
 	// --- Step 11.6: M4 NULL bind. ---
 	nullRes := freshPreparedSelect(dbAddr, user, pwd,
 		"SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1",

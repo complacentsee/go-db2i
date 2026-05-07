@@ -47,6 +47,43 @@ func TestPackedBCDRoundTrip(t *testing.T) {
 	}
 }
 
+// TestZonedBCDRoundTrip mirrors TestPackedBCDRoundTrip for the
+// NUMERIC encoder (one byte per digit, sign in last byte's high
+// nibble).
+func TestZonedBCDRoundTrip(t *testing.T) {
+	cases := []struct {
+		name      string
+		precision int
+		scale     int
+		value     string
+		want      string
+	}{
+		{name: "small_positive", precision: 5, scale: 2, value: "123.45", want: "123.45"},
+		{name: "small_negative", precision: 5, scale: 2, value: "-123.45", want: "-123.45"},
+		{name: "zero", precision: 5, scale: 2, value: "0", want: "0.00"},
+		{name: "max31_5_pos", precision: 31, scale: 5, value: "12345678901234567890123456.78901", want: "12345678901234567890123456.78901"},
+		{name: "scale_zero", precision: 7, scale: 0, value: "1234567", want: "1234567"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			zoned, err := encodeZonedBCD(tc.value, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("encodeZonedBCD: %v", err)
+			}
+			if len(zoned) != tc.precision {
+				t.Errorf("len(zoned) = %d, want %d", len(zoned), tc.precision)
+			}
+			got, err := decodeZonedBCD(zoned, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("decodeZonedBCD: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("round-trip = %q, want %q (zoned = %X)", got, tc.want, zoned)
+			}
+		})
+	}
+}
+
 // TestPackedBCDRejectsOverflow makes sure we surface an explicit
 // error when a caller hands us a value that doesn't fit the column
 // shape, rather than silently truncating.

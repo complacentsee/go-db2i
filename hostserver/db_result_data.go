@@ -277,6 +277,21 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return int64(binary.BigEndian.Uint64(b[:8])), 8, nil
 
+	case SQLTypeNumeric, 489: // 488 NN, 489 nullable -- NUMERIC(p, s) zoned decimal
+		// Zoned BCD: one byte per digit; high nibble is zone (0xF
+		// for plain digit), low nibble is the digit 0-9. The
+		// last byte's high nibble carries the sign: 0xC = +,
+		// 0xD = -, 0xF = unsigned. Bytes per value = precision.
+		nbytes := int(col.Precision)
+		if len(b) < nbytes {
+			return nil, 0, fmt.Errorf("numeric(%d,%d) wants %d bytes, have %d", col.Precision, col.Scale, nbytes, len(b))
+		}
+		s, err := decodeZonedBCD(b[:nbytes], int(col.Precision), int(col.Scale))
+		if err != nil {
+			return nil, 0, err
+		}
+		return s, nbytes, nil
+
 	case SQLTypeDecimal, 485: // 484 NN, 485 nullable -- DECIMAL(p, s) packed BCD
 		// Packed BCD: ceil((precision+1)/2) bytes; each byte
 		// holds two BCD digits (high then low nibble); the
@@ -396,6 +411,54 @@ func decodePackedBCD(b []byte, precision, scale int) (string, error) {
 	return string(out), nil
 }
 
+// decodeZonedBCD turns DB2 for i's zoned-BCD bytes (NUMERIC(p, s))
+// into a decimal string. One byte per digit; low nibble is the
+// digit, high nibble is the zone (0xF for plain digits, 0xC/0xD/0xF
+// for sign on the last byte).
+func decodeZonedBCD(b []byte, precision, scale int) (string, error) {
+	if len(b) != precision {
+		return "", fmt.Errorf("zoned: byte count %d != precision %d", len(b), precision)
+	}
+	digits := make([]byte, len(b))
+	for i, by := range b {
+		lo := by & 0x0F
+		if lo > 9 {
+			return "", fmt.Errorf("zoned: byte %d low nibble 0x%X > 9", i, lo)
+		}
+		digits[i] = '0' + lo
+	}
+	negative := false
+	switch (b[len(b)-1] >> 4) & 0x0F {
+	case 0x0A, 0x0C, 0x0E, 0x0F:
+		// positive / unsigned
+	case 0x0B, 0x0D:
+		negative = true
+	default:
+		return "", fmt.Errorf("zoned: bad sign nibble in last byte 0x%02X", b[len(b)-1])
+	}
+
+	var out []byte
+	if negative {
+		out = append(out, '-')
+	}
+	if scale == 0 {
+		out = append(out, trimLeadingZeros(digits)...)
+	} else if scale >= len(digits) {
+		out = append(out, '0', '.')
+		for i := 0; i < scale-len(digits); i++ {
+			out = append(out, '0')
+		}
+		out = append(out, digits...)
+	} else {
+		intPart := trimLeadingZeros(digits[:len(digits)-scale])
+		fracPart := digits[len(digits)-scale:]
+		out = append(out, intPart...)
+		out = append(out, '.')
+		out = append(out, fracPart...)
+	}
+	return string(out), nil
+}
+
 // trimLeadingZeros strips leading '0' bytes from b but keeps at
 // least one digit (so "0000" -> "0", "0123" -> "123"). Used to
 // undo the precision-pad zeros decodePackedBCD emits before
@@ -407,21 +470,44 @@ func trimLeadingZeros(b []byte) []byte {
 	return b
 }
 
-// ymdToISODate widens "YY-MM-DD" (8 chars) to "YYYY-MM-DD" using
-// the 1940 century boundary JT400 chooses by default. If s already
-// looks like ISO ("YYYY-MM-DD"), return it unchanged. Other formats
-// (USA, EUR, JIS) round-trip unchanged today; M5 wires up the
-// per-format converters once the server attribute is honoured.
+// ymdToISODate normalises whatever date format the server sent into
+// ISO "YYYY-MM-DD". Recognises:
+//
+//	"YYYY-MM-DD"  ISO/JIS  (10 chars) -> as-is
+//	"YY-MM-DD"    YMD      (8 chars)  -> "20YY-..." or "19YY-..." (1940 boundary)
+//	"MM/DD/YYYY"  USA      (10 chars) -> "YYYY-MM-DD"
+//	"DD.MM.YYYY"  EUR      (10 chars) -> "YYYY-MM-DD"
+//	"MM/DD/YY"    MDY      (8 chars)  -> "20YY-MM-DD" or "19YY-MM-DD"
+//	"DD/MM/YY"    DMY      (8 chars)  -- ambiguous with MDY; prefer MDY
+//
+// MDY/DMY collide on shape so we default to MDY (US convention); a
+// caller that wants DMY can negotiate ISO via DBAttributesOptions
+// .DateFormat = DateFormatISO and skip this function entirely. Any
+// shape we don't recognise falls through unchanged.
 func ymdToISODate(s string) string {
-	if len(s) == 10 && s[4] == '-' && s[7] == '-' {
-		return s
-	}
-	if len(s) == 8 && s[2] == '-' && s[5] == '-' {
+	switch {
+	case len(s) == 10 && s[4] == '-' && s[7] == '-':
+		return s // ISO / JIS
+	case len(s) == 8 && s[2] == '-' && s[5] == '-':
+		// YMD: "YY-MM-DD"
 		century := "20"
-		if s[0] >= '4' { // YY >= 40 -> 19YY
+		if s[0] >= '4' {
 			century = "19"
 		}
 		return century + s
+	case len(s) == 10 && s[2] == '/' && s[5] == '/':
+		// USA: "MM/DD/YYYY"
+		return s[6:10] + "-" + s[0:2] + "-" + s[3:5]
+	case len(s) == 10 && s[2] == '.' && s[5] == '.':
+		// EUR: "DD.MM.YYYY"
+		return s[6:10] + "-" + s[3:5] + "-" + s[0:2]
+	case len(s) == 8 && s[2] == '/' && s[5] == '/':
+		// MDY (US): "MM/DD/YY"
+		century := "20"
+		if s[6] >= '4' {
+			century = "19"
+		}
+		return century + s[6:8] + "-" + s[0:2] + "-" + s[3:5]
 	}
 	return s
 }

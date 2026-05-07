@@ -41,7 +41,29 @@ type DBAttributesOptions struct {
 	// Empty = don't send the CP. JTOpen sends the user's home
 	// library here ("AFTRAEGE11" on PUB400 for AFTRAEGE1).
 	DefaultSQLLibrary string
+	// DateFormat overrides the date format CP 0x3805 we ask the
+	// server to use for date columns. The default 0xF0 (EBCDIC '0',
+	// JOB) lets the server pick its job-default format -- on PUB400
+	// that's YMD ("YY-MM-DD"). Set to DateFormatISO to receive
+	// dates in 10-char "YYYY-MM-DD" with no centruy-boundary
+	// guesswork in the decoder; or to DateFormatJOB to keep the
+	// fixture-compatible default.
+	DateFormat byte
 }
+
+// DateFormat constants for DBAttributesOptions.DateFormat. EBCDIC
+// digits in CP 0x3805. PUB400 honours the request iff the CP is
+// present (default 0 = JOB).
+const (
+	DateFormatJOB byte = 0xF0 // EBCDIC '0' -- server-default
+	DateFormatUSA byte = 0xF1 // MM/DD/YYYY (10 chars)
+	DateFormatISO byte = 0xF2 // YYYY-MM-DD (10 chars)
+	DateFormatEUR byte = 0xF3 // DD.MM.YYYY (10 chars)
+	DateFormatJIS byte = 0xF4 // YYYY-MM-DD (10 chars)
+	DateFormatMDY byte = 0xF5 // MM/DD/YY (8 chars)
+	DateFormatDMY byte = 0xF6 // DD/MM/YY (8 chars)
+	DateFormatYMD byte = 0xF7 // YY-MM-DD (8 chars)
+)
 
 // DefaultDBAttributesOptions returns the minimum-acceptable defaults
 // for an as-database session. These match the JTOpen JDBC driver
@@ -59,6 +81,11 @@ func DefaultDBAttributesOptions() DBAttributesOptions {
 		// home library on PUB400 (AFTRAEGE11). For other servers
 		// callers should override before calling SetSQLAttributes.
 		DefaultSQLLibrary: "AFTRAEGE11",
+		// DateFormat: JOB (server picks). Tests pin this for
+		// fixture byte-equality; production callers can flip to
+		// DateFormatISO so dates come back already-ISO and the
+		// decoder skips the YMD-to-ISO conversion.
+		DateFormat: DateFormatJOB,
 	}
 }
 
@@ -106,7 +133,7 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		// 0x3803 ClientFunctionalLevel -- fixed CCSID-tagged
 		// 10-byte string with 2 trailing pad bytes (LL=20).
 		DBParamFixedString(0x3803, 37, cflBytes),
-		DBParamByte(0x3805, 0xF0),
+		DBParamByte(0x3805, opts.DateFormat),
 		DBParamShort(0x3806, 0x0001),
 		DBParamByte(0x3824, 0xE8),
 		DBParamShort(0x380E, 0x0000),

@@ -192,6 +192,66 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			}
 			be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
 			dataOff += 8
+		case 384, 385: // DATE
+			s, err := toString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			wire, err := encodeDateString(s, int(p.FieldLength))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			ebc, err := ebcdic.CCSID37.Encode(wire)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: encode date: %w", i, err)
+			}
+			copy(buf[dataOff:dataOff+len(ebc)], ebc)
+			dataOff += int(p.FieldLength)
+		case 388, 389: // TIME
+			s, err := toString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			wire, err := encodeTimeString(s, int(p.FieldLength))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			ebc, err := ebcdic.CCSID37.Encode(wire)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: encode time: %w", i, err)
+			}
+			copy(buf[dataOff:dataOff+len(ebc)], ebc)
+			dataOff += int(p.FieldLength)
+		case 392, 393: // TIMESTAMP
+			s, err := toString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			wire, err := encodeTimestampString(s, int(p.FieldLength))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			ebc, err := ebcdic.CCSID37.Encode(wire)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: encode timestamp: %w", i, err)
+			}
+			copy(buf[dataOff:dataOff+len(ebc)], ebc)
+			dataOff += int(p.FieldLength)
+		case 488, 489: // NUMERIC(p,s) zoned decimal
+			s, err := toDecimalString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			zoned, err := encodeZonedBCD(s, int(p.Precision), int(p.Scale))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d (numeric(%d,%d)): %w", i, p.Precision, p.Scale, err)
+			}
+			if uint32(len(zoned)) != p.FieldLength {
+				return nil, fmt.Errorf("hostserver: param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
+					i, p.Precision, p.Scale, len(zoned), p.FieldLength)
+			}
+			copy(buf[dataOff:dataOff+len(zoned)], zoned)
+			dataOff += len(zoned)
 		case 484, 485: // DECIMAL(p,s) packed BCD
 			s, err := toDecimalString(v)
 			if err != nil {
@@ -546,6 +606,133 @@ func toDecimalString(v any) (string, error) {
 	default:
 		return "", fmt.Errorf("cannot bind %T as DECIMAL (need string or numeric)", v)
 	}
+}
+
+// encodeDateString converts an ISO date "YYYY-MM-DD" into the wire
+// form the column expects. fieldLen=10 keeps ISO; fieldLen=8 strips
+// the century to YMD ("YY-MM-DD"). Other widths are rejected --
+// USA/EUR/JIS handlers land alongside the per-format date task
+// (#38) so the encoder doesn't silently emit something the server
+// won't parse.
+func encodeDateString(s string, fieldLen int) (string, error) {
+	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
+		return "", fmt.Errorf("date %q must be ISO YYYY-MM-DD", s)
+	}
+	switch fieldLen {
+	case 10:
+		return s, nil
+	case 8:
+		return s[2:], nil // "YY-MM-DD"
+	default:
+		return "", fmt.Errorf("date FieldLength %d unsupported (need 8 YMD or 10 ISO)", fieldLen)
+	}
+}
+
+// encodeTimeString converts ISO time "HH:MM:SS" into the wire form.
+// fieldLen 8 only; ISO ":" and IBM "." are both accepted as input
+// to make caller code tolerant. Wire goes out with ":" since PUB400
+// connects in ISO time format by default; switch to "." when we
+// negotiate a different format via SET_SQL_ATTRIBUTES (M5 work).
+func encodeTimeString(s string, fieldLen int) (string, error) {
+	if fieldLen != 8 {
+		return "", fmt.Errorf("time FieldLength %d unsupported (need 8)", fieldLen)
+	}
+	if len(s) != 8 {
+		return "", fmt.Errorf("time %q must be 8 chars HH:MM:SS or HH.MM.SS", s)
+	}
+	// Normalise separators to ':' (ISO).
+	out := []byte(s)
+	if out[2] == '.' {
+		out[2] = ':'
+	}
+	if out[5] == '.' {
+		out[5] = ':'
+	}
+	return string(out), nil
+}
+
+// encodeTimestampString converts an ISO timestamp
+// "YYYY-MM-DDTHH:MM:SS.ffffff" (or "YYYY-MM-DD HH:MM:SS.ffffff")
+// into IBM wire form "YYYY-MM-DD-HH.MM.SS.ffffff" (26 chars). The
+// IBM wire form uses '-' between date and time and '.' between
+// time fields; we always emit it because the existing
+// SET_SQL_ATTRIBUTES we ship asks for IBM-format timestamps.
+func encodeTimestampString(s string, fieldLen int) (string, error) {
+	if fieldLen != 26 {
+		return "", fmt.Errorf("timestamp FieldLength %d unsupported (need 26)", fieldLen)
+	}
+	if len(s) != 26 {
+		return "", fmt.Errorf("timestamp %q must be 26 chars", s)
+	}
+	out := []byte(s)
+	// Date/time separator: ISO 'T', alt ' ', IBM '-'.
+	if out[10] == 'T' || out[10] == ' ' {
+		out[10] = '-'
+	}
+	if out[10] != '-' {
+		return "", fmt.Errorf("timestamp %q has unexpected date/time separator %q at offset 10", s, out[10])
+	}
+	// Time field separators: ISO ':', IBM '.'.
+	if out[13] == ':' {
+		out[13] = '.'
+	}
+	if out[16] == ':' {
+		out[16] = '.'
+	}
+	return string(out), nil
+}
+
+// encodeZonedBCD turns a decimal string into IBM zoned BCD bytes
+// for a NUMERIC(precision, scale) column. One byte per digit; high
+// nibble is 0xF (zone) for plain digits and 0xC/0xD on the last
+// byte for sign. Returns precision bytes.
+func encodeZonedBCD(s string, precision, scale int) ([]byte, error) {
+	negative := false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		negative = s[0] == '-'
+		s = s[1:]
+	}
+	intPart, fracPart := s, ""
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		intPart = s[:dot]
+		fracPart = s[dot+1:]
+	}
+	for i := 0; i < len(intPart); i++ {
+		if intPart[i] < '0' || intPart[i] > '9' {
+			return nil, fmt.Errorf("non-digit %q in integer part", intPart[i])
+		}
+	}
+	for i := 0; i < len(fracPart); i++ {
+		if fracPart[i] < '0' || fracPart[i] > '9' {
+			return nil, fmt.Errorf("non-digit %q in fractional part", fracPart[i])
+		}
+	}
+	for len(intPart) > 1 && intPart[0] == '0' {
+		intPart = intPart[1:]
+	}
+	if len(fracPart) > scale {
+		return nil, fmt.Errorf("fractional digit count %d exceeds scale %d", len(fracPart), scale)
+	}
+	for len(fracPart) < scale {
+		fracPart += "0"
+	}
+	intWidth := precision - scale
+	if len(intPart) > intWidth {
+		return nil, fmt.Errorf("integer digit count %d exceeds precision-scale = %d", len(intPart), intWidth)
+	}
+	for len(intPart) < intWidth {
+		intPart = "0" + intPart
+	}
+	digits := intPart + fracPart // exactly `precision` digits
+
+	out := make([]byte, precision)
+	for i := 0; i < precision; i++ {
+		out[i] = 0xF0 | (digits[i] - '0')
+	}
+	if negative {
+		out[precision-1] = 0xD0 | (digits[precision-1] - '0')
+	}
+	return out, nil
 }
 
 // encodePackedBCD turns a decimal string ("[-]DDD[.DDD]") into IBM
