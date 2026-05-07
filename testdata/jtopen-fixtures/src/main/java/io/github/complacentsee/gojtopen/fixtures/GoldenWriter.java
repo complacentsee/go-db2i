@@ -69,7 +69,7 @@ public class GoldenWriter {
         while (rs.next()) {
             ArrayNode row = rows.addArray();
             for (int i = 1; i <= n; i++) {
-                appendValue(row, rs, i, md.getColumnType(i));
+                appendValue(row, rs, i, md.getColumnType(i), md.getColumnTypeName(i));
             }
         }
     }
@@ -97,11 +97,19 @@ public class GoldenWriter {
         Files.write(out, MAPPER.writeValueAsBytes(root));
     }
 
-    private static void appendValue(ArrayNode arr, ResultSet rs, int col, int sqlType) throws SQLException {
+    private static void appendValue(ArrayNode arr, ResultSet rs, int col, int sqlType, String typeName) throws SQLException {
         // Read raw first so we can detect NULL without coercion noise.
         Object raw = rs.getObject(col);
         if (rs.wasNull() || raw == null) {
             arr.addNull();
+            return;
+        }
+        // JDBC has no Types constant for DECFLOAT (IEEE 754-2008 decimal);
+        // it surfaces as Types.OTHER. Identify by typeName so the value
+        // round-trips as a canonical string (covers Infinity / NaN / -0
+        // that BigDecimal can't represent).
+        if ("DECFLOAT".equals(typeName)) {
+            arr.add(rs.getString(col));
             return;
         }
         switch (sqlType) {

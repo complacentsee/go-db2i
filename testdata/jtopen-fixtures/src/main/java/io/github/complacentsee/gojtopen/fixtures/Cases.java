@@ -175,12 +175,18 @@ final class Cases {
     }
 
     private static abstract class WithTable extends Case {
+        // 10-char SQL name == 10-char IBM i system name, so we avoid the
+        // suffix-mangling that turned GOJTOPEN_T1 into GOJTO00001 and made
+        // the system commands below fragile.
+        private static final String TABLE_SHORT = "GOJT_T1";
+
         protected final String schema;
         protected final String table;
+
         WithTable(String name, String schema) {
             super(name);
             this.schema = schema;
-            this.table = schema + ".GOJTOPEN_T1";
+            this.table = schema + "." + TABLE_SHORT;
         }
         @Override public void setup(Connection conn) throws SQLException {
             try (Statement st = conn.createStatement()) {
@@ -190,6 +196,22 @@ final class Cases {
                         + "NAME VARCHAR(40) NOT NULL, "
                         + "AMT DECIMAL(11,2) NOT NULL"
                         + ")");
+                // Best-effort: enable journaling so the commitment-control
+                // cases (tx_commit / tx_rollback) can actually exercise the
+                // happy path. PUB400 user libraries created via CREATE
+                // SCHEMA already contain QSQJRN; if not, we attempt to
+                // create one. Any of these calls may fail harmlessly
+                // (already-exists, insufficient authority, etc.); we
+                // swallow the error and let the tx_* cases fall through to
+                // the SQL7008 fixture they had previously.
+                runIgnoring(st, "CALL QSYS2.QCMDEXC('CRTJRNRCV JRNRCV("
+                        + schema + "/QSQJRN0001)')");
+                runIgnoring(st, "CALL QSYS2.QCMDEXC('CRTJRN JRN("
+                        + schema + "/QSQJRN) JRNRCV("
+                        + schema + "/QSQJRN0001)')");
+                runIgnoring(st, "CALL QSYS2.QCMDEXC('STRJRNPF FILE("
+                        + schema + "/" + TABLE_SHORT + ") JRN("
+                        + schema + "/QSQJRN)')");
                 seed(conn);
             }
         }
@@ -199,6 +221,10 @@ final class Cases {
             }
         }
         protected void seed(Connection conn) throws SQLException { }
+
+        private static void runIgnoring(Statement st, String sql) {
+            try { st.execute(sql); } catch (SQLException ignored) { }
+        }
     }
 
     private static final class MultiRowFetch extends WithTable {
