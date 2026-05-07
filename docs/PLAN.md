@@ -11,18 +11,22 @@ and the M1 sign-on smoke-tested clean against PUB400.
 - ✅ **M0** — Fixture-capture harness (Java/Maven). 30 cases committed
   under `testdata/jtopen-fixtures/fixtures/`. Re-runnable against
   PUB400 with `mvn -q exec:java`.
-- ✅ **M1 (sign-on side)** — Pure-Go sign-on against as-signon (port
-  8476) works end-to-end on PUB400. Includes:
-  - DSS framing (`hostserver/dss.go`)
-  - Exchange-attributes + signon-info request/reply
-    (`hostserver/signon.go`)
-  - SHA-1 password encryption — levels 2 + 3 (`auth/password_sha1.go`)
-  - CCSID 37 codec (`ebcdic/ccsid.go`)
-  - `hostserver.SignOn()` orchestration
-  - `cmd/smoketest` validates live against PUB400
-- ⏳ **M1 (database side)** — `as-database` handshake on port 8471.
-  Different (simpler) opening sequence than as-signon. Fixtures in
-  `connect_only.trace` recv #3..#6 + sent frames 4..8.
+- ✅ **M1** — Sign-on (port 8476) + as-database handshake (port 8471).
+  Pure Go, live against PUB400.
+- ✅ **M2** — Static SELECT round-trip. Live decodes
+  `select_dummy.golden.json` byte-equal.
+- ✅ **M3** — Prepared statements with bound parameters
+  (INT/VARCHAR live; full type set lives in M4).
+- ✅ **M4** — Type system. 19/19 round-trip suite green.
+  All numeric/character/date/time/decimal/decfloat types decode
+  AND bind round-trip live; CCSID 37 + 273 codecs are real.
+- ✅ **M5** — ResultSet metadata, multi-row continuation FETCH
+  (live: 5000 rows from PUB400), COMMIT/ROLLBACK/autocommit
+  encoders, isolation-level knob.
+- ⏳ **M6** — `database/sql/driver` registration. Up next.
+
+Each closed milestone has a **Deferred** subsection below listing
+the items that were pushed past it; nothing is closed silently.
 
 ## Quick-start on the remote machine
 
@@ -122,6 +126,21 @@ recv #2.
 **Gate to M2:** smoketest opens both as-signon and as-database
 connections and prints info from both.
 
+**Status:** ✅ landed — commit `2980ce5`.
+
+**Deferred from M1:**
+
+- **Password levels 0/1 (DES) and 4 (PBKDF2-SHA-512)** — PUB400 is
+  level 3 SHA-1, so this hasn't blocked anything. Production
+  IBM i deployments may use level 4. Algorithm references in
+  JT400's `AS400ImplRemote.encryptPassword` (DES) and the PBKDF2
+  block around line 5200.
+- **`signon.go:318` TODO** — error-class wrapping in the sign-on
+  reply parser. Inline; ~15 lines when revisited.
+- **TLS sign-on / database (ports 9476 / 9471)** — IBM i certs
+  sometimes lack DNS SAN; `crypto/tls` rejects by default. Land
+  with M7 alongside the rest of the connection-level work.
+
 ### M2 — Static SELECT round-trip (~2-3 weeks)
 
 Goal: run `SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1`
@@ -153,6 +172,25 @@ through the Go code and decode the result row.
 **Gate to M3:** the static SELECT row prints byte-equal values to the
 fixture's golden.json (semantically equal for floats/timestamps).
 
+**Status:** ✅ landed — commits `457a987`, `054edf9`, `b37bc08`,
+`3de7fe9`. The `TestSentBytesMatchSelectDummyFixture` byte-equality
+scaffold caught a CREATE_RPB template-handle bug that days of
+side-by-side hex inspection missed; this pattern is the regression
+net for every encoder M3+ adds.
+
+**Deferred from M2:**
+
+- **CP 0x3807 (SQLCA) is captured but not decoded** — we surface
+  ErrorClass + ReturnCode out of the template, sufficient for the
+  +100 (end-of-data) and -501 (cursor-not-open) checks the result
+  loop needs. A typed `*Db2Error{SQLState, SQLCode, Message,
+  Tokens}` wrapper lands in M7.
+- **Stream/cursor `*Rows` API** — current `SelectStaticSQL` returns
+  the full result set in memory. database/sql's `Rows` interface
+  (M6) will need an iterator that pulls FETCH batches lazily; M5
+  added the underlying continuation FETCH but kept the
+  return-everything API for simplicity.
+
 ### M3 — Prepared statements + parameter binding (~2 weeks)
 
 Goal: support `db.QueryContext(ctx, "SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1", 42)`.
@@ -170,6 +208,26 @@ Goal: support `db.QueryContext(ctx, "SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDU
 
 **Gate to M4:** prepared statements with primitive parameters
 round-trip cleanly against PUB400.
+
+**Status:** ✅ landed — commits `8420d79`, `b5c7f64`, `71bc3aa`.
+Prepared SELECT with INT and VARCHAR live, plus the full bind
+encoder framework (CP 0x381E shape descriptor + CP 0x381F value
+carrier + 0x1E00 CHANGE_DESCRIPTOR frame). M4 widened the bind
+type matrix on top of this scaffold.
+
+**Deferred from M3:**
+
+- **`bool` parameter binding** — listed in the original M3 scope
+  but no IBM i SQL type maps cleanly to BOOL pre-V7R5. Skip until
+  someone needs it; SMALLINT(1) is the standard substitute.
+- **String CCSIDs beyond 37 / 273** — UTF-8 (1208) and UCS-2 BE
+  (13488) for column data are referenced in the connection
+  metadata path but not used for VARCHAR bind. Lands with the M7
+  CCSID negotiation work.
+- **Multi-row INSERT bind paths** — the descriptor + data CPs we
+  ship handle one row of input. Batch INSERT (multiple rows in
+  one frame) is a separate encoding; defer until either M5
+  acceptance forces it or a real workload requires it.
 
 ### M4 — Type system (~3-4 weeks; **highest risk**)
 
@@ -206,6 +264,34 @@ correctly between PUB400 and Go.
 `AMT DECIMAL(11,2)` column in `multi_row_fetch_1k` round-trips for
 all 1000 rows; negative-decimal sign nibbles handled.
 
+**Status:** ✅ landed — commits `3de699b`, `383d8af`, `c3a3d09`,
+`50a3c25`, `757e5e7`, `4be6736`. Type round-trip suite at 19/19;
+DPD codec hand-rolled (8 + 16 byte forms); CCSID 273 mapping
+verified byte-for-byte against Python's stdlib `cp273`; packed
+BCD sign nibbles cover both directions.
+
+**Deferred from M4:**
+
+- **Live INSERT/UPDATE/DELETE round-trip** — every type now has a
+  Go encoder, but live-validating the bind-and-write path requires
+  PUB400 write privileges (we read-only in the current account).
+  The bind encoders are exercised via SELECT CAST(? AS T) loopback
+  in the smoketest; full I/U/D verification picks up in M6 once
+  database/sql.Tx is wired and we capture write fixtures.
+- **DATE format negotiation for non-default formats** — encoder
+  supports ISO and YMD output widths; USA/EUR/JIS/MDY/DMY bind
+  not implemented (8-char DATE bind only emits YMD). Decoder
+  recognises all formats. Wire up bind variants when a fixture
+  forces the issue.
+- **CCSID 65535 (binary "no conversion")** — listed in original
+  M4 scope but no captured fixture uses it; the type-decoder
+  switch should route 65535 → `[]byte` directly without EBCDIC
+  decode. Still a parking-lot item.
+- **Schema/table column metadata** — `SelectColumn.Schema` and
+  `SelectColumn.Table` are blank because JT400 only sends them
+  when the connection set `extended metadata=true`. Decision
+  deferred to the M6 driver design (default vs opt-in).
+
 ### M5 — ResultSet metadata, transactions, isolation (~1-2 weeks)
 
 - Column metadata (`getColumnName/Type/Precision/Scale/etc`) from
@@ -216,6 +302,36 @@ all 1000 rows; negative-decimal sign nibbles handled.
   `*RR`) to JTOpen's URL property values.
 - Acceptance: extend smoketest with a `BEGIN; INSERT; COMMIT; SELECT`
   cycle on a journaled table.
+
+**Status:** ✅ landed — commits `f533969`, `fd52945`, `34f7696`.
+Multi-row continuation FETCH live (5000-row pull from
+`QSYS2.SYSTABLES`); column metadata `TypeName/DisplaySize/
+Nullable/Signed` matches JTOpen for all 15 type fixtures;
+`Commit` (0x1807) / `Rollback` (0x1808) / `AutocommitOff/On`
+encoders match JT400 source byte-for-byte; isolation level knob
+on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
+/ `*RS` (CP 0x380E).
+
+**Deferred from M5:**
+
+- **Live COMMIT / ROLLBACK on a journaled table** — frame shapes
+  verified via `TestCommitFrameShape` / `TestRollbackFrameShape`
+  but PUB400 rejects committing a read-only transaction with SQL
+  -211 / -7008. Need a journaled writeable table to validate
+  semantics; acceptance picks up in M6 once `database/sql.Tx`
+  wraps these primitives.
+- **Re-capture fixtures with M5 RPB DELETE in scope** — every
+  fakeConn-driven test currently appends a `syntheticFetchEndReply`
+  + `syntheticRPBDeleteReply` because the captured `.trace`
+  fixtures predate the M5 cleanup loop. Re-running
+  `mvn -q exec:java` against PUB400 (after the M5 changes are
+  pushed) refreshes the fixtures so synthetic stubs go away.
+- **`cmd/diffrunner`** — mentioned in the original M5 plan as a
+  nightly Java/Go cross-check. Never built; still a good idea
+  during M6 conformance work.
+- **Streaming `*Rows` API** — see "Deferred from M2"; same item.
+  Continuation FETCH lands in M5 but the public API still buffers
+  every row. M6 wraps a lazy iterator for `database/sql.Rows`.
 
 ### M6 — `database/sql` driver registration + conformance (~2 weeks)
 
@@ -281,24 +397,27 @@ When you need to understand a wire format, look in
 
 ## Known issues / parking lot
 
+The closed-milestone "Deferred" subsections above are the
+authoritative list. Items below are cross-cutting concerns that
+don't slot into a single milestone.
+
 - **`tx_commit` / `tx_rollback` fixtures** — currently SQL7008
   error-path captures because PUB400 won't journal our test table for
   this account. The SQL7008 wire path is still useful (for
   M5 error handling). Re-capture against a real IBM i with
   journaling enabled to get the happy commit/rollback wire trace.
-- **Password levels 0/1 (DES) and 4 (PBKDF2-SHA-512)** —
-  unimplemented. PUB400 is level 3 so this hasn't blocked anything,
-  but a production IBM i may use level 4. Add when needed; algorithms
-  in `AS400ImplRemote.encryptPassword` (DES) and the PBKDF2 block
-  starting around line 5200.
-- **Schema/table names in column metadata are blank** — JTOpen needs
-  the `extended metadata=true` URL property for these to populate.
-  Decide whether to enable by default or expose as a Conn option.
+  (Same blocker as M5's "live COMMIT/ROLLBACK" deferred item.)
 - **CCSID 65535 binary handling** — make sure every type-decoding
   path checks the column CCSID before attempting EBCDIC decode.
-- **DECFLOAT** — currently surfaces as `Types.OTHER` (1111) in the
-  fixture goldens because JDBC has no constant for it. M4 handles
-  this by typename match.
+  No captured fixture exercises this today, so it's untested.
+- **`hostserver/doc.go` "database (TODO)" stub** — package doc
+  was written when M2 was still scoped; needs a refresh now that
+  M2-M5 landed.
+- **Re-capture all fixtures post-M5** — the `syntheticFetchEndReply`
+  / `syntheticRPBDeleteReply` helpers in tests exist only because
+  captured `.trace` files predate the M5 continuation-FETCH +
+  RPB-DELETE loop. Re-running the harness against a JT400 build
+  that mirrors the M5 cleanup behavior eliminates the stubs.
 
 ## Risks (still relevant from feasibility plan)
 
