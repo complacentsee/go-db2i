@@ -259,6 +259,37 @@ func main() {
 		fmt.Printf("  row %d: %v\n", i, r)
 	}
 
+	// --- Step 11.55: M4 DECIMAL(5,2) bind. ---
+	decBindRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS DECIMAL(5,2)) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     485, // DECIMAL nullable
+			FieldLength: 3,   // ceil((5+1)/2) = 3 bytes
+			Precision:   5,
+			Scale:       2,
+		}},
+		[]any{"-123.45"},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS DECIMAL(5,2)) ... [\"-123.45\"]\n")
+	for i, r := range decBindRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
+	// --- Step 11.6: M4 NULL bind. ---
+	nullRes := freshPreparedSelect(dbAddr, user, pwd,
+		"SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1",
+		[]hostserver.PreparedParam{{
+			SQLType:     497,
+			FieldLength: 4,
+			Precision:   10,
+		}},
+		[]any{nil},
+	)
+	fmt.Printf("\nprepared select: SELECT CAST(? AS INTEGER) ... [NULL]\n")
+	for i, r := range nullRes.Rows {
+		fmt.Printf("  row %d: %v\n", i, r)
+	}
+
 	// --- Step 11: M4 SMALLINT bind. ---
 	smallintRes := freshPreparedSelect(dbAddr, user, pwd,
 		"SELECT CAST(? AS SMALLINT) FROM SYSIBM.SYSDUMMY1",

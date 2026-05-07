@@ -378,7 +378,7 @@ func decodePackedBCD(b []byte, precision, scale int) (string, error) {
 		out = append(out, '-')
 	}
 	if scale == 0 {
-		out = append(out, digits...)
+		out = append(out, trimLeadingZeros(digits)...)
 	} else if scale >= len(digits) {
 		// "0.00...digits" -- pad zeros after the dot.
 		out = append(out, '0', '.')
@@ -387,13 +387,24 @@ func decodePackedBCD(b []byte, precision, scale int) (string, error) {
 		}
 		out = append(out, digits...)
 	} else {
-		intPart := digits[:len(digits)-scale]
+		intPart := trimLeadingZeros(digits[:len(digits)-scale])
 		fracPart := digits[len(digits)-scale:]
 		out = append(out, intPart...)
 		out = append(out, '.')
 		out = append(out, fracPart...)
 	}
 	return string(out), nil
+}
+
+// trimLeadingZeros strips leading '0' bytes from b but keeps at
+// least one digit (so "0000" -> "0", "0123" -> "123"). Used to
+// undo the precision-pad zeros decodePackedBCD emits before
+// inserting the decimal point.
+func trimLeadingZeros(b []byte) []byte {
+	for len(b) > 1 && b[0] == '0' {
+		b = b[1:]
+	}
+	return b
 }
 
 // ymdToISODate widens "YY-MM-DD" (8 chars) to "YYYY-MM-DD" using

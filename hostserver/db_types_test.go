@@ -49,6 +49,7 @@ func TestStaticSQLTypeRoundTrip(t *testing.T) {
 		{name: "date", sql: "VALUES CURRENT_DATE", trace: "types_date.trace", golden: "types_date.golden.json"},
 		{name: "time", sql: "VALUES CURRENT_TIME", trace: "types_time.trace", golden: "types_time.golden.json"},
 		{name: "timestamp", sql: "VALUES CURRENT_TIMESTAMP", trace: "types_timestamp.trace", golden: "types_timestamp.golden.json"},
+		{name: "null", sql: "VALUES (CAST(NULL AS INTEGER), CAST(NULL AS DECIMAL(5,2)), CAST(NULL AS VARCHAR(10)), CAST(NULL AS TIMESTAMP))", trace: "types_null.trace", golden: "types_null.golden.json"},
 	}
 
 	for _, tc := range cases {

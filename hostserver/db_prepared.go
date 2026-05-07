@@ -145,18 +145,28 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 	// 12..15 reserved (compression flag) zero.
 	be.PutUint32(buf[16:20], rowSize)
 
-	// Indicators: 0 = not null. NULL handling lands when the type
-	// system widens.
+	// Indicators: 0 = not null, -1 (0xFFFF) = null per JT400.
+	// We pre-fill from the values array so the data-pack loop
+	// only handles non-null encoders.
 	for i := 0; i < len(params); i++ {
 		off := headerLen + i*indicatorSize
-		be.PutUint16(buf[off:off+2], 0)
+		if values[i] == nil {
+			be.PutUint16(buf[off:off+2], 0xFFFF)
+		} else {
+			be.PutUint16(buf[off:off+2], 0)
+		}
 	}
 
 	// Pack values. Walk params in declaration order, writing each
-	// at the running data offset.
+	// at the running data offset; null params advance the offset
+	// without writing (server reads the indicator first).
 	dataOff := headerLen + indicatorBytes
 	for i, p := range params {
 		v := values[i]
+		if v == nil {
+			dataOff += int(p.FieldLength)
+			continue
+		}
 		switch p.SQLType {
 		case 500, 501: // SMALLINT (NN, nullable)
 			iv, err := toInt32(v)
@@ -182,6 +192,21 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			}
 			be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
 			dataOff += 8
+		case 484, 485: // DECIMAL(p,s) packed BCD
+			s, err := toDecimalString(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			packed, err := encodePackedBCD(s, int(p.Precision), int(p.Scale))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d (decimal(%d,%d)): %w", i, p.Precision, p.Scale, err)
+			}
+			if uint32(len(packed)) != p.FieldLength {
+				return nil, fmt.Errorf("hostserver: param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
+					i, p.Precision, p.Scale, len(packed), p.FieldLength)
+			}
+			copy(buf[dataOff:dataOff+len(packed)], packed)
+			dataOff += len(packed)
 		case 480, 481: // REAL/DOUBLE (NN, nullable) -- length picks the width
 			fv, err := toFloat64(v)
 			if err != nil {
@@ -492,6 +517,110 @@ func toString(v any) (string, error) {
 	default:
 		return "", fmt.Errorf("cannot bind %T as VARCHAR (need string)", v)
 	}
+}
+
+// toDecimalString narrows numeric inputs for DECIMAL binding. We
+// accept strings (the canonical form, since DECIMAL(31,5) overflows
+// every primitive Go numeric type) plus int/int64/float64 as
+// conveniences.
+func toDecimalString(v any) (string, error) {
+	switch x := v.(type) {
+	case string:
+		return x, nil
+	case int:
+		return fmt.Sprintf("%d", x), nil
+	case int32:
+		return fmt.Sprintf("%d", x), nil
+	case int64:
+		return fmt.Sprintf("%d", x), nil
+	case float64:
+		return fmt.Sprintf("%g", x), nil
+	default:
+		return "", fmt.Errorf("cannot bind %T as DECIMAL (need string or numeric)", v)
+	}
+}
+
+// encodePackedBCD turns a decimal string ("[-]DDD[.DDD]") into IBM
+// packed BCD bytes for a DECIMAL(precision, scale) column. The
+// returned byte count is ceil((precision+1)/2). Sign nibble in the
+// final low nibble: 0xC = positive, 0xD = negative.
+//
+// Rejects values whose integer or fractional digit counts exceed
+// the column declaration; trims a leading '+' for symmetry.
+func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
+	negative := false
+	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
+		negative = s[0] == '-'
+		s = s[1:]
+	}
+	intPart, fracPart := s, ""
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		intPart = s[:dot]
+		fracPart = s[dot+1:]
+	}
+	// Validate digits.
+	for i := 0; i < len(intPart); i++ {
+		if intPart[i] < '0' || intPart[i] > '9' {
+			return nil, fmt.Errorf("non-digit %q in integer part", intPart[i])
+		}
+	}
+	for i := 0; i < len(fracPart); i++ {
+		if fracPart[i] < '0' || fracPart[i] > '9' {
+			return nil, fmt.Errorf("non-digit %q in fractional part", fracPart[i])
+		}
+	}
+	// Trim leading zeros from int part (keep at least one).
+	for len(intPart) > 1 && intPart[0] == '0' {
+		intPart = intPart[1:]
+	}
+	// Right-pad fractional part with zeros to scale; reject overflow.
+	if len(fracPart) > scale {
+		return nil, fmt.Errorf("fractional digit count %d exceeds scale %d", len(fracPart), scale)
+	}
+	for len(fracPart) < scale {
+		fracPart += "0"
+	}
+	// Validate integer width.
+	intWidth := precision - scale
+	if len(intPart) > intWidth {
+		return nil, fmt.Errorf("integer digit count %d exceeds precision-scale = %d", len(intPart), intWidth)
+	}
+	// Left-pad intPart so total digit count == precision.
+	for len(intPart) < intWidth {
+		intPart = "0" + intPart
+	}
+	digits := intPart + fracPart // exactly `precision` digits
+
+	// Pack: precision digits + 1 sign nibble = precision+1 nibbles.
+	totalNibbles := precision + 1
+	nbytes := (totalNibbles + 1) / 2
+	out := make([]byte, nbytes)
+
+	// If totalNibbles is odd we need a leading zero pad nibble.
+	leadPad := 2*nbytes - totalNibbles // 0 or 1
+	cursor := 0 // index into digits
+	for i := 0; i < nbytes; i++ {
+		var hi, lo byte
+		if i == 0 && leadPad == 1 {
+			hi = 0
+		} else {
+			hi = digits[cursor] - '0'
+			cursor++
+		}
+		if i == nbytes-1 {
+			// Last low nibble is sign.
+			if negative {
+				lo = 0x0D
+			} else {
+				lo = 0x0C
+			}
+		} else {
+			lo = digits[cursor] - '0'
+			cursor++
+		}
+		out[i] = (hi << 4) | lo
+	}
+	return out, nil
 }
 
 // ebcdicForCCSID picks the EBCDIC converter for a parameter's CCSID.
