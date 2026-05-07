@@ -174,7 +174,10 @@ const (
 type SelectRow []any
 
 // SelectColumn describes one column of a SELECT result set, parsed
-// out of the super-extended data format CP.
+// out of the super-extended data format CP. Mirrors the fields a
+// JDBC ResultSetMetaData / database/sql ColumnType caller will
+// reach for, so the M6 driver wrapper can answer ColumnTypes
+// without re-deriving anything.
 type SelectColumn struct {
 	Name      string
 	SQLType   uint16 // raw IBM i SQL type (e.g. 392=TIMESTAMP, 448=VARCHAR)
@@ -182,6 +185,18 @@ type SelectColumn struct {
 	Scale     uint16
 	Precision uint16
 	CCSID     uint16
+
+	// Derived metadata. TypeName mirrors java.sql's
+	// JDBCType.getName conventions ("INTEGER", "VARCHAR",
+	// "DECIMAL", ...). DisplaySize is the maximum number of
+	// characters needed to print the value; Nullable reflects the
+	// type code's NN/nullable parity (even = not nullable, odd =
+	// nullable per JT400 convention). Signed is true for numeric
+	// types that can be negative.
+	TypeName    string
+	DisplaySize int
+	Nullable    bool
+	Signed      bool
 }
 
 // SelectResult bundles the column descriptors with the rows

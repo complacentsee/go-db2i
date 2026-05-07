@@ -119,9 +119,67 @@ func parseSuperExtendedDataFormat(data []byte) ([]SelectColumn, error) {
 				col.Name = name
 			}
 		}
+		// M5: derived metadata. JT400 pairs each SQL type with
+		// even = NN, odd = nullable; type name + display size are
+		// computed from (SQLType, Length, Precision, Scale).
+		col.TypeName, col.DisplaySize, col.Signed = sqlTypeMetadata(col.SQLType, col.Length, col.Precision, col.Scale)
+		col.Nullable = col.SQLType%2 == 1
 		cols = append(cols, col)
 	}
 	return cols, nil
+}
+
+// sqlTypeMetadata returns the JDBC-style type name, display size,
+// and signedness for a given (raw IBM i SQL type, length,
+// precision, scale) tuple. Mirrors java.sql.Types names so the
+// goldens (typeName field) and database/sql ColumnType.DatabaseTypeName
+// match without further translation.
+func sqlTypeMetadata(sqlType uint16, length uint32, precision, scale uint16) (typeName string, displaySize int, signed bool) {
+	switch sqlType {
+	case 384, 385:
+		return "DATE", 10, false
+	case 388, 389:
+		return "TIME", 8, false
+	case 392, 393:
+		return "TIMESTAMP", 26, false
+	case 448, 449:
+		// Wire descriptor stuffs VARCHAR's max declared chars in
+		// the "scale" slot (offset 8-9 of the per-field record);
+		// Length is wire bytes = scale + 2 SL prefix bytes.
+		// JDBC ResultSetMetaData exposes the max chars as
+		// precision/displaySize, which is what we surface.
+		return "VARCHAR", int(scale), false
+	case 452, 453, 456, 457, 460, 461:
+		return "CHAR", int(length), false
+	case 480, 481:
+		switch length {
+		case 4:
+			return "REAL", 13, true
+		case 8:
+			return "DOUBLE", 22, true
+		}
+		return "FLOAT", 22, true
+	case 484, 485:
+		// DECIMAL(p, s) -- worst case "-DDD.DDDD" = precision + 2.
+		return "DECIMAL", int(precision) + 2, true
+	case 488, 489:
+		return "NUMERIC", int(precision) + 2, true
+	case 492, 493:
+		return "BIGINT", 20, true
+	case 496, 497:
+		return "INTEGER", 11, true
+	case 500, 501:
+		return "SMALLINT", 6, true
+	case 996, 997:
+		switch length {
+		case 8:
+			return "DECFLOAT", 23, true
+		case 16:
+			return "DECFLOAT", 42, true
+		}
+		return "DECFLOAT", int(precision) + 8, true
+	}
+	return fmt.Sprintf("UNKNOWN(%d)", sqlType), int(length), false
 }
 
 // readSuperExtendedFieldName walks the variable-info chain looking
