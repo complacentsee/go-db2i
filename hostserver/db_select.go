@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 	"unicode/utf16"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
@@ -142,12 +143,21 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	if len(stmtBytes) > 0xFFFFFFFF {
 		return nil, fmt.Errorf("hostserver: SQL too long: %d bytes", len(stmtBytes))
 	}
+	// JTOpen toggles ORSParameterMarkerFmt (bit 16) iff the SQL
+	// contains '?' markers; with it the reply carries CP 0x3808
+	// (parameter-marker format) describing how to bind. Static
+	// SELECTs leave the bit clear -- live PUB400 confirms; setting
+	// it on a no-marker statement returns malformed SQLDA replies.
+	ors := ORSReturnData | ORSDataFormat | ORSSQLCA | 0x00040000
+	if strings.ContainsRune(sql, '?') {
+		ors |= ORSParameterMarkerFmt
+	}
 	prepCorr := corr
 	{
 		tpl := DBRequestTemplate{
 			// Handle layout matches CREATE_RPB exactly so the
 			// server reuses the RPB it just made (RPBHandle=1).
-			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | 0x00040000,
+			ORSBitmap:                 ors,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,

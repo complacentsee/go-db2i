@@ -236,23 +236,21 @@ func TestSentBytesMatchPreparedIntParamFixture(t *testing.T) {
 		assertBytesEqualWithDiff(t, "CREATE_RPB", got.Bytes(), want[ReqDBSQLRPBCreate])
 	})
 
-	// ---- PREPARE_DESCRIBE (deferred to M3) ----
-	// Our encoder emits ORS=0x8A040000 for any SELECT, but JTOpen
-	// sets bit 16 (ORSParameterMarkerFmt = 0x00800000) when the
-	// SQL contains parameter markers, so the server includes the
-	// parameter-marker format CP (0x3808) in its reply. Static
-	// SELECTs (no `?`) don't need that bit -- the live PUB400
-	// path proved out -- so the fix lands in M3 alongside the
-	// rest of the parameter-binding work.
+	// ---- PREPARE_DESCRIBE ----
+	// SelectStaticSQL toggles ORSParameterMarkerFmt (bit 16)
+	// when the SQL contains '?' markers, so PREPARE_DESCRIBE
+	// for parameterised SQL is byte-identical to JTOpen's even
+	// before EXECUTE/bind support lands.
 	t.Run("PREPARE_DESCRIBE", func(t *testing.T) {
-		// Drain the frame even though we skip the assertion, so
-		// downstream M3 subtests stay positioned correctly when
-		// we extend this test.
-		if _, _, err := ReadFrame(r); err != nil {
+		hdr, payload, err := ReadFrame(r)
+		if err != nil {
 			t.Fatalf("re-parse: %v", err)
 		}
-		t.Skip("M3: SelectStaticSQL needs to set ORSParameterMarkerFmt (bit 16) when SQL has '?' markers; fixture target = " +
-			hex.EncodeToString(want[ReqDBSQLPrepareDescribe][:24]) + "...")
+		var got bytes.Buffer
+		if err := WriteFrame(&got, hdr, payload); err != nil {
+			t.Fatalf("re-encode: %v", err)
+		}
+		assertBytesEqualWithDiff(t, "PREPARE_DESCRIBE", got.Bytes(), want[ReqDBSQLPrepareDescribe])
 	})
 
 	// ---- M3 frames (EXECUTE with parameters etc.) ----
