@@ -394,12 +394,35 @@ IBM i 7.6 (V7R6M0): `sql.Open` + `db.Query` + `Rows.ColumnTypes`
 + `db.Begin` / `tx.Commit` / `tx.Rollback` all round-trip cleanly.
 DSN syntax: `gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso&isolation=cs`.
 
+**Parameter binding ✅ wire-validated.** `Stmt.Query` dispatches to
+`hostserver.SelectPreparedSQL` when args are present, with a typed
+binder that maps each `driver.Value` flavour to a `PreparedParam`
+shape:
+
+| `driver.Value` | SQL type / CCSID | Wire format |
+|---|---|---|
+| `int64` | BIGINT nullable (493) | 8 bytes BE |
+| `float64` | DOUBLE nullable (481) | 8 bytes IEEE 754 |
+| `bool` | SMALLINT nullable (501) | 2 bytes (0/1) |
+| `[]byte` | VARCHAR FOR BIT DATA (449 + CCSID 65535) | 2-byte SL + bytes |
+| `string` | VARCHAR (449 + CCSID 37) | 2-byte SL + EBCDIC bytes |
+| `time.Time` | TIMESTAMP nullable (393) | 26 EBCDIC bytes ISO |
+| `nil` | INTEGER nullable (497) + indicator | NULL via indicator |
+
+Encoder gained CCSID 65535 (binary passthrough) and CCSID 1208
+(UTF-8 passthrough) routes alongside the existing EBCDIC SBCS path
+so the binary and UTF-8 columns the live server uses bind cleanly.
+TIMESTAMP `Rows.Next` promotes the hostserver's ISO string to a
+`time.Time` so callers can `Scan(&t)` into `*time.Time` directly.
+All eight bind paths round-tripped exact values against IBM Cloud
+IBM i 7.6 (`/tmp/sqldriver_paramtest.go`).
+
 **Deferred from M6 (work remaining for "first usable driver"):**
 
-- **Parameter binding for Stmt.Exec / Stmt.Query** — per-type bind
-  encoders exist at `hostserver` level (M3/M4) but the driver
-  Stmt path currently rejects any args. Plumbing through prepared-
-  bind I/U/D is the biggest remaining gap.
+- **Stmt.Exec parameter binding** — `Query` is wired but `Exec`
+  still rejects args. Needs `hostserver.ExecutePreparedSQL` (a
+  parallel of `SelectPreparedSQL` without the FETCH part); the
+  bind helper itself is reusable as-is.
 - **Lazy Rows iteration via continuation FETCH** — currently
   buffers the full result set into memory. The continuation FETCH
   loop in `hostserver.SelectStaticSQL` pulls all rows; the driver

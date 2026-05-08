@@ -306,23 +306,44 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 				return nil, fmt.Errorf("hostserver: param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
 			}
 		case 448, 449: // VARCHAR (NN, nullable)
-			sv, err := toString(v)
-			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
-			}
-			// VARCHAR wire layout: 2-byte SL + EBCDIC bytes,
-			// padded out to FieldLength-2 bytes.
-			conv := ebcdicForCCSID(p.CCSID)
-			ebc, err := conv.Encode(sv)
-			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: encode varchar: %w", i, err)
+			// VARCHAR wire layout: 2-byte SL + payload bytes,
+			// padded out to FieldLength-2 bytes. CCSID determines
+			// payload encoding:
+			//   65535       -- FOR BIT DATA, binary passthrough
+			//   1208        -- UTF-8, passthrough (server transcodes
+			//                  to the column CCSID on its side)
+			//   else        -- EBCDIC via the SBCS converter
+			var payload []byte
+			if p.CCSID == ccsidBinary {
+				bv, err := toBytes(v)
+				if err != nil {
+					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				}
+				payload = bv
+			} else if p.CCSID == 1208 {
+				sv, err := toString(v)
+				if err != nil {
+					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				}
+				payload = []byte(sv)
+			} else {
+				sv, err := toString(v)
+				if err != nil {
+					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				}
+				conv := ebcdicForCCSID(p.CCSID)
+				ebc, err := conv.Encode(sv)
+				if err != nil {
+					return nil, fmt.Errorf("hostserver: param %d: encode varchar: %w", i, err)
+				}
+				payload = ebc
 			}
 			maxBytes := int(p.FieldLength) - 2
-			if len(ebc) > maxBytes {
-				return nil, fmt.Errorf("hostserver: param %d: varchar value too long (%d bytes, max %d)", i, len(ebc), maxBytes)
+			if len(payload) > maxBytes {
+				return nil, fmt.Errorf("hostserver: param %d: varchar value too long (%d bytes, max %d)", i, len(payload), maxBytes)
 			}
-			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(ebc)))
-			copy(buf[dataOff+2:dataOff+2+len(ebc)], ebc)
+			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)))
+			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
 			// Remaining bytes left zero (server reads SL).
 			dataOff += int(p.FieldLength)
 		default:
@@ -619,6 +640,22 @@ func toString(v any) (string, error) {
 		return string(x), nil
 	default:
 		return "", fmt.Errorf("cannot bind %T as VARCHAR (need string)", v)
+	}
+}
+
+// toBytes narrows common Go byte-slice types for FOR BIT DATA
+// (CCSID 65535) binding. Strings are accepted as a convenience but
+// reinterpreted as their underlying byte sequence -- callers passing
+// arbitrary text into a binary column is a footgun, but matches the
+// JDBC behaviour.
+func toBytes(v any) ([]byte, error) {
+	switch x := v.(type) {
+	case []byte:
+		return x, nil
+	case string:
+		return []byte(x), nil
+	default:
+		return nil, fmt.Errorf("cannot bind %T as VARCHAR FOR BIT DATA (need []byte)", v)
 	}
 }
 
