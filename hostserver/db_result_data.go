@@ -175,7 +175,7 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 // 2-byte length prefix.
 func (c SelectColumn) wireLength() uint32 {
 	switch c.SQLType {
-	case SQLTypeVarChar, SQLTypeVarCharNonBlank, 449:
+	case SQLTypeVarChar, 449, SQLTypeVarCharNonBlank, 457:
 		return c.Length + 2
 	}
 	return c.Length
@@ -234,7 +234,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return s, int(col.Length), nil
 
-	case SQLTypeChar, SQLTypeCharNonBlank:
+	case SQLTypeChar, 453, SQLTypeCharNonBlank, 461:
+		// 452 = CHAR NN, 453 = CHAR nullable, 460/461 = CHAR with
+		// terminator-or-binary variants. All four share wire layout.
 		// Fixed-length CHAR. Normally EBCDIC; CCSID 65535 means
 		// "no conversion / binary" (the IBM i FOR BIT DATA path)
 		// and the column's bytes are returned as []byte verbatim.
@@ -252,7 +254,7 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return s, int(col.Length), nil
 
-	case SQLTypeVarChar, SQLTypeVarCharNonBlank, 449:
+	case SQLTypeVarChar, 449, SQLTypeVarCharNonBlank, 457:
 		// 2-byte BE length prefix followed by N bytes EBCDIC.
 		// The slot occupies col.Length+2 bytes on the wire (in
 		// non-VLF layouts), but in VLF-compressed result data
