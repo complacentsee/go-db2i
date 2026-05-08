@@ -8,6 +8,14 @@ import (
 	"github.com/complacentsee/goJTOpen/ebcdic"
 )
 
+// ccsidBinary is the IBM i sentinel CCSID for "no conversion /
+// binary" -- the FOR BIT DATA flag on CHAR/VARCHAR columns. Columns
+// with this CCSID are returned as []byte without EBCDIC decoding;
+// passing them through CCSID 37 would silently corrupt arbitrary
+// binary content (anything outside the 256-char EBCDIC table maps
+// to U+FFFD or worse).
+const ccsidBinary uint16 = 65535
+
 // findExtendedResultData locates CP 0x380E in the reply and decodes
 // the rows it carries against the column descriptors in cols. The
 // fixed result-data layout (mirroring DBExtendedData) is:
@@ -227,9 +235,16 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		return s, int(col.Length), nil
 
 	case SQLTypeChar, SQLTypeCharNonBlank:
-		// Fixed-length CHAR. EBCDIC.
+		// Fixed-length CHAR. Normally EBCDIC; CCSID 65535 means
+		// "no conversion / binary" (the IBM i FOR BIT DATA path)
+		// and the column's bytes are returned as []byte verbatim.
 		if len(b) < int(col.Length) {
 			return nil, 0, fmt.Errorf("char wants %d bytes, have %d", col.Length, len(b))
+		}
+		if col.CCSID == ccsidBinary {
+			out := make([]byte, col.Length)
+			copy(out, b[:col.Length])
+			return out, int(col.Length), nil
 		}
 		s, err := ebcdic.CCSID37.Decode(b[:col.Length])
 		if err != nil {
@@ -242,7 +257,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		// The slot occupies col.Length+2 bytes on the wire (in
 		// non-VLF layouts), but in VLF-compressed result data
 		// the row only contains 2+actual-length bytes for this
-		// column (no padding to col.Length).
+		// column (no padding to col.Length). CCSID 65535 routes
+		// the payload bytes to []byte without EBCDIC decode --
+		// see the CHAR case above for the FOR BIT DATA rationale.
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("varchar header wants 2 bytes, have %d", len(b))
 		}
@@ -252,6 +269,11 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		if len(b) < 2+n {
 			return nil, 0, fmt.Errorf("varchar wants %d bytes (header+data), have %d", 2+n, len(b))
+		}
+		if col.CCSID == ccsidBinary {
+			out := make([]byte, n)
+			copy(out, b[2:2+n])
+			return out, 2 + n, nil
 		}
 		s, err := ebcdic.CCSID37.Decode(b[2 : 2+n])
 		if err != nil {
