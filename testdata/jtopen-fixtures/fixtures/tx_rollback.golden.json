@@ -1,9 +1,44 @@
 {
   "case" : "tx_rollback",
-  "resultSets" : [ ],
-  "error" : {
-    "sqlState" : "55019",
-    "errorCode" : -7008,
-    "message" : "[SQL7008] GOJT_T1 in AFTRAEGE11 not valid for operation."
-  }
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "ID",
+      "label" : "ID",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "NAME",
+      "label" : "NAME",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 40,
+      "precision" : 40,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "AMT",
+      "label" : "AMT",
+      "typeName" : "DECIMAL",
+      "sqlType" : 3,
+      "displaySize" : 13,
+      "precision" : 11,
+      "scale" : 2,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ ]
+  } ],
+  "updateCount" : 1
 }

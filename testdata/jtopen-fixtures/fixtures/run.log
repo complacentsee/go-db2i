@@ -1,2 +1,2 @@
-    [tx_commit] STRJRNPF: [CPF0006] Errors occurred in command.
-    [tx_commit] ENDJRNPF: [CPF0006] Errors occurred in command.
+    [tx_rollback] STRJRNPF: [CPF0006] Errors occurred in command.
+    [tx_rollback] ENDJRNPF: [CPF0006] Errors occurred in command.
