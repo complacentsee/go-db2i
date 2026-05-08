@@ -250,7 +250,11 @@ func SetSQLAttributes(conn io.ReadWriter, opts DBAttributesOptions) (*ServerAttr
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse db reply: %w", err)
 	}
-	if rep.ReturnCode != 0 {
+	// Only fail on errorClass != 0 (real SQL error). errorClass=0 with
+	// non-zero RC is a warning/informational (e.g., +8001 when the
+	// requested date format is accepted but flagged for some IBM i
+	// session-attribute interaction). JT400 is similarly tolerant.
+	if rep.ErrorClass != 0 || (rep.ReturnCode != 0 && !isSQLWarning(rep.ReturnCode)) {
 		return nil, fmt.Errorf("hostserver: set-sql-attributes RC=%d errorClass=0x%04X", rep.ReturnCode, rep.ErrorClass)
 	}
 	attrs, err := rep.FindServerAttributes()
