@@ -159,6 +159,26 @@ type Config struct {
 	Library    string // default SQL schema; empty = no override
 	DateFormat byte   // hostserver.DateFormat* constant; 0 = JOB
 	Isolation  int16  // hostserver.Isolation* constant; -1 = default (CS)
+
+	// TLS controls whether the driver wraps the as-signon and
+	// as-database sockets in crypto/tls. When true, the dial uses
+	// tls.Dial against the configured ports; the default ports flip
+	// to 9476 (signon) / 9471 (database) -- the IBM i SSL host-
+	// server pair -- if the caller didn't override them.
+	TLS bool
+
+	// TLSInsecureSkipVerify disables server-cert verification. IBM i
+	// host-server certs are commonly self-signed and lack DNS SANs;
+	// crypto/tls otherwise rejects them. Use with care: setting this
+	// true makes the connection vulnerable to MITM attack on the
+	// network path between client and server.
+	TLSInsecureSkipVerify bool
+
+	// TLSServerName overrides the SNI / cert-verify hostname. When
+	// empty, defaults to Host. Useful when the cert was issued for
+	// a different name than the address you connect to (e.g. the
+	// short hostname vs the FQDN in DNS).
+	TLSServerName string
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -212,6 +232,39 @@ func parseDSN(dsn string) (*Config, error) {
 	}
 
 	q := u.Query()
+
+	// TLS knobs are parsed before the port defaults so a tls=true
+	// DSN can override-then-default to 9476 / 9471 in one pass.
+	if v := q.Get("tls"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tls %q (want true|false): %w", v, err)
+		}
+		cfg.TLS = b
+	}
+	if v := q.Get("tls-insecure-skip-verify"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tls-insecure-skip-verify %q (want true|false): %w", v, err)
+		}
+		cfg.TLSInsecureSkipVerify = b
+	}
+	if v := q.Get("tls-server-name"); v != "" {
+		cfg.TLSServerName = v
+	}
+	// Flip default ports to the SSL host-server pair when TLS is on
+	// AND the caller didn't override via the URL port / signon-port
+	// query keys. This matches what JT400 does when its
+	// AS400.setUseSSL(true) is set.
+	if cfg.TLS {
+		if u.Port() == "" {
+			cfg.DBPort = 9471
+		}
+		if q.Get("signon-port") == "" {
+			cfg.SignonPort = 9476
+		}
+	}
+
 	if v := q.Get("library"); v != "" {
 		cfg.Library = strings.ToUpper(v)
 	}
@@ -261,4 +314,17 @@ func parseDSN(dsn string) (*Config, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// parseBool accepts the same case-insensitive set Go's strconv.ParseBool
+// does (1, t, T, TRUE, true, True, 0, f, F, FALSE, false, False) plus
+// the URL-friendly "yes" / "no" aliases that some users reach for.
+func parseBool(s string) (bool, error) {
+	switch strings.ToLower(s) {
+	case "yes", "on":
+		return true, nil
+	case "no", "off":
+		return false, nil
+	}
+	return strconv.ParseBool(s)
 }

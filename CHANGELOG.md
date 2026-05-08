@@ -13,6 +13,14 @@ have all landed.
 
 ### Added
 
+- TLS support via `tls=true` DSN key. Wraps both as-signon and
+  as-database sockets in `crypto/tls`; default ports flip to the IBM
+  i SSL host-server pair (9476 / 9471). `tls-insecure-skip-verify=true`
+  for the common case of self-signed certs lacking DNS SANs;
+  `tls-server-name` overrides the SNI / cert-verify hostname.
+  Implementation offline-tested via DSN parsing; live TLS handshake
+  validation pending an IBM i target with SSL host servers enabled
+  (server-side DCM config).
 - `Stmt.QueryContext` / `Stmt.ExecContext` propagate context cancellation
   to in-flight host-server I/O via `net.Conn.SetDeadline`. Returns
   `context.DeadlineExceeded` / `context.Canceled` rather than the
