@@ -29,11 +29,16 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, fmt.Errorf("gojtopen: dial as-signon: %w", err)
 	}
 	signon.SetDeadline(deadline)
-	if _, _, err := hostserver.SignOn(signon, c.cfg.User, c.cfg.Password); err != nil {
+	xs, _, err := hostserver.SignOn(signon, c.cfg.User, c.cfg.Password)
+	if err != nil {
 		signon.Close()
 		return nil, fmt.Errorf("gojtopen: as-signon: %w", err)
 	}
 	signon.Close()
+	serverVRM := uint32(0)
+	if xs != nil {
+		serverVRM = xs.ServerVersion
+	}
 
 	// Database service phase: separate TCP socket, lives for the
 	// life of the Conn.
@@ -67,7 +72,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		}
 	}
 
-	return &Conn{conn: db, cfg: c.cfg}, nil
+	return &Conn{conn: db, cfg: c.cfg, serverVRM: serverVRM}, nil
 }
 
 // Conn implements driver.Conn (and the Context-aware extensions).
@@ -78,6 +83,35 @@ type Conn struct {
 	cfg       *Config
 	corrCount uint32 // monotonic, incremented atomically per request
 	closed    bool
+
+	// serverVRM is the IBM i version/release/modification packed as
+	// 0x00VVRRMM, captured from the SignonInfoReply at connect time.
+	// Used to gate features that require V7R5+ (CCSID 1208 string
+	// binds, etc.). 0 if the connection didn't capture a value.
+	serverVRM uint32
+}
+
+// preferredStringCCSID returns the CCSID the driver should tag
+// VARCHAR string binds with. V7R5+ servers accept CCSID 1208 (UTF-8)
+// passthrough, which preserves the full Unicode repertoire on the
+// wire. Older servers want a single-byte EBCDIC table -- we use 37
+// (US English) which is what most IBM i jobs default to and what
+// our encoder has a built-in mapping for.
+//
+// The encoder's CCSID 1208 branch (db_prepared.go) writes the UTF-8
+// bytes verbatim with the CCSID tag set to 1208, leaving the server
+// to transcode to the column's actual CCSID on its side.
+//
+// Static IBM i version map:
+//   0x00070500  V7R5M0  -- 1208 supported
+//   0x00070400  V7R4M0  -- 1208 supported
+//   0x00070300  V7R3M0  -- 1208 supported
+//   < V7R3      -- fall back to CCSID 37
+func (c *Conn) preferredStringCCSID() uint16 {
+	if c.serverVRM >= 0x00070300 {
+		return 1208
+	}
+	return 37
 }
 
 // nextCorr returns the next correlation ID for a host-server frame.

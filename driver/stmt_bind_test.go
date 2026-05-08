@@ -30,13 +30,14 @@ func TestBindArgsToPreparedParams(t *testing.T) {
 		{"bool true -> SMALLINT nullable", true, 501, 2, 0, int32(1)},
 		{"bool false -> SMALLINT nullable", false, 501, 2, 0, int32(0)},
 		{"[]byte -> VARCHAR FOR BIT DATA", []byte{0x01, 0x02, 0x03}, 449, 5, 65535, []byte{0x01, 0x02, 0x03}},
-		{"string -> VARCHAR(EBCDIC 37)", "hello", 449, 7, 37, "hello"},
+		{"string -> VARCHAR(CCSID 37 explicit)", "hello", 449, 7, 37, "hello"},
+		{"string -> VARCHAR(CCSID 1208 UTF-8)", "café", 449, 7, 1208, "café"}, // 5 UTF-8 bytes + 2 SL = 7
 		{"time.Time -> TIMESTAMP nullable", ts, 393, 26, 0, "2026-05-07-14.23.45.123456"},
 		{"nil -> INTEGER nullable", nil, 497, 4, 0, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shapes, values, err := bindArgsToPreparedParams([]driver.Value{tc.in})
+			shapes, values, err := bindArgsToPreparedParams([]driver.Value{tc.in}, tc.ccsid)
 			if err != nil {
 				t.Fatalf("bindArgsToPreparedParams: %v", err)
 			}
@@ -72,7 +73,7 @@ func TestBindArgsToPreparedParams(t *testing.T) {
 // trying to push an *int through a NamedValueChecker before
 // CheckValue normalises it).
 func TestBindArgsToPreparedParamsRejectsUnsupportedType(t *testing.T) {
-	_, _, err := bindArgsToPreparedParams([]driver.Value{struct{}{}})
+	_, _, err := bindArgsToPreparedParams([]driver.Value{struct{}{}}, 37)
 	if err == nil {
 		t.Fatal("expected error for unsupported type, got nil")
 	}
@@ -84,7 +85,7 @@ func TestBindArgsToPreparedParamsRejectsUnsupportedType(t *testing.T) {
 func TestBindArgsToPreparedParamsMixedRow(t *testing.T) {
 	shapes, values, err := bindArgsToPreparedParams([]driver.Value{
 		int64(7), "abc", nil,
-	})
+	}, 37)
 	if err != nil {
 		t.Fatalf("bindArgsToPreparedParams: %v", err)
 	}

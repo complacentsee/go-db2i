@@ -86,7 +86,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		}
 		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 	}
-	shapes, values, err := bindArgsToPreparedParams(args)
+	shapes, values, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		}
 		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
-	shapes, values, err := bindArgsToPreparedParams(args)
+	shapes, values, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
 	if err != nil {
 		return nil, err
 	}
@@ -133,27 +133,32 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 // string, time.Time, nil. We pick the smallest IBM i SQL type that
 // covers each Go type:
 //
-//	int64        -> BIGINT  (492)            8 bytes
-//	float64      -> DOUBLE  (480)            8 bytes
-//	bool         -> SMALLINT (500)           2 bytes (0/1)
+//	int64        -> BIGINT  (493)            8 bytes
+//	float64      -> DOUBLE  (481)            8 bytes
+//	bool         -> SMALLINT (501)           2 bytes (0/1)
 //	[]byte       -> VARCHAR FOR BIT DATA     2-byte SL + bytes;
 //	                (449 + CCSID 65535)      uses nullable-flavour
 //	                                         448+1 so server allows
 //	                                         the indicator
-//	string       -> VARCHAR  (449 + CCSID 37)
-//	                                         2-byte SL + EBCDIC bytes
-//	time.Time    -> TIMESTAMP (392)         26 bytes ISO format
+//	string       -> VARCHAR  (449 + stringCCSID)
+//	                                         2-byte SL + payload bytes
+//	time.Time    -> TIMESTAMP (393)         26 bytes ISO format
 //	nil          -> INTEGER nullable (497)  flagged via indicator
 //
-// String binds use CCSID 37 (US English EBCDIC) -- the IBM i job
-// default for unspecified-locale jobs and the only single-byte CCSID
-// the encoder currently emits. Strings outside the CCSID-37 repertoire
-// will land when the encoder learns CCSID 1208 (UTF-8) passthrough.
+// stringCCSID is supplied by the caller (typically the Conn's
+// preferredStringCCSID()): CCSID 1208 (UTF-8) on V7R3+ servers --
+// preserves the full Unicode repertoire by writing the UTF-8 bytes
+// verbatim and letting the server transcode -- and CCSID 37
+// (US English EBCDIC) on older servers that don't accept tagged
+// CCSIDs on parameter binds.
 //
 // The nullable flavour (odd SQL type) is used for every bind so a
 // future caller can pass NULL through the same shape without changing
 // the request frame; the indicator block decides null vs not-null.
-func bindArgsToPreparedParams(args []driver.Value) ([]hostserver.PreparedParam, []any, error) {
+func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostserver.PreparedParam, []any, error) {
+	if stringCCSID == 0 {
+		stringCCSID = 37
+	}
 	shapes := make([]hostserver.PreparedParam, len(args))
 	values := make([]any, len(args))
 	for i, a := range args {
@@ -183,14 +188,16 @@ func bindArgsToPreparedParams(args []driver.Value) ([]hostserver.PreparedParam, 
 			}
 			values[i] = v
 		case string:
-			// Encoder wants room for the 2-byte SL + EBCDIC bytes.
-			// EBCDIC is byte-for-byte from ASCII for the SBCS
-			// repertoire we support, so len(v) sizes the field.
+			// FieldLength sizes the field as 2-byte SL + payload
+			// length. UTF-8 strings can encode 1-4 bytes per rune;
+			// for CCSID 1208 the byte length IS len(v). For CCSID 37
+			// (EBCDIC SBCS) the encoded bytes are also 1:1 with len(v)
+			// for the ASCII subset we currently support.
 			shapes[i] = hostserver.PreparedParam{
 				SQLType:     449,
 				FieldLength: uint32(len(v)) + 2,
 				Precision:   uint16(len(v)),
-				CCSID:       37,
+				CCSID:       stringCCSID,
 			}
 			values[i] = v
 		case time.Time:
