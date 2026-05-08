@@ -75,9 +75,19 @@ func StartDatabaseService(conn io.ReadWriter, userID, password string) (
 			return xs, nil, fmt.Errorf("hostserver: encrypt password (level %d, SHA-1): %w", xs.PasswordLevel, err)
 		}
 	case 0, 1:
-		return xs, nil, fmt.Errorf("hostserver: server password level %d (DES) not implemented", xs.PasswordLevel)
+		// DES path -- spec-validated against JT400, NOT wire-validated;
+		// auth.EncryptPasswordDES emits a one-shot stderr warning on
+		// first use to make the gap visible.
+		encrypted, err = auth.EncryptPasswordDES(userID, password, clientSeed, xs.ServerSeed)
+		if err != nil {
+			return xs, nil, fmt.Errorf("hostserver: encrypt password (level %d, DES): %w", xs.PasswordLevel, err)
+		}
 	case 4:
-		return xs, nil, fmt.Errorf("hostserver: server password level 4 (PBKDF2-SHA-512) not implemented")
+		// PBKDF2-HMAC-SHA-512 path -- same spec-validated-only caveat.
+		encrypted, err = auth.EncryptPasswordPBKDF2(userID, password, clientSeed, xs.ServerSeed)
+		if err != nil {
+			return xs, nil, fmt.Errorf("hostserver: encrypt password (level 4, PBKDF2): %w", err)
+		}
 	default:
 		return xs, nil, fmt.Errorf("hostserver: unknown server password level %d", xs.PasswordLevel)
 	}
