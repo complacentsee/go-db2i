@@ -438,22 +438,60 @@ size. Length-detection remains as a fallback for callers that
 don't request the echo (preserves byte-equality with existing
 JT400 fixtures).
 
-**Deferred from M6 (work remaining for "first usable driver"):**
+**Typed `*Db2Error` ✅ wire-validated.** SQLCA decoding (CP 0x3807)
+surfaces `SQLState`, `SQLCode`, `MessageID`, `MessageTokens`, and
+the operation label (`PREPARE_DESCRIBE`, `EXECUTE`, `FETCH`, etc.)
+that produced the error. Engines `errors.As(err, &dbErr)` and
+dispatch on:
+
+| Predicate | Trigger |
+|---|---|
+| `IsNotFound()` | SQLSTATE 02xxx or SQLCODE +100 |
+| `IsConstraintViolation()` | SQLSTATE 23xxx (dup key, NOT NULL, FK, check) |
+| `IsConnectionLost()` | SQLSTATE 08xxx |
+| `IsLockTimeout()` | SQLCODE -911 / -913 |
+
+Validated live: SQL-204 / 42704 (table-not-found), SQL-205 / 42703
+(column-not-found), SQL-104 / 42601 (syntax), SQL-302 / 22023
+(numeric out of range) all surface with proper SQLSTATE and
+substitution tokens (table name, column name, etc.).
+
+**`driver.ErrBadConn` ✅ wire-validated.** Connection-level errors
+(`io.EOF`, `net.OpError`, `hostserver.ErrShortFrame`, `*Db2Error`
+with SQLSTATE 08xxx) get wrapped through `badConnWrap` so they
+satisfy `errors.Is(err, driver.ErrBadConn)` -- triggering
+`database/sql`'s auto-retry on a fresh connection -- while still
+unwrapping to the original cause for diagnostic logs. Statement-
+level errors flow through as typed `*Db2Error`. `Conn.IsValid` /
+`Conn.ResetSession` round out the pool-eviction path. Live-tested
+by force-closing the underlying `net.Conn` mid-pool: subsequent
+queries on the same `*sql.DB` succeeded transparently on a
+freshly-opened replacement.
+
+**Context cancellation ✅ wire-validated.** `Stmt.QueryContext` /
+`Stmt.ExecContext` plumb `ctx` through to `net.Conn.SetDeadline`,
+plus a `context.AfterFunc` that fires `SetDeadline(now)` on cancel
+to unblock any in-flight read/write. `resolveCtxErr` substitutes
+`ctx.Err()` for the I/O timeout when the cancellation was the
+real cause, so callers see `context.Canceled` /
+`context.DeadlineExceeded` rather than the transport error.
+Live-validated: a cross-join SELECT that takes the server several
+seconds to materialise canceled in 250ms (`WithTimeout`) and
+200ms (explicit `cancel()`); the pool then auto-recovered with a
+fresh connection.
+
+**Deferred from M6 (nice-to-have, not blocking labelverification-gw):**
 
 - **Lazy Rows iteration via continuation FETCH** — currently
-  buffers the full result set into memory. The continuation FETCH
-  loop in `hostserver.SelectStaticSQL` pulls all rows; the driver
-  needs a streaming variant that yields a batch at a time.
+  buffers the full result set into memory. Fine for single-row
+  lookups; matters when somebody runs a million-row report.
 - **`LastInsertId` via IDENTITY_VAL_LOCAL()** — currently returns
-  a "not supported" error; needs a follow-up SELECT after INSERT
-  to fetch the generated key.
-- **Context cancellation propagation** — `Conn.Connect(ctx)`
-  honours the deadline for the dial, but per-statement context
-  cancellation doesn't currently interrupt in-flight host-server
-  frames. Lands with the streaming Rows work.
-- **`bradfitz/go-sql-test` conformance** — never run.
-- **`cmd/diffrunner`** — never built; still a good idea during
-  conformance work.
+  a "not supported" error. Not used by labelverification-gw
+  (legacy DCLVRP02 has fixed keys, no IDENTITY columns).
+- **`bradfitz/go-sql-test` conformance** — never run; do during
+  M7/M8 hardening.
+- **`cmd/diffrunner`** — never built; useful for conformance work
+  but not for shipping the gateway.
 
 ### M7 — LOB streaming, CCSID negotiation, error mapping (~3-4 weeks)
 
