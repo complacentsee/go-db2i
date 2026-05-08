@@ -15,20 +15,20 @@ type Tx struct {
 
 func (t *Tx) Commit() error {
 	if err := hostserver.Commit(t.conn.conn, t.conn.nextCorr()); err != nil {
-		return fmt.Errorf("gojtopen: commit: %w", err)
+		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: commit: %w", err))
 	}
 	if err := hostserver.AutocommitOn(t.conn.conn, t.conn.nextCorr()); err != nil {
-		return fmt.Errorf("gojtopen: restore autocommit after commit: %w", err)
+		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: restore autocommit after commit: %w", err))
 	}
 	return nil
 }
 
 func (t *Tx) Rollback() error {
 	if err := hostserver.Rollback(t.conn.conn, t.conn.nextCorr()); err != nil {
-		return fmt.Errorf("gojtopen: rollback: %w", err)
+		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: rollback: %w", err))
 	}
 	if err := hostserver.AutocommitOn(t.conn.conn, t.conn.nextCorr()); err != nil {
-		return fmt.Errorf("gojtopen: restore autocommit after rollback: %w", err)
+		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: restore autocommit after rollback: %w", err))
 	}
 	return nil
 }
