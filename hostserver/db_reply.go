@@ -59,10 +59,28 @@ const (
 // template offsets 14 / 16 -- which in our payload-only world
 // (header stripped before we get here) are offsets 14 / 16 within
 // the 20-byte template, i.e. payload offsets 14 / 16.
+//
+// ORSBitmap is the response bitmap echoed in payload[0:4]. Per
+// JT400 (DBBaseReplyDS#parse) bit 16 / 0x00010000 means "variable-
+// length-field compression actually used in the result data" --
+// callers parsing CP 0x380E need this to pick VLF vs the fixed
+// row-padding layout. Other bits mostly mirror what the request
+// asked for.
 type DBReply struct {
+	ORSBitmap  uint32
 	ErrorClass uint16
 	ReturnCode uint32
 	Params     []DBParam
+}
+
+// VLFCompressed reports whether the server set the variable-length-
+// field compression bit (0x00010000) in the response ORS bitmap.
+// True means CP 0x380E result data must be decoded with the row-
+// info-header + row-info-array layout; false means each row occupies
+// exactly rowSize bytes with VARCHAR slots padded to their declared
+// max width.
+func (r *DBReply) VLFCompressed() bool {
+	return r.ORSBitmap&ORSVarFieldComp != 0
 }
 
 // ParseDBReply walks the 0x2800 reply payload: the 20-byte template
@@ -84,6 +102,7 @@ func ParseDBReply(payload []byte) (*DBReply, error) {
 		//   4..13  reserved / handle echoes
 		//   14..15 ErrorClass
 		//   16..19 ReturnCode
+		ORSBitmap:  be.Uint32(payload[0:4]),
 		ErrorClass: be.Uint16(payload[14:16]),
 		ReturnCode: be.Uint32(payload[16:20]),
 	}

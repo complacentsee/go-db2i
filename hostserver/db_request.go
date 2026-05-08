@@ -45,6 +45,20 @@ const (
 	ORSParameterMarkerFmt   uint32 = 0x00800000
 	ORSPackageInfo          uint32 = 0x00100000
 	ORSExtendedColumnDescrs uint32 = 0x00020000
+
+	// ORSVarFieldComp asks the server to use variable-length-field
+	// compression in the result data, AND to echo the bit back in
+	// the reply's ORS bitmap when it actually used VLF. The reply
+	// echo is the only reliable way to distinguish VLF from the
+	// fixed-row-padding layout PUB400 uses for multi-column
+	// fixed-width results -- detection by total length is fragile
+	// (a single-column VARCHAR's VLF overhead can land on the
+	// same byte count as a non-VLF row of declared rowSize).
+	//
+	// JT400 calls this ORS_BITMAP_VARIABLE_LENGTH_FIELD_COMPRESSION
+	// (DBBaseRequestDS) and DBBaseReplyDS reads the same bit out of
+	// the response template via get16bit(20) & 0x0001.
+	ORSVarFieldComp uint32 = 0x00010000
 )
 
 // DBRequestTemplate is the 20-byte fixed template that follows the

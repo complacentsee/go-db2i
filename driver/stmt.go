@@ -25,18 +25,27 @@ func (s *Stmt) NumInput() int { return -1 }
 
 func (s *Stmt) Close() error { return nil }
 
-// Exec runs INSERT / UPDATE / DELETE / DDL via ExecuteImmediate.
-// Parameter binding via args is NOT implemented in this scaffold --
-// callers must inline values into the SQL string. Lands with the
-// M3-deferred prepared-bind I/U/D work.
+// Exec runs INSERT / UPDATE / DELETE / DDL. With no args it uses the
+// single-frame ExecuteImmediate; with args it goes through the
+// prepared-DML flow (CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR
+// / EXECUTE). Both paths return the affected-row count via Result --
+// today always 0 since SQLCA decoding is M7 work.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
-	if len(args) > 0 {
-		return nil, fmt.Errorf("gojtopen: parameter binding for Exec not yet implemented (got %d args)", len(args))
-	}
 	if isSelect(s.query) {
 		return nil, fmt.Errorf("gojtopen: Exec called with SELECT; use Query")
 	}
-	res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
+	if len(args) == 0 {
+		res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
+		if err != nil {
+			return nil, err
+		}
+		return &Result{rowsAffected: res.RowsAffected}, nil
+	}
+	shapes, values, err := bindArgsToPreparedParams(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
 	if err != nil {
 		return nil, err
 	}

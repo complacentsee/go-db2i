@@ -3,6 +3,8 @@ package hostserver
 import (
 	"fmt"
 	"io"
+
+	"github.com/complacentsee/goJTOpen/ebcdic"
 )
 
 // EXECUTE_IMMEDIATE function ID. Per JT400's
@@ -11,6 +13,13 @@ import (
 // PREPARE+DESCRIBE+OPEN dance, since there's no result set to
 // describe and no cursor to open.
 const ReqDBSQLExecuteImmediate uint16 = 0x1806
+
+// EXECUTE function ID. Per JT400's DBSQLRequestDS.FUNCTIONID_EXECUTE
+// -- runs an INSERT / UPDATE / DELETE that was previously PREPAREd
+// against the same RPB. Differs from EXECUTE_IMMEDIATE in that the
+// statement text is not re-sent (the RPB carries it) and parameter
+// values arrive via CP 0x381F just like the prepared SELECT path.
+const ReqDBSQLExecute uint16 = 0x1805
 
 // ExecResult is what ExecuteImmediate returns -- just a
 // rows-affected count for now (decoded from SQLCA when present;
@@ -84,6 +93,192 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA);
 	// JT400 reads SQLERRD[2]. For now return 0 -- callers that
 	// need the count can decode the SQLCA themselves.
+	return &ExecResult{}, nil
+}
+
+// ExecutePreparedSQL runs a parameterised INSERT / UPDATE / DELETE
+// against conn. Mirrors the JT400 prepared-DML flow:
+//
+//  1. CREATE_RPB        (1D00)  -- allocate request parameter block
+//  2. PREPARE_DESCRIBE  (1803)  -- send statement text, ask for SQLCA
+//  3. CHANGE_DESCRIPTOR (1E00)  -- upload input parameter shapes
+//  4. EXECUTE           (1805)  -- send parameter values, run statement
+//
+// nextCorrelation is the starting CorrelationID; the four frames
+// consume nextCorrelation through nextCorrelation+3.
+//
+// Returns ExecResult (rows-affected currently always 0; SQLCA
+// decoding lands with M7). SQL +100 ("no rows matched") is treated
+// as success with rows-affected=0, matching ExecuteImmediate.
+//
+// Caller is responsible for ensuring the SQL text starts with INSERT,
+// UPDATE, or DELETE -- the function does not validate the verb,
+// since callers (the driver) already classify with isSelect().
+func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*ExecResult, error) {
+	if len(paramShapes) != len(paramValues) {
+		return nil, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
+	}
+	corr := nextCorrelation
+
+	// --- 1) CREATE_RPB. Re-use STMT0001 / CRSR0001 names for parity
+	// with the prepared-SELECT path. The cursor name is harmless on a
+	// non-SELECT RPB; JT400 sends it unconditionally.
+	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode stmt name: %w", err)
+	}
+	cursorNameBytes, err := ebcdic.CCSID37.Encode("CRSR0001")
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode cursor name: %w", err)
+	}
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 0x00040000, // RLE only -- fire and forget
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, []DBParam{
+			DBParamVarString(cpDBPrepareStatementName, 273, stmtNameBytes),
+			DBParamVarString(cpDBCursorName, 273, cursorNameBytes),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
+		}
+		hdr.CorrelationID = corr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
+		}
+	}
+
+	// --- 2) PREPARE_DESCRIBE. Statement type comes from the verb
+	// (3=INSERT, 4=UPDATE, 5=DELETE). We still set the
+	// ORSParameterMarkerFmt bit so the server validates the marker
+	// count against what the parser sees in the SQL text -- catches
+	// e.g. "INSERT ... VALUES (?, ?)" called with one argument early.
+	stmtBytes := utf16BE(sql)
+	prepCorr := corr
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSParameterMarkerFmt | 0x00040000,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, []DBParam{
+			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			DBParamByte(cpDBPrepareOption, 0x00),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+		}
+		hdr.CorrelationID = prepCorr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
+		}
+	}
+	prepRepHdr, prepRepPayload, err := ReadDBReplyMatching(conn, prepCorr, 8)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
+	}
+	if prepRepHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
+	}
+	prepRep, err := ParseDBReply(prepRepPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
+	}
+	if prepRep.ReturnCode != 0 && !isSQLWarning(prepRep.ReturnCode) {
+		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE RC=%d (0x%08X) errorClass=0x%04X",
+			prepRep.ReturnCode, prepRep.ReturnCode, prepRep.ErrorClass)
+	}
+
+	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
+	// round trip for callers that pass through ExecutePreparedSQL
+	// for symmetry but happen to bind zero arguments.
+	if len(paramShapes) > 0 {
+		hdr, payload, err := ChangeDescriptorRequest(paramShapes)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build CHANGE_DESCRIPTOR: %w", err)
+		}
+		hdr.CorrelationID = corr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send CHANGE_DESCRIPTOR: %w", err)
+		}
+	}
+
+	// --- 4) EXECUTE with input parameter values.
+	dataPayload, err := EncodeDBExtendedData(paramShapes, paramValues)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode input parameter data: %w", err)
+	}
+	execCorr := corr
+	{
+		tpl := DBRequestTemplate{
+			// SQLCA only -- INSERT/UPDATE/DELETE returns no rows.
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | 0x00040000,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 1,
+		}
+		params := []DBParam{
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build EXECUTE: %w", err)
+		}
+		hdr.CorrelationID = execCorr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send EXECUTE: %w", err)
+		}
+	}
+	execRepHdr, execRepPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read EXECUTE reply: %w", err)
+	}
+	if execRepHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", execRepHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(execRepPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse EXECUTE reply: %w", err)
+	}
+	rc := int32(rep.ReturnCode)
+	if rc == 100 {
+		// SQL +100: no rows matched (UPDATE/DELETE WHERE that found
+		// nothing). Same handling as ExecuteImmediate.
+		return &ExecResult{}, nil
+	}
+	if rep.ErrorClass != 0 || (rc != 0 && !isSQLWarning(rep.ReturnCode)) {
+		// Drop the RPB before bailing -- otherwise the slot stays
+		// occupied and the next prepared call on this connection
+		// fails the same way SELECT does without cleanup.
+		_ = deleteRPB(conn, corr)
+		return nil, fmt.Errorf("hostserver: EXECUTE RC=%d errorClass=0x%04X", rc, rep.ErrorClass)
+	}
+	// Free the RPB slot. Without this, the next CREATE_RPB (from a
+	// later Stmt.Query / Stmt.Exec on the same connection) silently
+	// no-ops and the downstream PREPARE_DESCRIBE then fails with
+	// RC -101 / errorClass 2 because slot 1 still references the
+	// previous statement.
+	if err := deleteRPB(conn, corr); err != nil {
+		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)
+	}
+	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA SQLERRD[2]).
 	return &ExecResult{}, nil
 }
 

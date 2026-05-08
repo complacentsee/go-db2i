@@ -417,12 +417,29 @@ TIMESTAMP `Rows.Next` promotes the hostserver's ISO string to a
 All eight bind paths round-tripped exact values against IBM Cloud
 IBM i 7.6 (`/tmp/sqldriver_paramtest.go`).
 
+**Stmt.Exec parameter binding ✅ wire-validated.**
+`hostserver.ExecutePreparedSQL` (CREATE_RPB / PREPARE_DESCRIBE /
+CHANGE_DESCRIPTOR / EXECUTE 0x1805) lands the prepared INSERT /
+UPDATE / DELETE flow; `Stmt.Exec` reuses the same
+`bindArgsToPreparedParams` helper as `Stmt.Query`. The EXECUTE
+path also runs RPB DELETE in cleanup so the next prepared call on
+the same connection doesn't trip the "RPB slot still occupied"
+guard. SQL +100 (no rows matched) is treated as success with
+rows-affected=0.
+
+While testing the prepared INSERT/UPDATE flow, found and fixed a
+result-data parser bug: a one-row variable-length-only result's
+VLF total bytes can coincide with `rowSize*rowCount` of the
+non-VLF layout, making length-detection pick the wrong path and
+return an empty `[]byte`. Fix is to honour the response ORS
+bitmap echo bit `ORSVarFieldComp` (`0x00010000`) read from
+`payload[0:4]` of the reply -- when set, use VLF regardless of
+size. Length-detection remains as a fallback for callers that
+don't request the echo (preserves byte-equality with existing
+JT400 fixtures).
+
 **Deferred from M6 (work remaining for "first usable driver"):**
 
-- **Stmt.Exec parameter binding** — `Query` is wired but `Exec`
-  still rejects args. Needs `hostserver.ExecutePreparedSQL` (a
-  parallel of `SelectPreparedSQL` without the FETCH part); the
-  bind helper itself is reusable as-is.
 - **Lazy Rows iteration via continuation FETCH** — currently
   buffers the full result set into memory. The continuation FETCH
   loop in `hostserver.SelectStaticSQL` pulls all rows; the driver

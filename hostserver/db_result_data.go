@@ -44,16 +44,24 @@ const ccsidBinary uint16 = 65535
 // Returns nil rows (not an error) if CP 0x380E is absent -- some
 // reply flavours (e.g. PREPARE_DESCRIBE without OPEN) carry only
 // the format CP, no row data.
+//
+// vlfCompressed must be the value of DBReply.VLFCompressed() for the
+// reply this CP came from -- the byte layout differs depending on
+// whether the server compressed variable-length fields (variable-
+// width row-info-array layout) or padded them to declared width
+// (fixed rowSize per row). Length-based heuristics are unreliable
+// because a single-row VARCHAR's VLF overhead can land on the same
+// total as a non-VLF row of declared rowSize.
 func (r *DBReply) findExtendedResultData(cols []SelectColumn) ([]SelectRow, error) {
 	for _, p := range r.Params {
 		if p.CodePoint == 0x380E {
-			return parseExtendedResultData(p.Data, cols)
+			return parseExtendedResultData(p.Data, cols, r.VLFCompressed())
 		}
 	}
 	return nil, nil
 }
 
-func parseExtendedResultData(data []byte, cols []SelectColumn) ([]SelectRow, error) {
+func parseExtendedResultData(data []byte, cols []SelectColumn, vlfCompressed bool) ([]SelectRow, error) {
 	const fixedLen = 20
 	if len(data) < fixedLen {
 		return nil, fmt.Errorf("hostserver: extended-result-data too short: %d bytes", len(data))
@@ -63,9 +71,6 @@ func parseExtendedResultData(data []byte, cols []SelectColumn) ([]SelectRow, err
 	colCount := int(be.Uint16(data[8:10]))
 	indicatorSize := int(be.Uint16(data[10:12]))
 	rowSize := int(be.Uint32(data[16:20]))
-	// Bytes 12..15 are reserved/compression-flag in JTOpen but
-	// PUB400 leaves them zero in both VLF and non-VLF replies, so
-	// we detect format by length instead.
 
 	if colCount != len(cols) {
 		return nil, fmt.Errorf("hostserver: result data column count %d != format column count %d", colCount, len(cols))
@@ -80,23 +85,28 @@ func parseExtendedResultData(data []byte, cols []SelectColumn) ([]SelectRow, err
 	}
 	indicators := data[fixedLen : fixedLen+indicatorBytes]
 
-	// Detect VLF vs non-VLF by total size. Non-VLF stores rows
-	// concatenated immediately after indicators with each row
-	// taking exactly rowSize bytes; VLF additionally inserts a
-	// row-info header (8 bytes) and a row-info array (4 bytes per
-	// row) so rows can be variable-length packed. PUB400 picks
-	// non-VLF for fixed-width single-row results (e.g. SELECT of
-	// a single INTEGER) and VLF when any column is variable-length.
+	// Pick layout. The reliable signal is the response ORS bitmap
+	// bit 0x00010000 (ORSVarFieldComp), which the server sets when
+	// it actually used VLF. When the request didn't ask for the
+	// echo (older request paths) the bit comes back zero and we
+	// fall back to size-matching: if the data is exactly the
+	// fixed-row-padding size, it's non-VLF; otherwise VLF.
+	//
+	// The pure size-match heuristic alone is fragile because a
+	// one-row variable-length-only result can produce a VLF total
+	// equal to rowSize*rowCount; trust the echo bit first when it's
+	// set.
 	expectedNonVLF := fixedLen + indicatorBytes + rowSize*rowCount
-	if len(data) == expectedNonVLF {
+	useVLF := vlfCompressed || len(data) != expectedNonVLF
+	if !useVLF {
 		return parseNonVLF(data[fixedLen+indicatorBytes:], cols, indicators, indicatorSize, rowSize, rowCount)
 	}
 
 	// VLF path.
 	rowInfoHeaderStart := fixedLen + indicatorBytes
 	if rowInfoHeaderStart+8 > len(data) {
-		return nil, fmt.Errorf("hostserver: row info header overruns result data (have %d, need %d for VLF; non-VLF expected %d)",
-			len(data), rowInfoHeaderStart+8, expectedNonVLF)
+		return nil, fmt.Errorf("hostserver: row info header overruns result data (have %d, need %d for VLF)",
+			len(data), rowInfoHeaderStart+8)
 	}
 	rowInfoArrayOffset := int(be.Uint32(data[rowInfoHeaderStart : rowInfoHeaderStart+4]))
 
