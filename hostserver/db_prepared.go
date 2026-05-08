@@ -644,22 +644,70 @@ func toDecimalString(v any) (string, error) {
 }
 
 // encodeDateString converts an ISO date "YYYY-MM-DD" into the wire
-// form the column expects. fieldLen=10 keeps ISO; fieldLen=8 strips
-// the century to YMD ("YY-MM-DD"). Other widths are rejected --
-// USA/EUR/JIS handlers land alongside the per-format date task
-// (#38) so the encoder doesn't silently emit something the server
-// won't parse.
+// form the column expects, picking the format from fieldLen alone.
+// 10-char output is ISO ("YYYY-MM-DD"); 8-char is YMD ("YY-MM-DD").
+// Use encodeDateStringForFormat to emit USA / EUR / JIS / MDY / DMY
+// when the session has negotiated a non-default date format.
 func encodeDateString(s string, fieldLen int) (string, error) {
-	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
-		return "", fmt.Errorf("date %q must be ISO YYYY-MM-DD", s)
-	}
 	switch fieldLen {
 	case 10:
-		return s, nil
+		return encodeDateStringForFormat(s, DateFormatISO)
 	case 8:
-		return s[2:], nil // "YY-MM-DD"
+		return encodeDateStringForFormat(s, DateFormatYMD)
 	default:
 		return "", fmt.Errorf("date FieldLength %d unsupported (need 8 YMD or 10 ISO)", fieldLen)
+	}
+}
+
+// encodeDateStringForFormat formats an ISO date "YYYY-MM-DD" into the
+// wire bytes for the given target IBM i date format. The format byte
+// matches DBAttributesOptions.DateFormat (one of the DateFormat*
+// constants); the wire layouts mirror IBM i's documented format
+// names:
+//
+//	*ISO  10 chars  YYYY-MM-DD
+//	*USA  10 chars  MM/DD/YYYY
+//	*EUR  10 chars  DD.MM.YYYY
+//	*JIS  10 chars  YYYY-MM-DD  (identical to ISO on the wire)
+//	*MDY  8  chars  MM/DD/YY
+//	*DMY  8  chars  DD/MM/YY
+//	*YMD  8  chars  YY-MM-DD
+//	*JOB  -         server-picks; not directly encodable. Caller must
+//	                resolve to one of the above via the session's
+//	                negotiated date-format CP before calling.
+//
+// The 8-char (*MDY/*DMY/*YMD) variants drop the century. Year-2000
+// boundary handling is the SERVER's job once the bytes arrive --
+// JT400 uses 1940 as the cutover (00..39 -> 20YY, 40..99 -> 19YY)
+// per the captured fixtures.
+//
+// Returns an error if `iso` isn't a valid 10-char ISO date or if
+// `format` isn't one of the supported constants. *JUL (Julian
+// "YY/DDD") is intentionally not supported -- no captured workload
+// uses it.
+func encodeDateStringForFormat(iso string, format byte) (string, error) {
+	if len(iso) != 10 || iso[4] != '-' || iso[7] != '-' {
+		return "", fmt.Errorf("date %q must be ISO YYYY-MM-DD", iso)
+	}
+	yyyy, mm, dd := iso[0:4], iso[5:7], iso[8:10]
+	yy := iso[2:4]
+	switch format {
+	case DateFormatISO, DateFormatJIS:
+		return yyyy + "-" + mm + "-" + dd, nil
+	case DateFormatUSA:
+		return mm + "/" + dd + "/" + yyyy, nil
+	case DateFormatEUR:
+		return dd + "." + mm + "." + yyyy, nil
+	case DateFormatMDY:
+		return mm + "/" + dd + "/" + yy, nil
+	case DateFormatDMY:
+		return dd + "/" + mm + "/" + yy, nil
+	case DateFormatYMD:
+		return yy + "-" + mm + "-" + dd, nil
+	case DateFormatJOB:
+		return "", fmt.Errorf("date format *JOB cannot be encoded directly -- caller must resolve to a concrete format first")
+	default:
+		return "", fmt.Errorf("unknown date format byte 0x%02X", format)
 	}
 }
 
