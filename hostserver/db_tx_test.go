@@ -122,29 +122,42 @@ func assertTxFrame(t *testing.T, frame []byte, wantReqRepID uint16, wantCorr uin
 	if got := binary.BigEndian.Uint16(payload[18:20]); got != 1 {
 		t.Errorf("ParameterCount = %d, want 1", got)
 	}
-	// Param: LL=7, CP=0x380F, data=0xE8 (hold).
+	// Param: LL=7, CP=0x380F, data=0x01 (numeric hold = preserve
+	// cursors). NOT 0xE8 ('Y') -- the server expects a numeric
+	// indicator and rejects EBCDIC characters with SQL -211.
 	if got := binary.BigEndian.Uint32(payload[20:24]); got != 7 {
 		t.Errorf("param LL = %d, want 7", got)
 	}
 	if got := binary.BigEndian.Uint16(payload[24:26]); got != 0x380F {
 		t.Errorf("param CP = 0x%04X, want 0x380F", got)
 	}
-	if payload[26] != 0xE8 {
-		t.Errorf("hold indicator = 0x%02X, want 0xE8 ('Y' hold)", payload[26])
+	if payload[26] != 0x01 {
+		t.Errorf("hold indicator = 0x%02X, want 0x01 (numeric hold)", payload[26])
 	}
 }
 
 // TestAutocommitOffOnFrameShape sanity-checks the SET_SQL_ATTRIBUTES
 // frame the autocommit toggles emit. Should be a 0x1F80 frame with
-// a single CP 0x3824 parameter (1 byte: 0xD5 'N' or 0xE8 'Y').
+// THREE CP parameters bundled together (matches JT400's tx_commit
+// fixture sent #8 byte-for-byte):
+//
+//	0x3824 1 byte  -- autocommit ('N'=0xD5 off, 'Y'=0xE8 on)
+//	0x380E 2 bytes -- commitment level (*CS=2 with off, NONE=0 with on)
+//	0x3830 2 bytes -- locator persistence (1 with off, 0 with on)
+//
+// Sending all three together is what convinces PUB400 to actually
+// start a commitment definition; sending only 0x3824 leaves the
+// server in *NONE and COMMIT/ROLLBACK return SQL -211.
 func TestAutocommitOffOnFrameShape(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		want byte
-		off  bool
+		name           string
+		off            bool
+		wantAutoCommit byte
+		wantIsolation  uint16
+		wantLocator    uint16
 	}{
-		{"off", 0xD5, true},
-		{"on", 0xE8, false},
+		{name: "off", off: true, wantAutoCommit: 0xD5, wantIsolation: 2, wantLocator: 1},
+		{name: "on", off: false, wantAutoCommit: 0xE8, wantIsolation: 0, wantLocator: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn := newFakeConn(buildSuccessReply(1, uint16(ReqDBSetSQLAttributes)))
@@ -165,22 +178,44 @@ func TestAutocommitOffOnFrameShape(t *testing.T) {
 			if hdr.ReqRepID != ReqDBSetSQLAttributes {
 				t.Errorf("ReqRepID = 0x%04X, want 0x%04X", hdr.ReqRepID, ReqDBSetSQLAttributes)
 			}
-			// First (and only) parameter starts at template offset
-			// 20: LL(4) + CP(2) + data(1).
-			if len(payload) < 27 {
-				t.Fatalf("payload too short: %d bytes", len(payload))
+			// Parameter count at template offset 18-19 should be 3.
+			if pc := binary.BigEndian.Uint16(payload[18:20]); pc != 3 {
+				t.Errorf("ParameterCount = %d, want 3", pc)
 			}
-			ll := binary.BigEndian.Uint32(payload[20:24])
-			cp := binary.BigEndian.Uint16(payload[24:26])
-			data := payload[26]
-			if ll != 7 {
-				t.Errorf("param LL = %d, want 7", ll)
+			// 3 params: LL(4)+CP(2)+1 = 7, LL(4)+CP(2)+2 = 8, LL(4)+CP(2)+2 = 8.
+			// Total payload after template (20) = 23 bytes -> need >= 43.
+			if len(payload) < 43 {
+				t.Fatalf("payload too short: %d bytes (want >= 43)", len(payload))
 			}
-			if cp != 0x3824 {
-				t.Errorf("param CP = 0x%04X, want 0x3824", cp)
+			// Param 1: 0x3824 (autocommit byte).
+			if ll := binary.BigEndian.Uint32(payload[20:24]); ll != 7 {
+				t.Errorf("param[0] LL = %d, want 7", ll)
 			}
-			if data != tc.want {
-				t.Errorf("autocommit byte = 0x%02X, want 0x%02X", data, tc.want)
+			if cp := binary.BigEndian.Uint16(payload[24:26]); cp != 0x3824 {
+				t.Errorf("param[0] CP = 0x%04X, want 0x3824", cp)
+			}
+			if got := payload[26]; got != tc.wantAutoCommit {
+				t.Errorf("autocommit byte = 0x%02X, want 0x%02X", got, tc.wantAutoCommit)
+			}
+			// Param 2: 0x380E (isolation, 2 bytes).
+			if ll := binary.BigEndian.Uint32(payload[27:31]); ll != 8 {
+				t.Errorf("param[1] LL = %d, want 8", ll)
+			}
+			if cp := binary.BigEndian.Uint16(payload[31:33]); cp != 0x380E {
+				t.Errorf("param[1] CP = 0x%04X, want 0x380E", cp)
+			}
+			if got := binary.BigEndian.Uint16(payload[33:35]); got != tc.wantIsolation {
+				t.Errorf("isolation = %d, want %d", got, tc.wantIsolation)
+			}
+			// Param 3: 0x3830 (locator persistence, 2 bytes).
+			if ll := binary.BigEndian.Uint32(payload[35:39]); ll != 8 {
+				t.Errorf("param[2] LL = %d, want 8", ll)
+			}
+			if cp := binary.BigEndian.Uint16(payload[39:41]); cp != 0x3830 {
+				t.Errorf("param[2] CP = 0x%04X, want 0x3830", cp)
+			}
+			if got := binary.BigEndian.Uint16(payload[41:43]); got != tc.wantLocator {
+				t.Errorf("locator persistence = %d, want %d", got, tc.wantLocator)
 			}
 		})
 	}

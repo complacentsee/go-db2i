@@ -36,10 +36,17 @@ func Rollback(conn io.ReadWriter, nextCorrelation uint32) error {
 // JDTransactionManager, both frames:
 //   - leave all template handles at zero (no RPB attached);
 //   - set CP 0x380F (HoldIndicator, 1 byte) so the server knows
-//     whether to keep cursors open across the boundary -- we
-//     default to 'Y' (hold) which is the JDBC default;
-// and they differ only in ORS bitmap (COMMIT asks for SQLCA,
-// ROLLBACK doesn't).
+//     whether to keep cursors open across the boundary. The
+//     server expects a NUMERIC byte (0 = close cursors,
+//     1 = hold cursors), NOT an EBCDIC 'N'/'Y'. We default to
+//     1 (hold) which matches JT400's "cursor hold = true"
+//     default; sending 0xE8 ('Y') silently produces SQL -211
+//     errorClass=0x0002 because the server treats anything other
+//     than 0/1 as an invalid hold indicator and rejects the
+//     transaction boundary.
+//
+// COMMIT and ROLLBACK differ only in ORS bitmap (COMMIT asks for
+// SQLCA, ROLLBACK doesn't).
 func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error {
 	ors := ORSReturnData
 	if reqRepID == ReqDBSQLCommit {
@@ -51,7 +58,7 @@ func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error
 		// SQL service's RPB slot.
 	}
 	hdr, payload, err := BuildDBRequest(reqRepID, tpl, []DBParam{
-		DBParamByte(0x380F, 0xE8), // HoldIndicator = 'Y' (preserve cursors)
+		DBParamByte(0x380F, 0x01), // HoldIndicator: numeric 1 = hold cursors
 	})
 	if err != nil {
 		return fmt.Errorf("hostserver: build %s: %w", label, err)
@@ -78,53 +85,96 @@ func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error
 	return nil
 }
 
-// AutocommitOff turns autocommit OFF for conn via a small
-// SET_SQL_ATTRIBUTES (0x1F80) request that sets only CP 0x3824
-// (autoCommit = 0xD5 = EBCDIC 'N' = "no"). Lets a caller pair
-// Commit/Rollback with explicit transaction boundaries without
-// rebuilding the full attributes frame.
+// AutocommitOff turns autocommit OFF for conn via a SET_SQL_ATTRIBUTES
+// (0x1F80) request that bundles three CPs the same way JT400 does
+// when JDBC's setAutoCommit(false) is invoked:
 //
-// CP 0x3824 values (per JT400 setAutoCommit): 0xE8 = EBCDIC 'Y' =
-// autocommit on (default), 0xD5 = EBCDIC 'N' = autocommit off.
+//	CP 0x3824 = 0xD5  -- autocommit OFF (EBCDIC 'N')
+//	CP 0x380E = *CS   -- start a commitment definition at cursor
+//	                     stability (wire value 2 per JT400's
+//	                     COMMIT_MODE_CS_); without this the server
+//	                     stays in *NONE and COMMIT/ROLLBACK return
+//	                     SQL -211 errorClass=0x0002 even with a real
+//	                     INSERT pending.
+//	CP 0x3830 = 1     -- LocatorPersistence "scoped to transaction"
+//	                     (matches JT400 default and is required for
+//	                     the file's commitment definition to actually
+//	                     get started).
+//
+// Validated live against AFTRAEGE11.DCLVRP02 on PUB400 (journaled).
+// JT400's tx_commit fixture sent #8 has the exact byte layout this
+// builds.
 func AutocommitOff(conn io.ReadWriter, corr uint32) error {
-	return setAutocommit(conn, corr, 0xD5)
+	return setSessionMode(conn, corr, 0xD5, 2 /*CS*/, 1 /*scope=tx*/)
 }
 
-// AutocommitOn turns autocommit back on. Useful after an explicit
-// transaction completes, so subsequent simple SELECTs / INSERTs
-// don't accumulate uncommitted state.
+// AutocommitOn turns autocommit back on. Mirrors AutocommitOff:
+// flips the same three CPs back to JT400's "autocommit, no
+// commitment, no locator persistence" baseline. Used after an
+// explicit transaction completes so subsequent simple SELECT/INSERT
+// runs don't keep a stale commitment definition open.
 func AutocommitOn(conn io.ReadWriter, corr uint32) error {
-	return setAutocommit(conn, corr, 0xE8)
+	return setSessionMode(conn, corr, 0xE8, 0 /*NONE*/, 0 /*no scope*/)
 }
 
-func setAutocommit(conn io.ReadWriter, corr uint32, ebcdicYN byte) error {
-	tpl := DBRequestTemplate{
-		ORSBitmap: ORSReturnData | ORSServerAttributes | 0x00040000,
-	}
-	hdr, payload, err := BuildDBRequest(ReqDBSetSQLAttributes, tpl, []DBParam{
-		DBParamByte(0x3824, ebcdicYN),
-	})
+func setSessionMode(conn io.ReadWriter, corr uint32, autoCommitYN byte, isolationLevel int16, locatorPersistence int16) error {
+	rep, err := sendSessionModeFrame(conn, corr, autoCommitYN, isolationLevel, &locatorPersistence)
 	if err != nil {
-		return fmt.Errorf("hostserver: build set-autocommit: %w", err)
+		return err
 	}
-	hdr.CorrelationID = corr
-	if err := WriteFrame(conn, hdr, payload); err != nil {
-		return fmt.Errorf("hostserver: send set-autocommit: %w", err)
-	}
-	repHdr, repPayload, err := ReadDBReplyMatching(conn, corr, 4)
-	if err != nil {
-		return fmt.Errorf("hostserver: read set-autocommit reply: %w", err)
-	}
-	if repHdr.ReqRepID != RepDBReply {
-		return fmt.Errorf("hostserver: set-autocommit reply ReqRepID 0x%04X", repHdr.ReqRepID)
-	}
-	rep, err := ParseDBReply(repPayload)
-	if err != nil {
-		return fmt.Errorf("hostserver: parse set-autocommit reply: %w", err)
+	// Some IBM i releases reject the locator-persistence change on
+	// the autocommit-on transition with errClass=7 RC=-601. JT400
+	// catches this and resends without CP 0x3830; we mirror that
+	// fallback so the round-trip stays clean. Don't cache the
+	// "doesn't support" flag here -- the caller's setSessionMode
+	// is per-toggle, and the off→on direction is the only one we've
+	// observed reject the CP.
+	if rep.ErrorClass == 7 && int32(rep.ReturnCode) == -601 {
+		rep, err = sendSessionModeFrame(conn, corr+1, autoCommitYN, isolationLevel, nil)
+		if err != nil {
+			return err
+		}
 	}
 	if rep.ErrorClass != 0 || (rep.ReturnCode != 0 && !isSQLWarning(rep.ReturnCode)) {
-		return fmt.Errorf("hostserver: set-autocommit RC=%d errorClass=0x%04X",
+		return fmt.Errorf("hostserver: set-session-mode RC=%d errorClass=0x%04X",
 			int32(rep.ReturnCode), rep.ErrorClass)
 	}
 	return nil
+}
+
+// sendSessionModeFrame sends one SET_SQL_ATTRIBUTES frame with up to
+// three CPs. When locatorPersistence is nil, CP 0x3830 is omitted --
+// used by setSessionMode's fallback path when the server rejects the
+// locator-persistence change with errClass=7 RC=-601.
+func sendSessionModeFrame(conn io.ReadWriter, corr uint32, autoCommitYN byte, isolationLevel int16, locatorPersistence *int16) (*DBReply, error) {
+	tpl := DBRequestTemplate{
+		ORSBitmap: ORSReturnData | ORSServerAttributes | 0x00040000,
+	}
+	params := []DBParam{
+		DBParamByte(0x3824, autoCommitYN),
+		DBParamShort(0x380E, isolationLevel),
+	}
+	if locatorPersistence != nil {
+		params = append(params, DBParamShort(0x3830, *locatorPersistence))
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSetSQLAttributes, tpl, params)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: build set-session-mode: %w", err)
+	}
+	hdr.CorrelationID = corr
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return nil, fmt.Errorf("hostserver: send set-session-mode: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, corr, 4)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read set-session-mode reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: set-session-mode reply ReqRepID 0x%04X", repHdr.ReqRepID)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse set-session-mode reply: %w", err)
+	}
+	return rep, nil
 }
