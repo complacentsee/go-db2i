@@ -125,11 +125,14 @@ func buildPBKDF2SaltInput(userID, password string) []byte {
 }
 
 // paddedUserIDUTF16BE returns the 20-byte UTF-16BE encoding of the
-// userID padded to 10 chars with U+0020 spaces. JT400's
-// generateSha512Substitute uses this exact encoding for the userID
-// component of the substitute hash.
+// userID, **uppercased** and padded to 10 chars with U+0020 spaces.
+// JT400's generateSha512Substitute uses this exact encoding for the
+// userID component of the substitute hash; JT400 normalises userId_
+// to upper case at AS400.connect() (see AS400.java toUpperCase
+// calls). We do the equivalent here so callers can pass any case
+// and the salt+substitute paths see consistent inputs.
 func paddedUserIDUTF16BE(userID string) ([]byte, error) {
-	runes := []rune(userID)
+	runes := []rune(strings.ToUpper(userID))
 	if len(runes) > 10 {
 		return nil, fmt.Errorf("auth: userID %q is %d chars (max 10)", userID, len(runes))
 	}
