@@ -258,24 +258,29 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		return nil, fmt.Errorf("hostserver: parse EXECUTE reply: %w", err)
 	}
 	rc := int32(rep.ReturnCode)
+	// All exit paths -- success, +100 no-match, hard error -- must
+	// drop the RPB. The slot stays occupied otherwise and the next
+	// prepared call on this connection fails at PREPARE_DESCRIBE
+	// with RC -101 / errorClass 2 because CREATE_RPB silently
+	// no-ops on a busy slot. Live-confirmed on IBM Cloud IBM i 7.6:
+	// a DELETE that returned +100 ("no rows matched") left slot 1
+	// dirty and broke the very next DELETE.
+	cleanup := func() error {
+		return deleteRPB(conn, corr)
+	}
 	if rc == 100 {
 		// SQL +100: no rows matched (UPDATE/DELETE WHERE that found
 		// nothing). Same handling as ExecuteImmediate.
+		if err := cleanup(); err != nil {
+			return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE+100: %w", err)
+		}
 		return &ExecResult{}, nil
 	}
 	if rep.ErrorClass != 0 || (rc != 0 && !isSQLWarning(rep.ReturnCode)) {
-		// Drop the RPB before bailing -- otherwise the slot stays
-		// occupied and the next prepared call on this connection
-		// fails the same way SELECT does without cleanup.
-		_ = deleteRPB(conn, corr)
+		_ = cleanup()
 		return nil, fmt.Errorf("hostserver: EXECUTE RC=%d errorClass=0x%04X", rc, rep.ErrorClass)
 	}
-	// Free the RPB slot. Without this, the next CREATE_RPB (from a
-	// later Stmt.Query / Stmt.Exec on the same connection) silently
-	// no-ops and the downstream PREPARE_DESCRIBE then fails with
-	// RC -101 / errorClass 2 because slot 1 still references the
-	// previous statement.
-	if err := deleteRPB(conn, corr); err != nil {
+	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)
 	}
 	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA SQLERRD[2]).
