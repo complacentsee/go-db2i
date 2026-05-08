@@ -130,11 +130,18 @@ connections and prints info from both.
 
 **Deferred from M1:**
 
-- **Password levels 0/1 (DES) and 4 (PBKDF2-SHA-512)** — PUB400 is
-  level 3 SHA-1, so this hasn't blocked anything. Production
-  IBM i deployments may use level 4. Algorithm references in
-  JT400's `AS400ImplRemote.encryptPassword` (DES) and the PBKDF2
-  block around line 5200.
+- **Password levels 0/1 (DES) and 4 (PBKDF2-SHA-512)** — ⚠️
+  implemented 2026-05-08, **spec-validated only**. Both algorithms
+  mirror JT400's `AS400ImplRemote.encryptPassword` /
+  `generatePwdTokenForPasswordLevel4` byte-for-byte; the PBKDF2
+  primitive is RFC 6070-validated, and DES uses stdlib `crypto/des`.
+  But neither has been wire-validated against a live IBM i: PUB400
+  and PUB1.de are both locked at `QPWDLVL=3` and refuse level 0/1
+  or level 4 challenges regardless of `clientDSLevel`. Both code
+  paths emit a one-shot stderr warning on first use
+  (`auth/warning.go`) so the validation gap is operationally
+  visible. First production target with a different `QPWDLVL` is
+  the regression net.
 - **`signon.go:318` TODO** — error-class wrapping in the sign-on
   reply parser. Inline; ~15 lines when revisited.
 - **TLS sign-on / database (ports 9476 / 9471)** — IBM i certs
