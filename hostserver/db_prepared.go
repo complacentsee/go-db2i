@@ -464,9 +464,8 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
-	if prepRep.ReturnCode != 0 && !isSQLWarning(prepRep.ReturnCode) {
-		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE RC=%d (0x%08X) errorClass=0x%04X",
-			prepRep.ReturnCode, prepRep.ReturnCode, prepRep.ErrorClass)
+	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
+		return nil, dbErr
 	}
 	cols, err := prepRep.findSuperExtendedDataFormat()
 	if err != nil {
@@ -536,9 +535,8 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
-	if fetchRep.ReturnCode != 0 && !isSQLWarning(fetchRep.ReturnCode) {
-		return nil, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH RC=%d errorClass=0x%04X",
-			fetchRep.ReturnCode, fetchRep.ErrorClass)
+	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
+		return nil, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {

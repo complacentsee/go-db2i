@@ -78,9 +78,8 @@ func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error
 	if err != nil {
 		return fmt.Errorf("hostserver: parse %s reply: %w", label, err)
 	}
-	if rep.ErrorClass != 0 || (rep.ReturnCode != 0 && !isSQLWarning(rep.ReturnCode)) {
-		return fmt.Errorf("hostserver: %s RC=%d errorClass=0x%04X",
-			label, int32(rep.ReturnCode), rep.ErrorClass)
+	if dbErr := makeDb2Error(rep, label); dbErr != nil {
+		return dbErr
 	}
 	return nil
 }
@@ -135,9 +134,8 @@ func setSessionMode(conn io.ReadWriter, corr uint32, autoCommitYN byte, isolatio
 			return err
 		}
 	}
-	if rep.ErrorClass != 0 || (rep.ReturnCode != 0 && !isSQLWarning(rep.ReturnCode)) {
-		return fmt.Errorf("hostserver: set-session-mode RC=%d errorClass=0x%04X",
-			int32(rep.ReturnCode), rep.ErrorClass)
+	if dbErr := makeDb2Error(rep, "SET_SESSION_MODE"); dbErr != nil {
+		return dbErr
 	}
 	return nil
 }

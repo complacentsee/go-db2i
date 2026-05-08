@@ -86,9 +86,8 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 	if rc == 100 {
 		return &ExecResult{}, nil
 	}
-	if rep.ErrorClass != 0 || (rc != 0 && !isSQLWarning(rep.ReturnCode)) {
-		return nil, fmt.Errorf("hostserver: EXECUTE_IMMEDIATE RC=%d errorClass=0x%04X",
-			rc, rep.ErrorClass)
+	if dbErr := makeDb2Error(rep, "EXECUTE_IMMEDIATE"); dbErr != nil {
+		return nil, dbErr
 	}
 	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA);
 	// JT400 reads SQLERRD[2]. For now return 0 -- callers that
@@ -195,9 +194,8 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
-	if prepRep.ReturnCode != 0 && !isSQLWarning(prepRep.ReturnCode) {
-		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE RC=%d (0x%08X) errorClass=0x%04X",
-			prepRep.ReturnCode, prepRep.ReturnCode, prepRep.ErrorClass)
+	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
+		return nil, dbErr
 	}
 
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
@@ -276,9 +274,9 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		}
 		return &ExecResult{}, nil
 	}
-	if rep.ErrorClass != 0 || (rc != 0 && !isSQLWarning(rep.ReturnCode)) {
+	if dbErr := makeDb2Error(rep, "EXECUTE"); dbErr != nil {
 		_ = cleanup()
-		return nil, fmt.Errorf("hostserver: EXECUTE RC=%d errorClass=0x%04X", rc, rep.ErrorClass)
+		return nil, dbErr
 	}
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)

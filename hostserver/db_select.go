@@ -89,8 +89,8 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 	if rc == SQLCodeEndOfData || rc == SQLCodeCursorNotOpen {
 		return nil, true, nil
 	}
-	if rc != 0 && !isSQLWarning(rep.ReturnCode) {
-		return nil, false, fmt.Errorf("hostserver: FETCH RC=%d errorClass=0x%04X", rc, rep.ErrorClass)
+	if dbErr := makeDb2Error(rep, "FETCH"); dbErr != nil {
+		return nil, false, dbErr
 	}
 	rows, err = rep.findExtendedResultData(cols)
 	if err != nil {
@@ -339,13 +339,12 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
-	if prepRep.ReturnCode != 0 && !isSQLWarning(prepRep.ReturnCode) {
+	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
 		// Free the RPB so the next SELECT on this connection
 		// can chain. Don't fail on cleanup -- the original error
 		// is what the caller cares about.
 		_ = deleteRPB(conn, corr)
-		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE RC=%d (0x%08X) errorClass=0x%04X",
-			prepRep.ReturnCode, prepRep.ReturnCode, prepRep.ErrorClass)
+		return nil, dbErr
 	}
 	cols, err := prepRep.findSuperExtendedDataFormat()
 	if err != nil {
@@ -411,9 +410,8 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	// as non-zero ReturnCode but aren't fatal. The fixture's reply
 	// has RC=0x000002BC = 700 because the cursor was opened
 	// successfully but no scroll was specified.
-	if fetchRep.ReturnCode != 0 && !isSQLWarning(fetchRep.ReturnCode) {
-		return nil, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH RC=%d errorClass=0x%04X",
-			fetchRep.ReturnCode, fetchRep.ErrorClass)
+	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
+		return nil, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
