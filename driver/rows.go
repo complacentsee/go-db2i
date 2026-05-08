@@ -2,6 +2,7 @@ package driver
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -10,23 +11,47 @@ import (
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
-// Rows wraps a buffered SelectResult (the M5 fetch path returns the
-// whole result set in memory). Lazy iteration via continuation FETCH
-// stays a deferred M6+ enhancement.
+// Rows iterates a SELECT result lazily. Underneath it holds an open
+// server-side cursor that pulls the next batch via continuation
+// FETCH on demand -- callers walking a million rows pay one
+// 32 KB-buffer round-trip per batch, not one per row.
+//
+// The streaming variant is the public API; the buffered
+// hostserver.SelectResult shape is still used for offline tests and
+// the cmd/smoketest harness via SelectStaticSQL / SelectPreparedSQL.
 type Rows struct {
-	result *hostserver.SelectResult
-	pos    int
+	cursor    *hostserver.Cursor
+	conn      *Conn
+	closeErr  error // sticky -- so repeated Close calls return the same value
+	closed    bool
 }
 
 func (r *Rows) Columns() []string {
-	out := make([]string, len(r.result.Columns))
-	for i, c := range r.result.Columns {
+	cols := r.cursor.Columns()
+	out := make([]string, len(cols))
+	for i, c := range cols {
 		out[i] = c.Name
 	}
 	return out
 }
 
-func (r *Rows) Close() error { return nil }
+// Close releases the server-side cursor and the RPB slot. Idempotent
+// per the database/sql contract -- repeated calls return the same
+// (cached) error.
+func (r *Rows) Close() error {
+	if r.closed {
+		return r.closeErr
+	}
+	r.closed = true
+	r.closeErr = r.cursor.Close()
+	if r.closeErr != nil && r.conn != nil {
+		// If RPB cleanup itself failed, the wire is in an
+		// indeterminate state. Mark the conn dead so the pool
+		// retires it.
+		_ = r.conn.classifyConnErr(r.closeErr)
+	}
+	return r.closeErr
+}
 
 // Next copies the next row into dest. Returns io.EOF when exhausted
 // (the database/sql convention).
@@ -39,12 +64,19 @@ func (r *Rows) Close() error { return nil }
 // time.Time is convertible both ways through database/sql's
 // convertAssign.
 func (r *Rows) Next(dest []driver.Value) error {
-	if r.pos >= len(r.result.Rows) {
+	row, err := r.cursor.Next()
+	if errors.Is(err, io.EOF) {
 		return io.EOF
 	}
-	row := r.result.Rows[r.pos]
+	if err != nil {
+		if r.conn != nil {
+			return r.conn.classifyConnErr(err)
+		}
+		return err
+	}
+	cols := r.cursor.Columns()
 	for i, v := range row {
-		col := r.result.Columns[i]
+		col := cols[i]
 		switch col.SQLType {
 		case 384, 385, 388, 389, 392, 393:
 			s, ok := v.(string)
@@ -52,16 +84,15 @@ func (r *Rows) Next(dest []driver.Value) error {
 				dest[i] = v
 				continue
 			}
-			t, err := parseTemporalISO(col.SQLType, s)
-			if err != nil {
-				return fmt.Errorf("gojtopen: row %d col %d (%s): %w", r.pos, i, col.Name, err)
+			t, terr := parseTemporalISO(col.SQLType, s)
+			if terr != nil {
+				return fmt.Errorf("gojtopen: col %d (%s): %w", i, col.Name, terr)
 			}
 			dest[i] = t
 		default:
 			dest[i] = v
 		}
 	}
-	r.pos++
 	return nil
 }
 
@@ -103,15 +134,15 @@ func parseTemporalISO(sqlType uint16, s string) (time.Time, error) {
 // from the M5 metadata work; thread them through.
 
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
-	return r.result.Columns[index].TypeName
+	return r.cursor.Columns()[index].TypeName
 }
 
 func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
-	return r.result.Columns[index].Nullable, true
+	return r.cursor.Columns()[index].Nullable, true
 }
 
 func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
-	c := r.result.Columns[index]
+	c := r.cursor.Columns()[index]
 	switch c.SQLType {
 	case 448, 449, 452, 453, 456, 457, 460, 461: // CHAR / VARCHAR variants
 		return int64(c.Length), true
@@ -120,7 +151,7 @@ func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
 }
 
 func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
-	c := r.result.Columns[index]
+	c := r.cursor.Columns()[index]
 	switch c.SQLType {
 	case 484, 485, 488, 489: // DECIMAL, NUMERIC
 		return int64(c.Precision), int64(c.Scale), true
@@ -134,7 +165,7 @@ func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 }
 
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
-	c := r.result.Columns[index]
+	c := r.cursor.Columns()[index]
 	switch c.SQLType {
 	case 384, 385, 388, 389, 392, 393:
 		// Next promotes DATE / TIME / TIMESTAMP into time.Time so

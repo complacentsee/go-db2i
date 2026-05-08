@@ -92,6 +92,17 @@ func (c *Conn) nextCorr() uint32 {
 	return atomic.AddUint32(&c.corrCount, 100)
 }
 
+// nextCorrFunc returns a closure that mints fresh correlation IDs
+// from the same atomic counter as nextCorr but one ID at a time
+// (no block reservation). Used by streaming flows (OpenSelectStatic
+// and friends) where the driver and a long-lived *hostserver.Cursor
+// need to share the counter across multiple Next / Close calls.
+func (c *Conn) nextCorrFunc() func() uint32 {
+	return func() uint32 {
+		return atomic.AddUint32(&c.corrCount, 1)
+	}
+}
+
 // Prepare returns a Stmt that buffers the SQL string. Real
 // PREPARE-on-the-wire happens at execute time; this matches how our
 // hostserver.SelectStaticSQL and ExecuteImmediate work today.
