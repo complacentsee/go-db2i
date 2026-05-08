@@ -97,31 +97,31 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	return &Result{rowsAffected: res.RowsAffected}, nil
 }
 
-// Query runs a SELECT (or VALUES / WITH). With no args it uses
-// SelectStaticSQL; with args it uses SelectPreparedSQL after
-// converting the driver.Value list to typed PreparedParam shapes.
-//
-// Buffers the entire result set; lazy iteration is M6+ work.
+// Query runs a SELECT (or VALUES / WITH). With no args it opens a
+// streaming cursor via OpenSelectStatic; with args it opens via
+// OpenSelectPrepared. The cursor pulls subsequent batches lazily as
+// the caller's Rows.Next iterates -- a million-row SELECT pays one
+// 32 KB-buffer FETCH round-trip per batch instead of one per row.
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if !isSelect(s.query) {
 		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT; use Exec")
 	}
 	if len(args) == 0 {
-		res, err := hostserver.SelectStaticSQL(s.conn.conn, s.query, s.conn.nextCorr())
+		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc())
 		if err != nil {
 			return nil, s.conn.classifyConnErr(err)
 		}
-		return &Rows{result: res, pos: 0}, nil
+		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
 	shapes, values, err := bindArgsToPreparedParams(args)
 	if err != nil {
 		return nil, err
 	}
-	res, err := hostserver.SelectPreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
+	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc())
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}
-	return &Rows{result: res, pos: 0}, nil
+	return &Rows{cursor: cursor, conn: s.conn}, nil
 }
 
 // bindArgsToPreparedParams maps each driver.Value to a typed

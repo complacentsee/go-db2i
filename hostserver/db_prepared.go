@@ -387,22 +387,34 @@ func ChangeDescriptorRequest(params []PreparedParam) (Header, []byte, error) {
 // time/timestamp land with M4. The function returns the parsed
 // SelectResult identical to SelectStaticSQL.
 func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*SelectResult, error) {
+	cursor, err := OpenSelectPrepared(conn, sql, paramShapes, paramValues, closureFromInt(nextCorrelation))
+	if err != nil {
+		return nil, err
+	}
+	return cursor.drainAll()
+}
+
+// openPreparedUntilFirstBatch is the shared implementation used by
+// SelectPreparedSQL (drain-all) and OpenSelectPrepared (cursor).
+// Mirrors openStaticUntilFirstBatch but with the CHANGE_DESCRIPTOR
+// + bound-value frames between PREPARE and OPEN. Frees the RPB on
+// any error after CREATE_RPB.
+func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32) ([]SelectColumn, []SelectRow, error) {
 	if !strings.ContainsRune(sql, '?') {
-		return nil, fmt.Errorf("hostserver: SelectPreparedSQL called on SQL without parameter markers; use SelectStaticSQL")
+		return nil, nil, fmt.Errorf("hostserver: OpenSelectPrepared called on SQL without parameter markers; use OpenSelectStatic")
 	}
 	if len(paramShapes) != len(paramValues) {
-		return nil, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
+		return nil, nil, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
 	}
-	corr := nextCorrelation
 
 	// --- 1) CREATE_RPB. ---
 	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: encode stmt name: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: encode stmt name: %w", err)
 	}
 	cursorNameBytes, err := ebcdic.CCSID37.Encode("CRSR0001")
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: encode cursor name: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: encode cursor name: %w", err)
 	}
 	{
 		tpl := DBRequestTemplate{
@@ -418,18 +430,17 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 			DBParamVarString(cpDBCursorName, 273, cursorNameBytes),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
-		hdr.CorrelationID = corr
-		corr++
+		hdr.CorrelationID = nextCorr()
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
 		}
 	}
 
 	// --- 2) PREPARE_DESCRIBE (with ORSParameterMarkerFmt). ---
 	stmtBytes := utf16BE(sql)
-	prepCorr := corr
+	prepCorr := nextCorr()
 	{
 		tpl := DBRequestTemplate{
 			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | 0x00040000,
@@ -445,50 +456,52 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 			DBParamByte(cpDBPrepareOption, 0x00),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
 		}
 		hdr.CorrelationID = prepCorr
-		corr++
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
 		}
 	}
 	prepRepHdr, prepRepPayload, err := ReadDBReplyMatching(conn, prepCorr, 8)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
 	}
 	if prepRepHdr.ReqRepID != RepDBReply {
-		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
+		return nil, nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
 	}
 	prepRep, err := ParseDBReply(prepRepPayload)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
 	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
-		return nil, dbErr
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, dbErr
 	}
 	cols, err := prepRep.findSuperExtendedDataFormat()
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse column descriptors: %w", err)
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fmt.Errorf("hostserver: parse column descriptors: %w", err)
 	}
 
 	// --- 3) CHANGE_DESCRIPTOR. ---
 	{
 		hdr, payload, err := ChangeDescriptorRequest(paramShapes)
 		if err != nil {
-			return nil, fmt.Errorf("hostserver: build CHANGE_DESCRIPTOR: %w", err)
+			_ = deleteRPB(conn, nextCorr())
+			return nil, nil, fmt.Errorf("hostserver: build CHANGE_DESCRIPTOR: %w", err)
 		}
-		hdr.CorrelationID = corr
-		corr++
+		hdr.CorrelationID = nextCorr()
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, fmt.Errorf("hostserver: send CHANGE_DESCRIPTOR: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: send CHANGE_DESCRIPTOR: %w", err)
 		}
 	}
 
 	// --- 4) OPEN_DESCRIBE_FETCH with input parameters. ---
 	dataPayload, err := EncodeDBExtendedData(paramShapes, paramValues)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: encode input parameter data: %w", err)
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fmt.Errorf("hostserver: encode input parameter data: %w", err)
 	}
 	var fetchCorr uint32
 	{
@@ -515,54 +528,36 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
 		if err != nil {
-			return nil, fmt.Errorf("hostserver: build OPEN_DESCRIBE_FETCH: %w", err)
+			_ = deleteRPB(conn, nextCorr())
+			return nil, nil, fmt.Errorf("hostserver: build OPEN_DESCRIBE_FETCH: %w", err)
 		}
-		fetchCorr = corr
+		fetchCorr = nextCorr()
 		hdr.CorrelationID = fetchCorr
-		corr++
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, fmt.Errorf("hostserver: send OPEN_DESCRIBE_FETCH: %w", err)
+			return nil, nil, fmt.Errorf("hostserver: send OPEN_DESCRIBE_FETCH: %w", err)
 		}
 	}
 	fetchRepHdr, fetchRepPayload, err := ReadDBReplyMatching(conn, fetchCorr, 8)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: read OPEN_DESCRIBE_FETCH reply: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: read OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
 	if fetchRepHdr.ReqRepID != RepDBReply {
-		return nil, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH reply ReqRepID 0x%04X (want 0x%04X)", fetchRepHdr.ReqRepID, RepDBReply)
+		return nil, nil, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH reply ReqRepID 0x%04X (want 0x%04X)", fetchRepHdr.ReqRepID, RepDBReply)
 	}
 	fetchRep, err := ParseDBReply(fetchRepPayload)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
+		return nil, nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
 	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
-		return nil, dbErr
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse row data: %w", err)
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
-	// Same continuation FETCH loop as SelectStaticSQL.
-	for {
-		more, done, err := fetchMoreRows(conn, cols, corr)
-		if err != nil {
-			return nil, fmt.Errorf("hostserver: continuation FETCH: %w", err)
-		}
-		corr++
-		if done {
-			break
-		}
-		rows = append(rows, more...)
-	}
-	// Free the RPB slot so the next SELECT on this connection
-	// can chain. JTOpen also emits a DELETE_DESCRIPTOR (0x1E01)
-	// before this for prepared SELECTs; that's optional --
-	// PUB400 happily accepts a fresh CHANGE_DESCRIPTOR on the
-	// same RPB slot once it's recreated.
-	if err := deleteRPB(conn, corr); err != nil {
-		return nil, fmt.Errorf("hostserver: post-fetch cleanup: %w", err)
-	}
-	return &SelectResult{Columns: cols, Rows: rows}, nil
+	return cols, rows, nil
 }
 
 // toInt32 narrows common Go integer types into int32 for INTEGER
