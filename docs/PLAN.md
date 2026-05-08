@@ -387,6 +387,34 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
 - Run `bradfitz/go-sql-test` (or the `go-sql-driver/mysql` adapted
   test harness) end-to-end.
 
+**Status:** ⏳ scaffold landed — commit `ddf7ce3`. The `driver/`
+package exposes the standard `database/sql` surface and wraps our
+hostserver protocol; live-validated end-to-end against IBM Cloud
+IBM i 7.6 (V7R6M0): `sql.Open` + `db.Query` + `Rows.ColumnTypes`
++ `db.Begin` / `tx.Commit` / `tx.Rollback` all round-trip cleanly.
+DSN syntax: `gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso&isolation=cs`.
+
+**Deferred from M6 (work remaining for "first usable driver"):**
+
+- **Parameter binding for Stmt.Exec / Stmt.Query** — per-type bind
+  encoders exist at `hostserver` level (M3/M4) but the driver
+  Stmt path currently rejects any args. Plumbing through prepared-
+  bind I/U/D is the biggest remaining gap.
+- **Lazy Rows iteration via continuation FETCH** — currently
+  buffers the full result set into memory. The continuation FETCH
+  loop in `hostserver.SelectStaticSQL` pulls all rows; the driver
+  needs a streaming variant that yields a batch at a time.
+- **`LastInsertId` via IDENTITY_VAL_LOCAL()** — currently returns
+  a "not supported" error; needs a follow-up SELECT after INSERT
+  to fetch the generated key.
+- **Context cancellation propagation** — `Conn.Connect(ctx)`
+  honours the deadline for the dial, but per-statement context
+  cancellation doesn't currently interrupt in-flight host-server
+  frames. Lands with the streaming Rows work.
+- **`bradfitz/go-sql-test` conformance** — never run.
+- **`cmd/diffrunner`** — never built; still a good idea during
+  conformance work.
+
 ### M7 — LOB streaming, CCSID negotiation, error mapping (~3-4 weeks)
 
 - BLOB/CLOB handling via the host-server's chunked-data path
