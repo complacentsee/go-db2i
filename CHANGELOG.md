@@ -13,6 +13,17 @@ have all landed.
 
 ### Added
 
+- LOB SELECT support: BLOB / CLOB / DBCLOB columns arrive as
+  server-side locators (SQL types 960/961, 964/965, 968/969). The
+  driver auto-fetches the full LOB content via
+  `hostserver.RetrieveLOBData` (function 0x1816) on `Rows.Scan`.
+  BLOBs scan into `*[]byte`, CLOBs into `*string` (decoded per the
+  column CCSID -- UTF-8 / EBCDIC / UCS-2 BE for DBCLOB). Streaming
+  via `io.Reader` is documented as a follow-up; for now LOBs are
+  fully materialised at Scan time, which fits the typical
+  small-to-medium LOB case. LOB *bind* (writing large LOBs as INSERT
+  parameters) is not yet implemented; INSERT inline literals
+  (`X'...'`, string literals) still work.
 - TLS support via `tls=true` DSN key. Wraps both as-signon and
   as-database sockets in `crypto/tls`; default ports flip to the IBM
   i SSL host-server pair (9476 / 9471). `tls-insecure-skip-verify=true`

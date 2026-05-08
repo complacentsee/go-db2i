@@ -7,7 +7,9 @@ import (
 	"io"
 	"reflect"
 	"time"
+	"unicode/utf16"
 
+	"github.com/complacentsee/goJTOpen/ebcdic"
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
@@ -89,11 +91,115 @@ func (r *Rows) Next(dest []driver.Value) error {
 				return fmt.Errorf("gojtopen: col %d (%s): %w", i, col.Name, terr)
 			}
 			dest[i] = t
+		case 960, 961, 964, 965, 968, 969:
+			// BLOB / CLOB / DBCLOB locator. Materialise the full
+			// content via RETRIEVE_LOB_DATA. Streaming via io.Reader
+			// is documented as a follow-up; for now we read the
+			// entire LOB into memory at Scan time (matches the
+			// "small to medium LOB" common case and avoids exposing
+			// a different scan API to callers).
+			loc, ok := v.(hostserver.LOBLocator)
+			if !ok {
+				dest[i] = v
+				continue
+			}
+			out, lerr := r.materialiseLOB(loc, i)
+			if lerr != nil {
+				return fmt.Errorf("gojtopen: col %d (%s, lob): %w", i, col.Name, lerr)
+			}
+			dest[i] = out
 		default:
 			dest[i] = v
 		}
 	}
 	return nil
+}
+
+// materialiseLOB pulls the full LOB content via one or more
+// RETRIEVE_LOB_DATA round trips on the same connection. BLOB
+// columns return []byte; CLOB / DBCLOB return string after
+// transcoding from the wire CCSID.
+//
+// For now we issue a single RETRIEVE call that asks for up to 2 GB
+// (the IBM i wire-format max) and rely on the server to honour the
+// LOB's actual length. Genuinely huge LOBs that exceed memory
+// should use the (deferred) streaming Read API once landed.
+func (r *Rows) materialiseLOB(loc hostserver.LOBLocator, colIdx int) (any, error) {
+	if r.conn == nil {
+		return nil, fmt.Errorf("rows has no connection (offline test path?)")
+	}
+	const maxRequest = int64(0x7FFFFFFF) // server caps at int32
+	data, err := hostserver.RetrieveLOBData(
+		r.conn.conn,
+		loc.Handle,
+		0,           // offset
+		maxRequest,  // request the whole thing
+		colIdx,      // column index for server-side validation
+		r.conn.nextCorr(),
+	)
+	if err != nil {
+		return nil, r.conn.classifyConnErr(err)
+	}
+	if data == nil || len(data.Bytes) == 0 {
+		// Empty LOB: the column had IS NULL semantics or the LOB
+		// genuinely has zero length. Either way the result is empty.
+		// Pick the type by SQL type so Scan into either *[]byte or
+		// *string works.
+		if loc.SQLType == 960 || loc.SQLType == 961 {
+			return []byte{}, nil
+		}
+		return "", nil
+	}
+	switch loc.SQLType {
+	case 960, 961:
+		// BLOB: bytes are binary regardless of CCSID tag.
+		return data.Bytes, nil
+	case 964, 965:
+		// CLOB: bytes are characters in CCSID. Match the result-
+		// decoder VARCHAR convention -- 1208 stays UTF-8, 65535 is
+		// raw, anything else goes through the SBCS EBCDIC table.
+		return decodeLOBChars(data.Bytes, data.CCSID)
+	case 968, 969:
+		// DBCLOB: bytes are 16-bit codepoints in CCSID 13488 (UCS-2
+		// BE) or 1200 (UTF-16BE). Translate both as UTF-16BE since
+		// the LOB content uses the same encoding.
+		return decodeUTF16BE(data.Bytes), nil
+	default:
+		return data.Bytes, nil
+	}
+}
+
+// decodeLOBChars converts CLOB payload bytes into a Go string per
+// the column's CCSID. Mirrors the VARCHAR result-decode convention
+// (CCSID 65535 = raw passthrough, 1208 = UTF-8 passthrough, else
+// EBCDIC SBCS via CCSID 37).
+func decodeLOBChars(b []byte, ccsid uint16) (string, error) {
+	switch ccsid {
+	case 65535:
+		return string(b), nil
+	case 1208:
+		return string(b), nil
+	default:
+		s, err := ebcdic.CCSID37.Decode(b)
+		if err != nil {
+			return "", err
+		}
+		return s, nil
+	}
+}
+
+// decodeUTF16BE turns a sequence of 16-bit big-endian codepoints
+// into a Go UTF-8 string. Used for DBCLOB content tagged with
+// CCSID 13488 (UCS-2 BE) or 1200 (UTF-16 BE).
+func decodeUTF16BE(b []byte) string {
+	if len(b) < 2 {
+		return ""
+	}
+	codes := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		codes = append(codes, uint16(b[i])<<8|uint16(b[i+1]))
+	}
+	return string(utf16.Decode(codes))
 }
 
 // parseTemporalISO converts the ISO strings hostserver emits for
@@ -175,6 +281,12 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 		if c.CCSID == 65535 {
 			return reflect.TypeOf([]byte{})
 		}
+		return reflect.TypeOf("")
+	case 960, 961:
+		// BLOB locator -- materialised as []byte by Next.
+		return reflect.TypeOf([]byte{})
+	case 964, 965, 968, 969:
+		// CLOB / DBCLOB locator -- materialised as string by Next.
 		return reflect.TypeOf("")
 	case 480, 481:
 		return reflect.TypeOf(float64(0))
