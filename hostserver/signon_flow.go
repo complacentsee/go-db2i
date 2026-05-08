@@ -118,8 +118,8 @@ func SignOn(conn io.ReadWriter, userID, password string) (
 	if err != nil {
 		return xa, nil, fmt.Errorf("hostserver: parse signon-info reply: %w", err)
 	}
-	if si.ReturnCode != 0 {
-		return xa, si, fmt.Errorf("hostserver: signon-info RC=%d (auth failed)", si.ReturnCode)
+	if err := wrapSignonRC(si.ReturnCode); err != nil {
+		return xa, si, fmt.Errorf("hostserver: signon-info auth failed: %w", err)
 	}
 
 	return xa, si, nil
