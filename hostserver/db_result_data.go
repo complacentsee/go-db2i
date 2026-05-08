@@ -386,6 +386,38 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		}
 		return s, nbytes, nil
 
+	case 960, 961, 964, 965, 968, 969:
+		// LOB locators: BLOB(960/961), CLOB(964/965), DBCLOB(968/969).
+		// Wire bytes are a 4-byte BE handle that the caller passes
+		// to RetrieveLOBData to materialise the actual content. Some
+		// V7R5+ replies pack a length prefix ahead of the handle in
+		// the same way VARCHAR does (4-byte handle + extras for
+		// CCSID/length), but the leading 4 bytes are always the
+		// handle. Caller decides whether to expand inline (small
+		// LOBs, the database/sql Scan path) or stream via separate
+		// RetrieveLOBData calls.
+		if len(b) < 4 {
+			return nil, 0, fmt.Errorf("lob locator wants 4 bytes, have %d", len(b))
+		}
+		handle := binary.BigEndian.Uint32(b[:4])
+		// col.Length is the locator-record width on the wire (often
+		// 16, 20, 28 depending on V*R*M and column-type metadata
+		// configuration). Advance by col.Length so the row layout
+		// stays in step.
+		consumed := int(col.Length)
+		if consumed < 4 {
+			consumed = 4
+		}
+		if len(b) < consumed {
+			return nil, 0, fmt.Errorf("lob locator wants %d bytes, have %d", consumed, len(b))
+		}
+		return LOBLocator{
+			Handle:    handle,
+			SQLType:   col.SQLType,
+			MaxLength: col.Length,
+			CCSID:     col.CCSID,
+		}, consumed, nil
+
 	case SQLTypeFloat8, 481: // 480 NN (REAL or DOUBLE), 481 nullable
 		// IEEE 754 big-endian; REAL is 4 bytes (float32),
 		// DOUBLE is 8 bytes (float64). The SQL type is the same

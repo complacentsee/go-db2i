@@ -35,14 +35,16 @@ core `database/sql` interfaces are implemented end-to-end:
   EBCDIC fallback (CCSID 37) on older servers
 - Type round-trip: INTEGER, BIGINT, SMALLINT, DOUBLE, REAL, DECIMAL,
   NUMERIC, DECFLOAT(16/34), CHAR, VARCHAR (and FOR BIT DATA), DATE,
-  TIME, TIMESTAMP
+  TIME, TIMESTAMP, BLOB, CLOB, DBCLOB
 
 Larger items still on the roadmap (`docs/PLAN.md`):
 
-- **M7**: BLOB/CLOB streaming, TLS sign-on/database (ports 9476/9471),
-  broader CCSID coverage
+- **M7**: BLOB/CLOB streaming via `io.Reader` (read-side currently
+  materialises the full LOB at Scan time -- fine for most LOBs;
+  the streaming Reader is a follow-up). LOB *bind* on parameter
+  markers. Broader CCSID coverage.
 - **M8**: `slog` integration, OpenTelemetry spans, fuzz tests on the
-  reply parser, `bradfitz/go-sql-test` conformance run
+  reply parser.
 
 ## Install
 
