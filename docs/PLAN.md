@@ -130,18 +130,28 @@ connections and prints info from both.
 
 **Deferred from M1:**
 
-- **Password levels 0/1 (DES) and 4 (PBKDF2-SHA-512)** — ⚠️
-  implemented 2026-05-08, **spec-validated only**. Both algorithms
-  mirror JT400's `AS400ImplRemote.encryptPassword` /
-  `generatePwdTokenForPasswordLevel4` byte-for-byte; the PBKDF2
-  primitive is RFC 6070-validated, and DES uses stdlib `crypto/des`.
-  But neither has been wire-validated against a live IBM i: PUB400
-  and PUB1.de are both locked at `QPWDLVL=3` and refuse level 0/1
-  or level 4 challenges regardless of `clientDSLevel`. Both code
-  paths emit a one-shot stderr warning on first use
-  (`auth/warning.go`) so the validation gap is operationally
-  visible. First production target with a different `QPWDLVL` is
-  the regression net.
+- **Password level 4 (PBKDF2-HMAC-SHA-512)** — ✅ wire-validated
+  2026-05-08 against IBM i 7.6 (V7R6M0) on IBM Cloud Power VS.
+  The original implementation followed JT400's spec comment which
+  says "Data = Unicode password value" and used UTF-16BE for the
+  PBKDF2 password input. The live server returned SQL -3008
+  ("password incorrect") -- exactly what the warning predicted.
+  Root cause: JT400's actual Java code goes through PBEKeySpec,
+  whose PBKDF2KeyImpl encodes the char[] as UTF-8 internally,
+  not UTF-16BE. The IBM i server matches the implementation, not
+  the spec text. Fix was one line; regression vector pinned via
+  `TestEncryptPasswordPBKDF2WireValidatedVector`. Without live
+  IBM i access this bug would have stayed hidden indefinitely --
+  the offline RFC 6070 PBKDF2 vectors and Python cross-check both
+  validated the wrong-but-self-consistent UTF-16BE path.
+- **Password levels 0/1 (DES)** — ⚠️ implemented but
+  **spec-validated only**. PUB400 / PUB1.de / IBM Cloud V7R6 all
+  ship at `QPWDLVL >= 3` and refuse to issue level-0/1 challenges,
+  so we can't reach a live target. The implementation mirrors
+  JT400's `AS400ImplRemote.encryptPassword` byte-for-byte and
+  emits a one-shot stderr warning on first use. Given the PBKDF2
+  experience, expect a similar spec-vs-implementation gap to
+  surface here too if a real legacy server is ever found.
 - **`signon.go:318` TODO** — error-class wrapping in the sign-on
   reply parser. Inline; ~15 lines when revisited.
 - **TLS sign-on / database (ports 9476 / 9471)** — IBM i certs
