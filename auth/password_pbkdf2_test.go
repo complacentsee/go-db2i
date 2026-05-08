@@ -80,6 +80,33 @@ func TestBuildPBKDF2SaltInputShortPassword(t *testing.T) {
 	}
 }
 
+// TestEncryptPasswordPBKDF2WireValidatedVector pins the substitute
+// produced for a fixed (userID, password, clientSeed, serverSeed)
+// combination. The expected value was wire-validated against IBM i
+// 7.6 (V7R6M0, QPWDLVL=4) on IBM Cloud Power VS, 2026-05-08 -- the
+// server accepted this exact 64-byte substitute as proof of
+// possession of password "Thiswontmeetrequirements2025" for user
+// GOTEST.
+//
+// If this test fails, the algorithm has drifted from what a real
+// IBM i server expects; the most likely culprit is a regression of
+// the PBKDF2 password-input encoding (server expects UTF-8; the
+// JT400 spec text misleadingly says UTF-16BE).
+func TestEncryptPasswordPBKDF2WireValidatedVector(t *testing.T) {
+	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	serverSeed := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+	got, err := EncryptPasswordPBKDF2("GOTEST", "Thiswontmeetrequirements2025", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	want, _ := hex.DecodeString(
+		"32ca48c270a17c284bd5a1904f385e4e410bb26be09ea8940402ec6bc3c7c82f" +
+			"4b692a89809a88b4fa800b329e240fa588ad370efc6824960f494408124ea7de")
+	if !bytes.Equal(got, want) {
+		t.Errorf("PBKDF2 substitute mismatch -- algorithm has drifted from wire-validated reference\n got: %x\nwant: %x", got, want)
+	}
+}
+
 // TestEncryptPasswordPBKDF2Deterministic confirms the same inputs
 // produce the same output across calls -- cheap regression net for
 // "did someone introduce nondeterminism" without needing a live

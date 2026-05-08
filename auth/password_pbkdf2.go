@@ -23,20 +23,24 @@ import (
 //        with spaces if shorter).
 //  2. UTF-16 BE encode -> 28 bytes.
 //  3. SHA-256(28-byte input) -> 32-byte salt.
-//  4. PBKDF2-HMAC-SHA-512(password = UTF-16BE(password),
+//  4. PBKDF2-HMAC-SHA-512(password = UTF-8(password),
 //                         salt = 32-byte salt,
 //                         iter = 10022,
 //                         keyLen = 64) -> 64-byte token PW_TOKEN.
+//     NOTE the UTF-8 here -- JT400's spec comment says "Unicode" but
+//     the actual Java implementation goes through PBEKeySpec, whose
+//     PBKDF2KeyImpl encodes the char[] as UTF-8 (sun.security.pkcs.PBEKey
+//     pre-Java-8 was Latin-1; current behaviour is UTF-8). The IBM i
+//     server matches that, not the spec text. Going UTF-16BE here
+//     produces the right SHAPE of bytes but the wrong VALUE -- server
+//     returns SQL -3008 / errClass 8 ("password incorrect"). Live-
+//     validated against IBM i 7.6 on IBM Cloud Power VS, 2026-05-08.
 //  5. PW_SUB = SHA-512(PW_TOKEN || serverSeed || clientSeed
 //                      || UTF-16BE(10-char-padded-userID) || sequence).
+//     UTF-16BE here is correct (matches both spec and JT400's actual
+//     getBytes("utf-16be") call).
 //
 // sequence is the literal {0,0,0,0,0,0,0,1}.
-//
-// !!! NOT WIRE-VALIDATED !!! See warning.go. PUB400 is QPWDLVL=3 and
-// will not issue level-4 challenges, so this implementation has only
-// ever been exercised against JT400 source -- not against a live
-// IBM i. First production target with QPWDLVL=4 is the regression
-// net.
 func EncryptPasswordPBKDF2(userID, password string, clientSeed, serverSeed []byte) ([]byte, error) {
 	if password == "" {
 		return nil, fmt.Errorf("auth: password is empty")
@@ -51,7 +55,9 @@ func EncryptPasswordPBKDF2(userID, password string, clientSeed, serverSeed []byt
 		return nil, fmt.Errorf("auth: serverSeed must be 8 bytes, got %d", len(serverSeed))
 	}
 
-	unvalidatedAlgorithmWarning("PBKDF2-HMAC-SHA-512 (level 4)")
+	// PBKDF2 is now wire-validated (see commit history); no warning
+	// needed. DES (levels 0/1) is still spec-only -- see
+	// EncryptPasswordDES.
 
 	// Step 1+2: build 14-char salt input, UTF-16BE encode.
 	saltInput := buildPBKDF2SaltInput(userID, password)
@@ -61,8 +67,13 @@ func EncryptPasswordPBKDF2(userID, password string, clientSeed, serverSeed []byt
 	salt := saltDigest[:]
 
 	// Step 4: PBKDF2-HMAC-SHA-512, 10022 iterations, 64-byte output.
-	passwordBytes := utf16BE(password)
-	pwToken := pbkdf2HMACSHA512(passwordBytes, salt, 10022, 64)
+	// JT400's spec comment says "Data = Unicode password value" but
+	// the actual Java implementation uses PBEKeySpec, whose
+	// PBKDF2KeyImpl.getPasswordBytes() encodes the char[] as UTF-8.
+	// The IBM i server matches that, not the spec text -- so we
+	// pass UTF-8 here, not UTF-16BE. (UTF-16BE is still correct for
+	// the salt construction in step 1+2 above.) Live-validated 2026-05-08.
+	pwToken := pbkdf2HMACSHA512([]byte(password), salt, 10022, 64)
 
 	// Step 5: SHA-512 substitute.
 	userIDBytes, err := paddedUserIDUTF16BE(userID)
