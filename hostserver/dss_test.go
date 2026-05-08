@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
 )
@@ -233,15 +232,19 @@ func TestParseConnectOnlyExchangeAttributesReply(t *testing.T) {
 	if rep.PasswordLevel != 3 {
 		t.Errorf("PasswordLevel = %d, want 3", rep.PasswordLevel)
 	}
-	wantSeed := []byte{0x2C, 0x16, 0x0B, 0xFE, 0x9E, 0x75, 0x85, 0x2C}
-	if !bytes.Equal(rep.ServerSeed, wantSeed) {
-		t.Errorf("ServerSeed = %x, want %x", rep.ServerSeed, wantSeed)
+	// ServerSeed is per-session random; structural assertion only.
+	if len(rep.ServerSeed) != 8 {
+		t.Errorf("ServerSeed length = %d, want 8", len(rep.ServerSeed))
 	}
-	// EBCDIC "341513/QUSER/QZSOSIGN" -- cross-check just by length and
-	// a couple of distinctive bytes; full EBCDIC decode lives in the
-	// future ebcdic package.
-	if len(rep.JobName) != 21 {
-		t.Errorf("JobName len = %d, want 21", len(rep.JobName))
+	if bytes.Equal(rep.ServerSeed, make([]byte, 8)) {
+		t.Errorf("ServerSeed is all zeros (unlikely valid)")
+	}
+	// JobName is "<jobnumber>/QUSER/QZSOSIGN" in EBCDIC; the job
+	// number rotates per-capture so the total length isn't stable
+	// (could be 20-22 bytes depending on job-number digit count).
+	// Just confirm it's non-empty.
+	if len(rep.JobName) == 0 {
+		t.Errorf("JobName is empty")
 	}
 	if rep.AAFIndicator {
 		t.Errorf("AAFIndicator = true, want false")
@@ -284,17 +287,21 @@ func TestParseConnectOnlySignonInfoReply(t *testing.T) {
 	if rep.ReturnCode != 0 {
 		t.Errorf("ReturnCode = %d, want 0", rep.ReturnCode)
 	}
-	wantCurrent := time.Date(2026, 5, 7, 19, 8, 0, 0, time.UTC)
-	if !rep.CurrentSignonDate.Equal(wantCurrent) {
-		t.Errorf("CurrentSignonDate = %v, want %v", rep.CurrentSignonDate, wantCurrent)
+	// Sign-on dates are stamped server-side at capture time, so
+	// pinning them breaks every fixture re-capture. Assert
+	// non-zero + chronological invariant (current >= last) instead.
+	if rep.CurrentSignonDate.IsZero() {
+		t.Errorf("CurrentSignonDate is zero, want non-zero")
 	}
-	wantLast := time.Date(2026, 5, 7, 19, 7, 58, 0, time.UTC)
-	if !rep.LastSignonDate.Equal(wantLast) {
-		t.Errorf("LastSignonDate = %v, want %v", rep.LastSignonDate, wantLast)
+	if rep.LastSignonDate.IsZero() {
+		t.Errorf("LastSignonDate is zero, want non-zero")
 	}
-	wantExp := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
-	if !rep.ExpirationDate.Equal(wantExp) {
-		t.Errorf("ExpirationDate = %v, want %v", rep.ExpirationDate, wantExp)
+	if rep.CurrentSignonDate.Before(rep.LastSignonDate) {
+		t.Errorf("CurrentSignonDate (%v) before LastSignonDate (%v)",
+			rep.CurrentSignonDate, rep.LastSignonDate)
+	}
+	if rep.ExpirationDate.IsZero() {
+		t.Errorf("ExpirationDate is zero, want non-zero")
 	}
 	if rep.ServerCCSID != 273 {
 		t.Errorf("ServerCCSID = %d, want 273 (German)", rep.ServerCCSID)

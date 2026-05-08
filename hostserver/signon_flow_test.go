@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
 )
@@ -92,9 +91,10 @@ func TestSignOnAgainstConnectOnlyFixture(t *testing.T) {
 	if si.ServerCCSID != 273 {
 		t.Errorf("ServerCCSID = %d, want 273", si.ServerCCSID)
 	}
-	wantCurrent := time.Date(2026, 5, 7, 19, 8, 0, 0, time.UTC)
-	if !si.CurrentSignonDate.Equal(wantCurrent) {
-		t.Errorf("CurrentSignonDate = %v, want %v", si.CurrentSignonDate, wantCurrent)
+	// CurrentSignonDate is per-capture; structural assertion only
+	// (see TestParseConnectOnlySignonInfoReply for the rationale).
+	if si.CurrentSignonDate.IsZero() {
+		t.Errorf("CurrentSignonDate is zero, want non-zero")
 	}
 
 	// And validate the requests SignOn wrote are themselves parseable.
