@@ -84,7 +84,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		if err != nil {
 			return nil, s.conn.classifyConnErr(err)
 		}
-		return &Result{rowsAffected: res.RowsAffected}, nil
+		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 	}
 	shapes, values, err := bindArgsToPreparedParams(args)
 	if err != nil {
@@ -94,7 +94,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}
-	return &Result{rowsAffected: res.RowsAffected}, nil
+	return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 }
 
 // Query runs a SELECT (or VALUES / WITH). With no args it opens a
