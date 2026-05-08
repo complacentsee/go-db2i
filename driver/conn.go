@@ -125,7 +125,7 @@ func (c *Conn) Begin() (driver.Tx, error) {
 		return nil, driver.ErrBadConn
 	}
 	if err := hostserver.AutocommitOff(c.conn, c.nextCorr()); err != nil {
-		return nil, fmt.Errorf("gojtopen: autocommit off: %w", err)
+		return nil, c.classifyConnErr(fmt.Errorf("gojtopen: autocommit off: %w", err))
 	}
 	return &Tx{conn: c}, nil
 }

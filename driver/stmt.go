@@ -30,6 +30,12 @@ func (s *Stmt) Close() error { return nil }
 // prepared-DML flow (CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR
 // / EXECUTE). Both paths return the affected-row count via Result --
 // today always 0 since SQLCA decoding is M7 work.
+//
+// Errors flow through classifyConnErr so a TCP-level failure marks
+// the parent Conn dead; the next checkout from the database/sql
+// pool then sees driver.ErrBadConn and gets a fresh connection.
+// Statement-level errors (syntax, constraint, etc.) flow through
+// unchanged as *Db2Error.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if isSelect(s.query) {
 		return nil, fmt.Errorf("gojtopen: Exec called with SELECT; use Query")
@@ -37,7 +43,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if len(args) == 0 {
 		res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
 		if err != nil {
-			return nil, err
+			return nil, s.conn.classifyConnErr(err)
 		}
 		return &Result{rowsAffected: res.RowsAffected}, nil
 	}
@@ -47,7 +53,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
 	if err != nil {
-		return nil, err
+		return nil, s.conn.classifyConnErr(err)
 	}
 	return &Result{rowsAffected: res.RowsAffected}, nil
 }
@@ -64,7 +70,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if len(args) == 0 {
 		res, err := hostserver.SelectStaticSQL(s.conn.conn, s.query, s.conn.nextCorr())
 		if err != nil {
-			return nil, err
+			return nil, s.conn.classifyConnErr(err)
 		}
 		return &Rows{result: res, pos: 0}, nil
 	}
@@ -74,7 +80,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	}
 	res, err := hostserver.SelectPreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
 	if err != nil {
-		return nil, err
+		return nil, s.conn.classifyConnErr(err)
 	}
 	return &Rows{result: res, pos: 0}, nil
 }
