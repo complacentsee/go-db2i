@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/complacentsee/goJTOpen/auth"
 )
@@ -32,6 +33,12 @@ func SignOn(conn io.ReadWriter, userID, password string) (
 	*SignonInfoReply,
 	error,
 ) {
+	// IBM i user profiles are stored uppercase; mirror what JT400's
+	// AS400.connect() does (toUpperCase early) so callers can pass
+	// "gotest" / "GoTest" interchangeably and both auth-hash inputs
+	// and the SignonInfoRequest userID CP see the same case.
+	userID = strings.ToUpper(userID)
+
 	clientSeed := make([]byte, 8)
 	if _, err := rand.Read(clientSeed); err != nil {
 		return nil, nil, fmt.Errorf("hostserver: generate client seed: %w", err)
