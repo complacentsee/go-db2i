@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"database/sql/driver"
 	"fmt"
 	"strings"
@@ -24,6 +25,44 @@ type Stmt struct {
 func (s *Stmt) NumInput() int { return -1 }
 
 func (s *Stmt) Close() error { return nil }
+
+// ExecContext implements driver.StmtExecContext. Plumbs ctx through
+// to the underlying net.Conn via SetDeadline so a canceled / timed-
+// out request unblocks the in-flight wire read instead of hanging
+// for the connection's full timeout. Returns ctx.Err() (Canceled /
+// DeadlineExceeded) when the cancellation is the actual cause,
+// regardless of which I/O step bailed.
+func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	cleanup := withContextDeadline(ctx, s.conn.conn)
+	defer cleanup()
+	res, err := s.Exec(namedToValues(args))
+	if err != nil {
+		return nil, resolveCtxErr(ctx, err)
+	}
+	return res, nil
+}
+
+// QueryContext implements driver.StmtQueryContext. Same plumbing as
+// ExecContext.
+func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	cleanup := withContextDeadline(ctx, s.conn.conn)
+	defer cleanup()
+	rows, err := s.Query(namedToValues(args))
+	if err != nil {
+		return nil, resolveCtxErr(ctx, err)
+	}
+	return rows, nil
+}
+
+// namedToValues drops the parameter names (we don't use them; IBM i
+// SQL is positional). Order is preserved.
+func namedToValues(args []driver.NamedValue) []driver.Value {
+	out := make([]driver.Value, len(args))
+	for i, a := range args {
+		out[i] = a.Value
+	}
+	return out
+}
 
 // Exec runs INSERT / UPDATE / DELETE / DDL. With no args it uses the
 // single-frame ExecuteImmediate; with args it goes through the
