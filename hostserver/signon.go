@@ -314,8 +314,11 @@ func SignonInfoRequest(
 // values mean "the server didn't include this CP."
 type SignonInfoReply struct {
 	// ReturnCode is 0 on success. Non-zero values are documented in
-	// the IBM i sign-on server reference; the [SignonError] type
-	// (TODO) wraps them.
+	// the IBM i sign-on server reference and wrapped by
+	// [SignonError] (use [wrapSignonRC] to get one). Common codes:
+	// 0x0003000B = password incorrect, 0x00020001 = user ID
+	// unknown, 0x00020002 = user ID disabled, 0x0003000D =
+	// password expired.
 	ReturnCode uint32
 
 	// CurrentSignonDate is the timestamp the server stamps onto this
