@@ -2,6 +2,7 @@ package hostserver
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
@@ -91,10 +92,15 @@ func TestParseDBReplyServerAttributesAgainstFixture(t *testing.T) {
 		t.Errorf("DefaultSQLLibraryName = %q, want %q", defaultLib, "AFTRAEGE11")
 	}
 	jobId, _ := ebcdic.CCSID37.Decode(attrs.ServerJobIdentifier)
-	// 26 chars: 10 job program + 10 user + 6 number.
-	wantJobId := "QZDASOINITQUSER     344425"
-	if jobId != wantJobId {
-		t.Errorf("ServerJobIdentifier = %q, want %q", jobId, wantJobId)
+	// 26 chars: 10 job program + 10 user + 6 number. The job-number
+	// suffix rotates per-capture, so we pin only the program-and-user
+	// prefix and check overall length structurally.
+	if len(jobId) != 26 {
+		t.Errorf("ServerJobIdentifier length = %d, want 26 (got %q)", len(jobId), jobId)
+	}
+	const wantPrefix = "QZDASOINITQUSER     "
+	if !strings.HasPrefix(jobId, wantPrefix) {
+		t.Errorf("ServerJobIdentifier prefix = %q, want %q (full: %q)", jobId[:min(len(jobId), len(wantPrefix))], wantPrefix, jobId)
 	}
 	defaultSchema, _ := ebcdic.CCSID37.Decode(attrs.DefaultSQLSchemaName)
 	if defaultSchema != "AFTRAEGE11" {

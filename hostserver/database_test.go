@@ -9,22 +9,61 @@ import (
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
 )
 
-// asDatabaseFixtureConnID is the connID of the as-database
-// connection in connect_only.trace. JTOpen opens one TCP socket per
-// host-server service; the database service got its own connID
-// distinct from the as-signon connection. Hardcoding it lets the
-// test isolate the database half from the signon half without
-// reaching for fragile heuristics.
-const asDatabaseFixtureConnID = 2100750561
+// findAsDatabaseConnID picks the trace connID that carries the
+// as-database (port 8471) traffic, by inspecting each unique
+// connection's first Received DSS frame and matching ServerID ==
+// ServerDatabase (0xE004). JTOpen opens one TCP socket per
+// host-server service, so the database half always lives on its
+// own connID distinct from the as-signon connection.
+//
+// We derive this dynamically rather than hardcoding a constant,
+// because every fixture re-capture generates fresh random connIDs.
+// Returns 0 if no as-database connection is found in the fixture.
+func findAsDatabaseConnID(frames []wirelog.Frame) uint32 {
+	// Track first-received-frame per connID, in connID-discovery order.
+	type firstFrame struct {
+		connID uint32
+		bytes  []byte
+	}
+	var firstByConn []firstFrame
+	seen := map[uint32]bool{}
+	for _, f := range frames {
+		if f.Direction != wirelog.Received {
+			continue
+		}
+		if seen[f.ConnID] {
+			continue
+		}
+		seen[f.ConnID] = true
+		firstByConn = append(firstByConn, firstFrame{connID: f.ConnID, bytes: f.Bytes})
+	}
+	for _, ff := range firstByConn {
+		if len(ff.bytes) < HeaderLength {
+			continue
+		}
+		var hdr Header
+		if err := hdr.UnmarshalBinary(ff.bytes[:HeaderLength]); err != nil {
+			continue
+		}
+		if hdr.ServerID == ServerDatabase {
+			return ff.connID
+		}
+	}
+	return 0
+}
 
 // dbReceivedsFromFixture pulls only the as-database receive frames
 // from a fixture in their on-wire order.
 func dbReceivedsFromFixture(t *testing.T, name string) []wirelog.Frame {
 	t.Helper()
 	frames := wirelog.Consolidate(loadFixture(t, name))
+	dbConnID := findAsDatabaseConnID(frames)
+	if dbConnID == 0 {
+		t.Fatalf("no as-database (ServerID=0xE004) connection found in %s", name)
+	}
 	var out []wirelog.Frame
 	for _, f := range frames {
-		if f.Direction == wirelog.Received && f.ConnID == asDatabaseFixtureConnID {
+		if f.Direction == wirelog.Received && f.ConnID == dbConnID {
 			out = append(out, f)
 		}
 	}
@@ -38,9 +77,13 @@ func dbReceivedsFromFixture(t *testing.T, name string) []wirelog.Frame {
 func dbSentsFromFixture(t *testing.T, name string) []wirelog.Frame {
 	t.Helper()
 	frames := wirelog.Consolidate(loadFixture(t, name))
+	dbConnID := findAsDatabaseConnID(frames)
+	if dbConnID == 0 {
+		t.Fatalf("no as-database (ServerID=0xE004) connection found in %s", name)
+	}
 	var out []wirelog.Frame
 	for _, f := range frames {
-		if f.Direction == wirelog.Sent && f.ConnID == asDatabaseFixtureConnID {
+		if f.Direction == wirelog.Sent && f.ConnID == dbConnID {
 			out = append(out, f)
 		}
 	}
@@ -107,11 +150,11 @@ func TestParseXChgRandSeedReplyAgainstFixture(t *testing.T) {
 	if len(rep.ServerSeed) != 8 {
 		t.Errorf("ServerSeed length = %d, want 8", len(rep.ServerSeed))
 	}
-	// PUB400's actual seed at capture time -- proves the slice copy
-	// preserves the byte order.
-	wantSeed, _ := hex.DecodeString("5b4f9d3ec2cdbfd0")
-	if !bytes.Equal(rep.ServerSeed, wantSeed) {
-		t.Errorf("ServerSeed = %x, want %x", rep.ServerSeed, wantSeed)
+	// ServerSeed is per-session random; structural assertion only
+	// (length + non-zero), no value pin -- otherwise every re-capture
+	// breaks this test.
+	if bytes.Equal(rep.ServerSeed, make([]byte, 8)) {
+		t.Errorf("ServerSeed is all zeros (unlikely valid)")
 	}
 	if rep.AAFIndicator {
 		t.Errorf("AAFIndicator = true, want false (no MFA on PUB400)")
@@ -200,12 +243,20 @@ func TestParseStartServerReplyAgainstFixture(t *testing.T) {
 	if rep.ReturnCode != 0 {
 		t.Errorf("ReturnCode = %d, want 0", rep.ReturnCode)
 	}
-	// Job name was "344425/QUSER/QZDASOINIT" at capture time, EBCDIC
-	// CCSID 37 (and the reply doesn't actually include a CCSID
-	// prefix here -- the 4 bytes are zero -- so JobNameCCSID is 0).
-	wantJobName, _ := hex.DecodeString("f3f4f4f4f2f561d8e4e2c5d961d8e9c4c1e2d6c9d5c9e3")
-	if !bytes.Equal(rep.JobName, wantJobName) {
-		t.Errorf("JobName = %x, want %x", rep.JobName, wantJobName)
+	// Job name is "<jobnumber>/QUSER/QZDASOINIT" at capture time;
+	// the job number rotates per-capture so we assert structurally
+	// (non-empty, contains the EBCDIC bytes for "QUSER" and
+	// "QZDASOINIT") rather than pinning the prefix.
+	if len(rep.JobName) == 0 {
+		t.Errorf("JobName is empty, want non-empty")
+	}
+	wantQUSER, _ := hex.DecodeString("d8e4e2c5d9") // EBCDIC "QUSER"
+	if !bytes.Contains(rep.JobName, wantQUSER) {
+		t.Errorf("JobName %x does not contain EBCDIC 'QUSER' (%x)", rep.JobName, wantQUSER)
+	}
+	wantQZDA, _ := hex.DecodeString("d8e9c4c1e2d6c9d5c9e3") // EBCDIC "QZDASOINIT"
+	if !bytes.Contains(rep.JobName, wantQZDA) {
+		t.Errorf("JobName %x does not contain EBCDIC 'QZDASOINIT' (%x)", rep.JobName, wantQZDA)
 	}
 }
 
@@ -236,9 +287,10 @@ func TestStartDatabaseServiceAgainstConnectOnlyFixture(t *testing.T) {
 	if ss.ReturnCode != 0 {
 		t.Errorf("StartServerReply.ReturnCode = %d, want 0", ss.ReturnCode)
 	}
-	wantJobName, _ := hex.DecodeString("f3f4f4f4f2f561d8e4e2c5d961d8e9c4c1e2d6c9d5c9e3")
-	if !bytes.Equal(ss.JobName, wantJobName) {
-		t.Errorf("StartServerReply.JobName = %x, want %x", ss.JobName, wantJobName)
+	// JobName: per-capture variable; structural-only assertion as
+	// in TestParseStartServerReplyAgainstFixture.
+	if len(ss.JobName) == 0 {
+		t.Errorf("StartServerReply.JobName is empty")
 	}
 
 	// Re-parse the requests StartDatabaseService produced.
