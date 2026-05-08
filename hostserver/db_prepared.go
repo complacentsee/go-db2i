@@ -549,11 +549,16 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
 	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
+		// Same rationale as openStaticUntilFirstBatch: CLOSE before
+		// RPB DELETE so the next PREPARE on this conn doesn't trip
+		// SQL-519 against an orphaned-but-open cursor.
+		_ = closeCursor(conn, nextCorr())
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
+		_ = closeCursor(conn, nextCorr())
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fmt.Errorf("hostserver: parse row data: %w", err)
 	}

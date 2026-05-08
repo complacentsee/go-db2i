@@ -55,6 +55,15 @@ const ccsidBinary uint16 = 65535
 func (r *DBReply) findExtendedResultData(cols []SelectColumn) ([]SelectRow, error) {
 	for _, p := range r.Params {
 		if p.CodePoint == 0x380E {
+			// Empty CP 0x380E means "no rows" -- the server still
+			// emitted the CP wrapper but with zero-byte data. JT400's
+			// parser short-circuits the same way (DBBaseReplyDS.java
+			// guards on `parmLength != 6` -- 6 = LL+CP overhead).
+			// Without this guard, SELECTs that return zero rows trip
+			// the "extended-result-data too short" error.
+			if len(p.Data) == 0 {
+				return nil, nil
+			}
 			return parseExtendedResultData(p.Data, cols, r.VLFCompressed())
 		}
 	}

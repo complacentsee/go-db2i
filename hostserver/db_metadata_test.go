@@ -99,7 +99,8 @@ func decodeFixtureColumns(t *testing.T, fixture string) []SelectColumn {
 		sqlReceiveds[3],
 		sqlReceiveds[4],
 		syntheticFetchEndReply(6),
-		syntheticRPBDeleteReply(7),
+		syntheticCloseReply(7),
+		syntheticRPBDeleteReply(8),
 	)
 	res, err := SelectStaticSQL(conn, "VALUES 1", 3)
 	if err != nil {
