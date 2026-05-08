@@ -69,6 +69,14 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 		return nil, fmt.Errorf("hostserver: parse EXECUTE_IMMEDIATE reply: %w", err)
 	}
 	rc := int32(rep.ReturnCode)
+	// SQL +100 = "no rows found" (DELETE / UPDATE with no match) is
+	// not an error -- it's the expected outcome and the affected-
+	// row count is correctly 0. The IBM i server still flags it
+	// with errorClass=1, so we have to special-case the +100 path.
+	// Any other errorClass>0 OR a non-warning return code is real.
+	if rc == 100 {
+		return &ExecResult{}, nil
+	}
 	if rep.ErrorClass != 0 || (rc != 0 && !isSQLWarning(rep.ReturnCode)) {
 		return nil, fmt.Errorf("hostserver: EXECUTE_IMMEDIATE RC=%d errorClass=0x%04X",
 			rc, rep.ErrorClass)
