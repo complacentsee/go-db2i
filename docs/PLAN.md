@@ -319,29 +319,35 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
 **Deferred from M5:**
 
 - **Live COMMIT / ROLLBACK semantics on a journaled table** —
-  **deferred (environmental, not driver gap).** Frame shapes are
-  verified via `TestCommitFrameShape` /
-  `TestRollbackFrameShape`, and the live INSERT path is proven
-  against `DCLVRP02` (123,410 rows; writes succeed under
-  autocommit-on via `ExecuteImmediate`). But:
-  - COMMIT (0x1807) and ROLLBACK (0x1808) both return SQL -211
-    errorClass=2 on PUB400, **even with a real INSERT pending**.
-  - `AutocommitOff` succeeds at the protocol layer, but a
-    subsequent INSERT + ROLLBACK leaves the row in the table
-    (verified on a fresh connection). The "rollback" is a no-op
-    because the file isn't under commitment control.
-  - JTOpen hits the same wall: the captured `tx_commit.trace` /
-    `tx_rollback.trace` fixtures are SQL7008 error-path captures
-    because the Java reference client also can't get a clean
-    happy-path commit on PUB400.
-  Same root cause for both clients: **DCLVRP02 (and PUB400 user
-  tables generally) are not journaled.** This is not a goJTOpen
-  bug; it's a PUB400 environmental constraint. Real semantic
-  validation needs a journaled table on a different IBM i (a
-  production target with established journaling), and acceptance
-  defers to that deployment. M6 wraps these primitives in
-  `database/sql.Tx` regardless; the wire-frame correctness is
-  already test-pinned.
+  ✅ validated 2026-05-08 against `AFTRAEGE11.DCLVRP02` after
+  enabling commitment control on the schema:
+  ```
+  CRTJRNRCV JRNRCV(AFTRAEGE11/JRNRCV0001)
+  CRTJRN    JRN(AFTRAEGE11/QSQJRN) JRNRCV(AFTRAEGE11/JRNRCV0001)
+  STRJRNPF  FILE(AFTRAEGE11/DCLVRP02) JRN(AFTRAEGE11/QSQJRN)
+  ```
+  Round trip: `AutocommitOff → INSERT 9999991 → COMMIT` persists
+  the row; `AutocommitOff → INSERT 9999993 → ROLLBACK` cleanly
+  removes it; verify on the same connection finds exactly the
+  one committed row. The `tx_commit.trace` fixture has been
+  re-captured as a happy-path JT400 trace (replacing the prior
+  SQL7008 error capture).
+  Two driver bugs were flushed out by the JT400 wire diff during
+  this validation:
+  1. `Commit` / `Rollback` were sending CP 0x380F (HoldIndicator)
+     as 0xE8 ('Y' EBCDIC) instead of numeric 0x01 — the server
+     validates the byte and silently rejects everything outside
+     {0,1} with SQL -211 errorClass=0x0002.
+  2. `AutocommitOff` / `AutocommitOn` were sending only CP
+     0x3824. JT400 bundles three CPs in one SET_SQL_ATTRIBUTES
+     (0x3824 autocommit, 0x380E commitment level, 0x3830 locator
+     persistence); without the bundle the server stays in *NONE
+     and COMMIT/ROLLBACK have no commitment definition to act
+     on. The autocommit-on transition gets errClass=7 RC=-601 on
+     some IBM i releases (server rejects locator-persistence
+     change); JT400 catches that and resends without CP 0x3830,
+     and `setSessionMode` now mirrors that fallback.
+  Both fixes commit-pinned and unit-tested.
 - **Re-capture fixtures with M5 RPB DELETE in scope** — every
   fakeConn-driven test currently appends a `syntheticFetchEndReply`
   + `syntheticRPBDeleteReply` because the captured `.trace`
@@ -423,14 +429,14 @@ The closed-milestone "Deferred" subsections above are the
 authoritative list. Items below are cross-cutting concerns that
 don't slot into a single milestone.
 
-- **`tx_commit` / `tx_rollback` fixtures** — currently SQL7008
-  error-path captures because PUB400 doesn't journal user tables
-  by default. The SQL7008 wire path is still useful (for M5 error
-  handling). Re-capture against a journaled table — either after
-  `STRJRNPF` on PUB400 or against a production IBM i with
-  established journaling — to get the happy commit/rollback wire
-  trace. (Same blocker as M5's "live COMMIT/ROLLBACK" deferred
-  item; see that entry for the live evidence.)
+- **`tx_commit` fixture re-captured as happy-path** — after
+  enabling QSQJRN on AFTRAEGE11, JT400's tx_commit case now
+  produces a successful commit + result-set golden. `tx_rollback`
+  is still a SQL-error capture; re-capture is straightforward
+  with the same harness invocation but hasn't been done yet.
+  (Both rollback and commit semantics are validated live via the
+  goJTOpen driver itself, so the rollback fixture is documentary
+  rather than gating.)
 - **CCSID 65535 binary handling** — make sure every type-decoding
   path checks the column CCSID before attempting EBCDIC decode.
   No captured fixture exercises this today, so it's untested.
