@@ -247,9 +247,11 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 	case SQLTypeChar, 453, SQLTypeCharNonBlank, 461:
 		// 452 = CHAR NN, 453 = CHAR nullable, 460/461 = CHAR with
 		// terminator-or-binary variants. All four share wire layout.
-		// Fixed-length CHAR. Normally EBCDIC; CCSID 65535 means
-		// "no conversion / binary" (the IBM i FOR BIT DATA path)
-		// and the column's bytes are returned as []byte verbatim.
+		// Fixed-length CHAR. Decode based on column CCSID:
+		//   65535       FOR BIT DATA: bytes returned as []byte
+		//   1208        UTF-8 passthrough: bytes returned as string
+		//               (no transcode -- server already encoded as UTF-8)
+		//   else        EBCDIC SBCS table (CCSID 37 for now)
 		if len(b) < int(col.Length) {
 			return nil, 0, fmt.Errorf("char wants %d bytes, have %d", col.Length, len(b))
 		}
@@ -258,6 +260,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			copy(out, b[:col.Length])
 			return out, int(col.Length), nil
 		}
+		if col.CCSID == 1208 {
+			return string(b[:col.Length]), int(col.Length), nil
+		}
 		s, err := ebcdic.CCSID37.Decode(b[:col.Length])
 		if err != nil {
 			return nil, 0, fmt.Errorf("decode char ebcdic: %w", err)
@@ -265,13 +270,15 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		return s, int(col.Length), nil
 
 	case SQLTypeVarChar, 449, SQLTypeVarCharNonBlank, 457:
-		// 2-byte BE length prefix followed by N bytes EBCDIC.
+		// 2-byte BE length prefix followed by N payload bytes.
 		// The slot occupies col.Length+2 bytes on the wire (in
 		// non-VLF layouts), but in VLF-compressed result data
 		// the row only contains 2+actual-length bytes for this
-		// column (no padding to col.Length). CCSID 65535 routes
-		// the payload bytes to []byte without EBCDIC decode --
-		// see the CHAR case above for the FOR BIT DATA rationale.
+		// column (no padding to col.Length). Decoder picks the
+		// payload codec by CCSID:
+		//   65535  FOR BIT DATA, []byte verbatim
+		//   1208   UTF-8 string, no transcode
+		//   else   EBCDIC SBCS via CCSID 37 table
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("varchar header wants 2 bytes, have %d", len(b))
 		}
@@ -286,6 +293,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			out := make([]byte, n)
 			copy(out, b[2:2+n])
 			return out, 2 + n, nil
+		}
+		if col.CCSID == 1208 {
+			return string(b[2 : 2+n]), 2 + n, nil
 		}
 		s, err := ebcdic.CCSID37.Decode(b[2 : 2+n])
 		if err != nil {
