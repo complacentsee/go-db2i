@@ -1,0 +1,23 @@
+goJTOpen
+Copyright 2026 The goJTOpen Authors
+
+This product includes software developed by The goJTOpen Authors
+(https://github.com/complacentsee/goJTOpen) and is licensed under the
+Apache License, Version 2.0.
+
+------------------------------------------------------------------------
+
+Protocol reference
+
+The goJTOpen wire-format implementation was written using the
+open-source IBM Toolbox for Java (JTOpen) as a reference for the IBM i
+host-server datastream protocol. JTOpen is © International Business
+Machines Corporation and others, and is licensed under the IBM Public
+License v1.0 (https://opensource.org/license/ibm-pl-1-0).
+
+goJTOpen is a clean-room reimplementation in Go. No JTOpen source
+code is included in this repository or copied at build time. The
+Java fixture-capture harness under testdata/jtopen-fixtures/ depends
+on JTOpen at runtime via Maven Central to record wire traces; the
+captured fixtures themselves are byte data, not derivative works of
+JTOpen source.
