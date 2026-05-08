@@ -85,14 +85,20 @@ func (c *Cursor) Next() (SelectRow, error) {
 	return more[0], nil
 }
 
-// Close releases server-side resources. When the cursor still has
-// rows pending (early-close from the caller), sends an explicit
-// CLOSE (0x180A) first to tell the server the cursor is no longer
-// in use; otherwise the next PREPARE_DESCRIBE on the same statement
-// name returns SQL-519 / SQLSTATE 24506 ("prepared statement
-// identifying open cursor cannot be re-prepared"). After the cursor
-// is closed (either explicitly or implicitly via end-of-data), drop
-// the RPB slot.
+// Close releases server-side resources. Always sends CLOSE (0x180A)
+// with REUSE_NO before RPB DELETE: CLOSE drops both the cursor (if
+// still open) AND the prepared statement (regardless of cursor
+// state), where RPB DELETE alone leaves the statement around.
+// Without the CLOSE, the next PREPARE_DESCRIBE on the same RPB slot
+// returns SQL-519 / SQLSTATE 24506 ("prepared statement identifying
+// open cursor cannot be re-prepared") -- even if the cursor itself
+// drained naturally, because the server still considers STMT0001
+// "in use".
+//
+// closeCursor swallows the SQL-501 / 24501 "cursor not open"
+// warning that some server versions emit when the cursor was
+// already auto-closed by an end-of-data FETCH; safe to call
+// regardless of cursor state.
 //
 // Idempotent; safe to call from a defer.
 func (c *Cursor) Close() error {
@@ -100,20 +106,19 @@ func (c *Cursor) Close() error {
 		return nil
 	}
 	c.rpbActive = false
-	// If the cursor wasn't fully drained, the server still has it
-	// open. Issue a CLOSE so the next prepared statement on the
-	// same RPB slot can re-prepare freely.
-	if !c.exhausted {
-		if err := closeCursor(c.conn, c.nextCorr()); err != nil {
-			// Best-effort: log via the returned error but still
-			// try the RPB DELETE -- a stuck cursor is bad enough
-			// without leaving the slot occupied too.
-			_ = deleteRPB(c.conn, c.nextCorr())
-			return fmt.Errorf("hostserver: cursor early-close: %w", err)
-		}
-	}
+	// CLOSE first -- drops the prepared statement and the cursor in
+	// one frame. Errors here still let us try RPB DELETE; the slot
+	// might recover on its own and a stuck statement is preferable
+	// to a stuck statement AND a stuck slot.
+	closeErr := closeCursor(c.conn, c.nextCorr())
 	if err := deleteRPB(c.conn, c.nextCorr()); err != nil {
+		if closeErr != nil {
+			return fmt.Errorf("hostserver: cursor close: CLOSE %v; RPB DELETE %w", closeErr, err)
+		}
 		return fmt.Errorf("hostserver: cursor close (RPB DELETE): %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("hostserver: cursor close (CLOSE): %w", closeErr)
 	}
 	return nil
 }

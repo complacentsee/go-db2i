@@ -92,7 +92,8 @@ func runStaticTypeReplay(t *testing.T, tc typeCase) {
 		sqlReceiveds[3],
 		sqlReceiveds[4],
 		syntheticFetchEndReply(6),
-		syntheticRPBDeleteReply(7),
+		syntheticCloseReply(7),
+		syntheticRPBDeleteReply(8),
 	)
 	res, err := SelectStaticSQL(conn, tc.sql, 3)
 	if err != nil {
@@ -230,6 +231,36 @@ func syntheticFetchEndReply(corr uint32) []byte {
 	var buf bytes.Buffer
 	if err := WriteFrame(&buf, hdr, payload); err != nil {
 		panic(fmt.Sprintf("synthesise FETCH end-of-data reply: %v", err))
+	}
+	return buf.Bytes()
+}
+
+// syntheticCloseReply builds a 40-byte 0x2800 (DBReply) frame that
+// mimics a successful CLOSE (0x180A) response: ORS bitmap echo,
+// ReqRepID echoes, and zeroed ErrorClass + ReturnCode. Cursor.Close
+// always sends CLOSE before RPB DELETE -- the captured-fixture-
+// driven tests need a synthetic reply to drive that frame, since
+// the original .trace files pre-date the cursor refactor.
+func syntheticCloseReply(corr uint32) []byte {
+	hdr := Header{
+		Length:         40,
+		ServerID:       ServerDatabase,
+		CorrelationID:  corr,
+		TemplateLength: 20,
+		ReqRepID:       RepDBReply,
+	}
+	payload := make([]byte, 20)
+	// ORS bitmap echo matching what we send (0x86040000 for CLOSE).
+	payload[0] = 0x86
+	payload[1] = 0x04
+	payload[10] = 0x18 // function ID echo: 0x180A
+	payload[11] = 0x0A
+	payload[12] = 0x18
+	payload[13] = 0x0A
+
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, hdr, payload); err != nil {
+		panic(fmt.Sprintf("synthesise CLOSE reply: %v", err))
 	}
 	return buf.Bytes()
 }

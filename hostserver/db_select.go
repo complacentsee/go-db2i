@@ -495,10 +495,18 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	// has RC=0x000002BC = 700 because the cursor was opened
 	// successfully but no scroll was specified.
 	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
+		// CLOSE first because OPEN may have succeeded server-side
+		// before something post-OPEN tripped the error path; a bare
+		// RPB DELETE on a still-open cursor leaves SQL-519 / 24506
+		// for the next PREPARE_DESCRIBE on this connection.
+		_ = closeCursor(conn, nextCorr())
+		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
+		_ = closeCursor(conn, nextCorr())
+		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
 	return cols, rows, nil

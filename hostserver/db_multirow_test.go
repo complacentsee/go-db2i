@@ -53,7 +53,8 @@ func TestMultiRowFetchAgainstFixture(t *testing.T) {
 		sqlReceiveds[3],
 		sqlReceiveds[4],
 		syntheticFetchEndReply(6),
-		syntheticRPBDeleteReply(7),
+		syntheticCloseReply(7),
+		syntheticRPBDeleteReply(8),
 	)
 	res, err := SelectStaticSQL(conn,
 		"SELECT ID, NAME, AMOUNT FROM AFTRAEGE1.GOJTOPEN_T1 ORDER BY ID",
