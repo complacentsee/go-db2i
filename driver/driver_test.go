@@ -144,3 +144,103 @@ func TestParseDSNErrorWrapped(t *testing.T) {
 		t.Errorf("error %q does not include offending value 'fooBAR'", err)
 	}
 }
+
+// TestParseDSNTLSDefaultPorts confirms that tls=true switches the
+// default ports to the SSL host-server pair (9476 / 9471) -- and
+// that an explicit URL port / signon-port still wins.
+func TestParseDSNTLSDefaultPorts(t *testing.T) {
+	t.Run("plain DSN keeps 8471/8476", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/?library=MYLIB")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.TLS {
+			t.Error("TLS = true, want false")
+		}
+		if cfg.DBPort != 8471 || cfg.SignonPort != 8476 {
+			t.Errorf("ports = %d/%d, want 8471/8476", cfg.DBPort, cfg.SignonPort)
+		}
+	})
+	t.Run("tls=true flips to 9471/9476", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/?tls=true")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if !cfg.TLS {
+			t.Error("TLS = false, want true")
+		}
+		if cfg.DBPort != 9471 {
+			t.Errorf("DBPort = %d, want 9471", cfg.DBPort)
+		}
+		if cfg.SignonPort != 9476 {
+			t.Errorf("SignonPort = %d, want 9476", cfg.SignonPort)
+		}
+	})
+	t.Run("tls=true + explicit port wins", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h:13471/?tls=on&signon-port=13476")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.DBPort != 13471 {
+			t.Errorf("DBPort = %d, want 13471", cfg.DBPort)
+		}
+		if cfg.SignonPort != 13476 {
+			t.Errorf("SignonPort = %d, want 13476", cfg.SignonPort)
+		}
+	})
+}
+
+// TestParseDSNTLSKnobs covers tls-insecure-skip-verify and
+// tls-server-name parsing.
+func TestParseDSNTLSKnobs(t *testing.T) {
+	cfg, err := parseDSN("gojtopen://u:p@h/?tls=true&tls-insecure-skip-verify=true&tls-server-name=ibmi.internal")
+	if err != nil {
+		t.Fatalf("parseDSN: %v", err)
+	}
+	if !cfg.TLS {
+		t.Error("TLS = false, want true")
+	}
+	if !cfg.TLSInsecureSkipVerify {
+		t.Error("TLSInsecureSkipVerify = false, want true")
+	}
+	if cfg.TLSServerName != "ibmi.internal" {
+		t.Errorf("TLSServerName = %q, want ibmi.internal", cfg.TLSServerName)
+	}
+}
+
+// TestParseDSNTLSBoolAliases confirms parseBool accepts the
+// URL-friendly aliases (yes/no/on/off) alongside Go's strconv
+// shapes (true/false/1/0/T/F).
+func TestParseDSNTLSBoolAliases(t *testing.T) {
+	cases := map[string]bool{
+		"true":  true,
+		"false": false,
+		"1":     true,
+		"0":     false,
+		"T":     true,
+		"F":     false,
+		"yes":   true,
+		"no":    false,
+		"on":    true,
+		"off":   false,
+	}
+	for v, want := range cases {
+		t.Run(v, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?tls=" + v)
+			if err != nil {
+				t.Fatalf("parseDSN tls=%s: %v", v, err)
+			}
+			if cfg.TLS != want {
+				t.Errorf("tls=%s -> %v, want %v", v, cfg.TLS, want)
+			}
+		})
+	}
+}
+
+// TestParseDSNTLSRejectsBogus confirms invalid tls values surface
+// a clear error rather than silently defaulting to false.
+func TestParseDSNTLSRejectsBogus(t *testing.T) {
+	if _, err := parseDSN("gojtopen://u:p@h/?tls=notabool"); err == nil {
+		t.Fatal("expected error for tls=notabool, got nil")
+	}
+}

@@ -59,12 +59,15 @@ Requires **Go 1.23+** (the driver uses `context.AfterFunc` from
 gojtopen://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 ```
 
-| Key            | Default | Meaning |
-|----------------|---------|---------|
-| `library`      | (none)  | Default schema for unqualified SQL names. Required if the user's job library list doesn't already contain it. |
-| `signon-port`  | 8476    | as-signon service port |
-| `date`         | `job`   | Session date format. One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. |
-| `isolation`    | `none`  | Session commitment level. One of `none` (`*NONE`), `cs` (`*CS`), `all` (`*ALL`), `rs` (`*RS`), `rr` (`*RR`). The default `*NONE` matches IBM i Db2's autocommit-permissive baseline. `db.Begin()` flips to `*CS` for the duration of the transaction. |
+| Key                          | Default | Meaning |
+|------------------------------|---------|---------|
+| `library`                    | (none)  | Default schema for unqualified SQL names. Required if the user's job library list doesn't already contain it. |
+| `signon-port`                | 8476 (9476 if `tls=true`) | as-signon service port. |
+| `date`                       | `job`   | Session date format. One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. |
+| `isolation`                  | `none`  | Session commitment level. One of `none` (`*NONE`), `cs` (`*CS`), `all` (`*ALL`), `rs` (`*RS`), `rr` (`*RR`). The default `*NONE` matches IBM i Db2's autocommit-permissive baseline. `db.Begin()` flips to `*CS` for the duration of the transaction. |
+| `tls`                        | `false` | Wrap both sockets in TLS. When `true`, the default ports flip to 9476 / 9471 (IBM i SSL host server pair). Accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`. Requires the IBM i target to have SSL host server configured via DCM. |
+| `tls-insecure-skip-verify`   | `false` | Skip server-cert validation. IBM i certs are commonly self-signed and lack DNS SANs, in which case `crypto/tls` rejects them by default; set this to `true` to override. Use sparingly — disables MITM protection. |
+| `tls-server-name`            | (host)  | Override the SNI / cert-verify hostname. Defaults to the URL host. Useful when the cert was issued for a different name than what you connect to (e.g. via tunnel). |
 
 The `DB_PORT` segment defaults to 8471 (as-database). Library names
 are upper-cased on parse — IBM i schema lookups are case-insensitive

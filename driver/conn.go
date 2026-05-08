@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql/driver"
 	"fmt"
 	"net"
@@ -24,7 +25,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	deadline, _ := contextDeadline(ctx, 30*time.Second)
 
 	// Sign-on phase: open as-signon, perform encrypted handshake.
-	signon, err := dialWithDeadline("tcp", fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.SignonPort), deadline)
+	signon, err := dialHostServer(c.cfg, c.cfg.SignonPort, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("gojtopen: dial as-signon: %w", err)
 	}
@@ -42,7 +43,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 	// Database service phase: separate TCP socket, lives for the
 	// life of the Conn.
-	db, err := dialWithDeadline("tcp", fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.DBPort), deadline)
+	db, err := dialHostServer(c.cfg, c.cfg.DBPort, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("gojtopen: dial as-database: %w", err)
 	}
@@ -190,4 +191,48 @@ func dialWithDeadline(network, addr string, deadline time.Time) (net.Conn, error
 		timeout = 30 * time.Second
 	}
 	return net.DialTimeout(network, addr, timeout)
+}
+
+// dialHostServer dials addr <host>:<port> using TCP if cfg.TLS is
+// false, or wraps with crypto/tls.Dial when true. The returned
+// net.Conn is type-erased so the host-server framer doesn't need to
+// know whether it's reading from a plaintext socket or a TLS record
+// stream. Honours the deadline as a hard timeout for the whole
+// dial+handshake (TLS handshake can be slow on first connect).
+//
+// IBM i SSL host-server certs are commonly self-signed and lack DNS
+// SANs that match the address being connected to (notably when
+// connecting via SSH-tunneled localhost), so cfg.TLSInsecureSkipVerify
+// is honoured. Use sparingly -- it disables MITM protection on the
+// path between the Go client and the IBM i.
+func dialHostServer(cfg *Config, port int, deadline time.Time) (net.Conn, error) {
+	addr := fmt.Sprintf("%s:%d", cfg.Host, port)
+	if !cfg.TLS {
+		return dialWithDeadline("tcp", addr, deadline)
+	}
+
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	tlsCfg := &tls.Config{
+		ServerName:         tlsServerName(cfg),
+		InsecureSkipVerify: cfg.TLSInsecureSkipVerify,
+		// IBM i SSL host server (5722-SS1 OS extension) supports
+		// TLS 1.2 from V7R3 onwards and TLS 1.3 from V7R4 cumulative
+		// PTFs. Floor at 1.2 -- older releases want a special
+		// configuration override anyway.
+		MinVersion: tls.VersionTLS12,
+	}
+	return tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", addr, tlsCfg)
+}
+
+// tlsServerName picks the SNI / cert-verify hostname. Defaults to
+// cfg.Host so a public IBM i with a properly-issued cert "just
+// works"; cfg.TLSServerName overrides for the SAN-mismatch case.
+func tlsServerName(cfg *Config) string {
+	if cfg.TLSServerName != "" {
+		return cfg.TLSServerName
+	}
+	return cfg.Host
 }
