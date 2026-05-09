@@ -35,18 +35,69 @@ const (
 	SQLCodeCursorNotOpen int32 = -501
 )
 
+// fetchOutcome captures the cursor-state signals embedded in the
+// (ErrorClass, ReturnCode) tuple of any OPEN_DESCRIBE_FETCH /
+// continuation FETCH reply. JT400's JDServerRowCache.fetch (Java
+// source ~line 343) authoritatively interprets the tuple; the
+// values mirror it byte-for-byte:
+//
+//	ErrorClass=1, ReturnCode=100  -> end-of-data (SQL +100)
+//	ErrorClass=2, ReturnCode=700  -> "fetch/close": all rows
+//	                                 delivered AND server already
+//	                                 closed the cursor on its own
+//	                                 (JT400's @pda perf2 path)
+//	ErrorClass=2, ReturnCode=701  -> end-of-data variant
+//	SQLCode -501                  -> cursor not open: server closed
+//	                                 the cursor between OPEN and our
+//	                                 next FETCH (we treat it like
+//	                                 700: exhausted + auto-closed)
+//
+// Anything else means "more rows possible; issue continuation
+// FETCH" (and any error/warning surfaces through makeDb2Error
+// upstream).
+type fetchOutcome struct {
+	exhausted    bool // no more rows; don't issue continuation FETCH
+	serverClosed bool // server auto-closed the cursor; skip explicit CLOSE
+}
+
+// interpretFetchReply applies JT400's (ErrorClass, ReturnCode)
+// dispatch table to a parsed fetch-bearing reply (initial OPEN or
+// continuation FETCH). Caller is responsible for separately
+// surfacing real errors via makeDb2Error -- this function only
+// reports "is the cursor done?" and "did the server already close
+// it?".
+func interpretFetchReply(rep *DBReply) fetchOutcome {
+	rc := int32(rep.ReturnCode)
+	ec := rep.ErrorClass
+	switch {
+	case ec == 1 && rc == SQLCodeEndOfData:
+		return fetchOutcome{exhausted: true}
+	case ec == 2 && rc == 700:
+		// "fetch/close" -- the canonical JT400 single-batch path.
+		return fetchOutcome{exhausted: true, serverClosed: true}
+	case ec == 2 && rc == 701:
+		return fetchOutcome{exhausted: true}
+	case rc == SQLCodeCursorNotOpen:
+		// Continuation FETCH after server-side auto-close.
+		return fetchOutcome{exhausted: true, serverClosed: true}
+	}
+	return fetchOutcome{}
+}
+
 // fetchMoreRows issues a continuation FETCH (0x180B) on the cursor
 // our SelectStaticSQL/SelectPreparedSQL just opened, parses the
-// reply, and returns the next batch. On end-of-data the returned
-// rows slice is empty and done == true. Caller is expected to keep
-// calling until done is true.
+// reply, and returns the next batch. The returned fetchOutcome
+// reports whether the cursor is exhausted and whether the server
+// auto-closed it -- callers use these to decide whether to issue
+// a follow-up FETCH and whether to send an explicit CLOSE. Caller
+// is expected to keep calling until outcome.exhausted is true.
 //
 // nextCorrelation is the correlation ID to stamp on the request;
 // caller advances its own counter.
 //
 // The blocking factor and buffer size mirror what we requested in
 // the original OPEN: 32 KB buffer, server-chosen blocking factor.
-func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32) (rows []SelectRow, done bool, err error) {
+func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32) (rows []SelectRow, outcome fetchOutcome, err error) {
 	tpl := DBRequestTemplate{
 		// 0x86040000: ReturnData + ResultData + SQLCA + RLE.
 		// (Bit 17 = 0x00008000 from OPEN is "cursor attributes"
@@ -65,44 +116,41 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
 	if err != nil {
-		return nil, false, fmt.Errorf("hostserver: build FETCH: %w", err)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: build FETCH: %w", err)
 	}
 	hdr.CorrelationID = nextCorrelation
 	if err := WriteFrame(conn, hdr, payload); err != nil {
-		return nil, false, fmt.Errorf("hostserver: send FETCH: %w", err)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: send FETCH: %w", err)
 	}
 	repHdr, repPayload, err := ReadDBReplyMatching(conn, nextCorrelation, 4)
 	if err != nil {
-		return nil, false, fmt.Errorf("hostserver: read FETCH reply: %w", err)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: read FETCH reply: %w", err)
 	}
 	if repHdr.ReqRepID != RepDBReply {
-		return nil, false, fmt.Errorf("hostserver: FETCH reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: FETCH reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(repPayload)
 	if err != nil {
-		return nil, false, fmt.Errorf("hostserver: parse FETCH reply: %w", err)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: parse FETCH reply: %w", err)
 	}
-	// SQLCODE +100 = end of data; -501 = cursor not in OPEN state
-	// (PUB400 reports this when the initial OPEN already drained
-	// the cursor). Both signal "stop iterating" without an error.
-	rc := int32(rep.ReturnCode)
-	if rc == SQLCodeEndOfData || rc == SQLCodeCursorNotOpen {
-		return nil, true, nil
+	outcome = interpretFetchReply(rep)
+	if outcome.exhausted {
+		return nil, outcome, nil
 	}
 	if dbErr := makeDb2Error(rep, "FETCH"); dbErr != nil {
-		return nil, false, dbErr
+		return nil, fetchOutcome{}, dbErr
 	}
 	rows, err = rep.findExtendedResultData(cols)
 	if err != nil {
-		return nil, false, fmt.Errorf("hostserver: parse FETCH row data: %w", err)
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: parse FETCH row data: %w", err)
 	}
-	// Empty batch with non-+100 RC also signals "end of data" --
-	// some PUB400 paths don't set +100 explicitly but stop sending
-	// rows. Treat zero rows as done.
+	// Empty batch with no end-of-data signal also means "done" --
+	// some PUB400 paths don't set the JT400 codes explicitly but
+	// stop sending rows. Treat zero rows as done.
 	if len(rows) == 0 {
-		return nil, true, nil
+		outcome.exhausted = true
 	}
-	return rows, false, nil
+	return rows, outcome, nil
 }
 
 // cpDBReuseIndicator is the CP for the close-time "what should the
@@ -315,20 +363,23 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 // iteration). It runs CREATE_RPB / PREPARE_DESCRIBE /
 // OPEN_DESCRIBE_FETCH and parses the first batch out of the OPEN
 // reply -- subsequent batches arrive via fetchMoreRows, which
-// callers invoke as appropriate.
+// callers invoke as appropriate. The returned fetchOutcome
+// reports whether the initial OPEN already drained the cursor
+// and whether the server auto-closed it (the typical JT400 path
+// for results that fit in one block-fetch buffer).
 //
 // On any error after CREATE_RPB has run, the RPB slot is freed
 // before the function returns so the next SELECT on the connection
 // can chain cleanly.
-func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() uint32) ([]SelectColumn, []SelectRow, error) {
+func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	// --- 1) CREATE_RPB. ---
 	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: encode stmt name: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode stmt name: %w", err)
 	}
 	cursorNameBytes, err := ebcdic.CCSID37.Encode("CRSR0001")
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: encode cursor name: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode cursor name: %w", err)
 	}
 	{
 		tpl := DBRequestTemplate{
@@ -357,11 +408,11 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, params)
 		if err != nil {
-			return nil, nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
 		hdr.CorrelationID = nextCorr()
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, nil, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
 		}
 	}
 	// CREATE_RPB has no reply expected (ORS bit 1 not set).
@@ -369,7 +420,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	// --- 2) PREPARE_DESCRIBE. ---
 	stmtBytes := utf16BE(sql)
 	if len(stmtBytes) > 0xFFFFFFFF {
-		return nil, nil, fmt.Errorf("hostserver: SQL too long: %d bytes", len(stmtBytes))
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: SQL too long: %d bytes", len(stmtBytes))
 	}
 	// JTOpen toggles ORSParameterMarkerFmt (bit 16) iff the SQL
 	// contains '?' markers; with it the reply carries CP 0x3808
@@ -399,11 +450,11 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, params)
 		if err != nil {
-			return nil, nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
 		}
 		hdr.CorrelationID = prepCorr
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, nil, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
 		}
 	}
 	// Read PREPARE_DESCRIBE reply -- column descriptors land here.
@@ -414,26 +465,26 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	// are present).
 	prepRepHdr, prepRepPayload, err := ReadDBReplyMatching(conn, prepCorr, 8)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
 	}
 	if prepRepHdr.ReqRepID != RepDBReply {
-		return nil, nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
 	}
 	prepRep, err := ParseDBReply(prepRepPayload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
 	}
 	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
 		// Free the RPB so the next SELECT on this connection
 		// can chain. Don't fail on cleanup -- the original error
 		// is what the caller cares about.
 		_ = deleteRPB(conn, nextCorr())
-		return nil, nil, dbErr
+		return nil, nil, fetchOutcome{}, dbErr
 	}
 	cols, err := prepRep.findSuperExtendedDataFormat()
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
-		return nil, nil, fmt.Errorf("hostserver: parse column descriptors: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse column descriptors: %w", err)
 	}
 	if len(cols) == 0 {
 		// List the CPs that did come back -- helps when the
@@ -444,7 +495,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			present = append(present, fmt.Sprintf("0x%04X(%dB)", p.CodePoint, len(p.Data)))
 		}
 		_ = deleteRPB(conn, nextCorr())
-		return nil, nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply missing column descriptors (CPs in reply: %v)", present)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply missing column descriptors (CPs in reply: %v)", present)
 	}
 
 	// --- 3) OPEN_DESCRIBE_FETCH. ---
@@ -471,45 +522,54 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
 		if err != nil {
-			return nil, nil, fmt.Errorf("hostserver: build OPEN_DESCRIBE_FETCH: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build OPEN_DESCRIBE_FETCH: %w", err)
 		}
 		fetchCorr = nextCorr()
 		hdr.CorrelationID = fetchCorr
 		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, nil, fmt.Errorf("hostserver: send OPEN_DESCRIBE_FETCH: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send OPEN_DESCRIBE_FETCH: %w", err)
 		}
 	}
 	fetchRepHdr, fetchRepPayload, err := ReadDBReplyMatching(conn, fetchCorr, 8)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: read OPEN_DESCRIBE_FETCH reply: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: read OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
 	if fetchRepHdr.ReqRepID != RepDBReply {
-		return nil, nil, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH reply ReqRepID 0x%04X (want 0x%04X)", fetchRepHdr.ReqRepID, RepDBReply)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: OPEN_DESCRIBE_FETCH reply ReqRepID 0x%04X (want 0x%04X)", fetchRepHdr.ReqRepID, RepDBReply)
 	}
 	fetchRep, err := ParseDBReply(fetchRepPayload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse OPEN_DESCRIBE_FETCH reply: %w", err)
 	}
-	// SQL +100 (no rows, end of cursor) and a few warnings come back
-	// as non-zero ReturnCode but aren't fatal. The fixture's reply
-	// has RC=0x000002BC = 700 because the cursor was opened
-	// successfully but no scroll was specified.
+	// JT400's "fetch/close" path -- ErrorClass=2, RC=700 -- means
+	// the server delivered the entire result in one block AND
+	// closed the cursor on its own. interpretFetchReply covers
+	// that plus SQL +100 / EC=2 RC=701 (end of data without auto-
+	// close). All three are warnings, not errors; makeDb2Error
+	// returns nil for any positive RC so the data still flows.
+	outcome := interpretFetchReply(fetchRep)
 	if dbErr := makeDb2Error(fetchRep, "OPEN_DESCRIBE_FETCH"); dbErr != nil {
-		// CLOSE first because OPEN may have succeeded server-side
-		// before something post-OPEN tripped the error path; a bare
-		// RPB DELETE on a still-open cursor leaves SQL-519 / 24506
-		// for the next PREPARE_DESCRIBE on this connection.
-		_ = closeCursor(conn, nextCorr())
+		// Server-reported error during OPEN. If the server already
+		// auto-closed the cursor (outcome.serverClosed), skip the
+		// explicit CLOSE so we don't trip SQL-501 / 24501; otherwise
+		// CLOSE first to drop both cursor and prepared statement so
+		// the next PREPARE_DESCRIBE on this conn doesn't trip
+		// SQL-519 / 24506 against an orphaned cursor.
+		if !outcome.serverClosed {
+			_ = closeCursor(conn, nextCorr())
+		}
 		_ = deleteRPB(conn, nextCorr())
-		return nil, nil, dbErr
+		return nil, nil, fetchOutcome{}, dbErr
 	}
 	rows, err := fetchRep.findExtendedResultData(cols)
 	if err != nil {
-		_ = closeCursor(conn, nextCorr())
+		if !outcome.serverClosed {
+			_ = closeCursor(conn, nextCorr())
+		}
 		_ = deleteRPB(conn, nextCorr())
-		return nil, nil, fmt.Errorf("hostserver: parse row data: %w", err)
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
-	return cols, rows, nil
+	return cols, rows, outcome, nil
 }
 
 // utf16BE encodes s as UTF-16 big-endian bytes (CCSID 13488 on the

@@ -76,24 +76,22 @@ func runStaticTypeReplay(t *testing.T, tc typeCase) {
 	}
 	// Order: XChgRandSeed reply, StartServer reply, SET_SQL_ATTRIBUTES
 	// reply, PREPARE_DESCRIBE reply, OPEN_DESCRIBE_FETCH reply,
-	// RPB DELETE reply. SelectStaticSQL consumes the PREPARE +
-	// OPEN replies; the M4 RPB-DELETE cleanup adds a third read.
-	if len(sqlReceiveds) < 5 {
-		t.Skipf("fixture %s has only %d SQL receiveds (need >= 5)", tc.trace, len(sqlReceiveds))
+	// RPB DELETE reply. SelectStaticSQL consumes PREPARE + OPEN +
+	// RPB-DELETE replies; the OPEN reply's JT400 "fetch/close"
+	// signal (EC=2 RC=700) skips both continuation FETCH and
+	// explicit CLOSE, matching JT400's wire pattern.
+	if len(sqlReceiveds) < 6 {
+		t.Skipf("fixture %s has only %d SQL receiveds (need >= 6)", tc.trace, len(sqlReceiveds))
 	}
-	// SelectStaticSQL with start corr=3 sends:
+	// SelectStaticSQL with start corr=3 sends 4 frames:
 	//   corr 3 CREATE_RPB, corr 4 PREPARE_DESCRIBE,
-	//   corr 5 OPEN_DESCRIBE_FETCH, corr 6 continuation FETCH,
-	//   corr 7 RPB DELETE.
-	// PREPARE+OPEN replies come from the fixture; FETCH-end and
-	// RPB-DELETE replies are synthesised because JTOpen captured
-	// these traces before the M5 continuation loop existed.
+	//   corr 5 OPEN_DESCRIBE_FETCH, corr 6 RPB DELETE.
+	// All three reply slots come straight from the captured
+	// fixture; no synthetic stubs needed.
 	conn := newFakeConn(
 		sqlReceiveds[3],
 		sqlReceiveds[4],
-		syntheticFetchEndReply(6),
-		syntheticCloseReply(7),
-		syntheticRPBDeleteReply(8),
+		sqlReceiveds[5],
 	)
 	res, err := SelectStaticSQL(conn, tc.sql, 3)
 	if err != nil {
@@ -197,104 +195,3 @@ func (g *goldenJSON) firstRowCol(i int) any {
 }
 
 var _ = bytes.Equal // keep `bytes` imported for future use without disruption
-
-// syntheticFetchEndReply builds a 0x2800 (DBReply) frame whose
-// SQLCA carries SQLCODE +100 (end-of-data). M5 SelectStaticSQL /
-// SelectPreparedSQL now loop continuation FETCHes after the initial
-// OPEN; replaying captured fixtures where JTOpen got everything in
-// a single batch needs a synthetic "no more rows" reply so the
-// continuation loop terminates cleanly. corr is the FETCH
-// correlation ID we expect back.
-func syntheticFetchEndReply(corr uint32) []byte {
-	hdr := Header{
-		Length:         40,
-		ServerID:       ServerDatabase,
-		CorrelationID:  corr,
-		TemplateLength: 20,
-		ReqRepID:       RepDBReply,
-	}
-	payload := make([]byte, 20)
-	// Echo ORS bitmap fields used by FETCH so a future stricter
-	// reply parser accepts the frame too.
-	payload[0] = 0x86
-	payload[1] = 0x04
-	payload[10] = 0x18 // function ID echo
-	payload[11] = 0x0B
-	payload[12] = 0x18
-	payload[13] = 0x0B
-	// ReturnCode = 100 (SQLCODE end-of-data). Bytes 16..19.
-	payload[16] = 0x00
-	payload[17] = 0x00
-	payload[18] = 0x00
-	payload[19] = 0x64
-
-	var buf bytes.Buffer
-	if err := WriteFrame(&buf, hdr, payload); err != nil {
-		panic(fmt.Sprintf("synthesise FETCH end-of-data reply: %v", err))
-	}
-	return buf.Bytes()
-}
-
-// syntheticCloseReply builds a 40-byte 0x2800 (DBReply) frame that
-// mimics a successful CLOSE (0x180A) response: ORS bitmap echo,
-// ReqRepID echoes, and zeroed ErrorClass + ReturnCode. Cursor.Close
-// always sends CLOSE before RPB DELETE -- the captured-fixture-
-// driven tests need a synthetic reply to drive that frame, since
-// the original .trace files pre-date the cursor refactor.
-func syntheticCloseReply(corr uint32) []byte {
-	hdr := Header{
-		Length:         40,
-		ServerID:       ServerDatabase,
-		CorrelationID:  corr,
-		TemplateLength: 20,
-		ReqRepID:       RepDBReply,
-	}
-	payload := make([]byte, 20)
-	// ORS bitmap echo matching what we send (0x86040000 for CLOSE).
-	payload[0] = 0x86
-	payload[1] = 0x04
-	payload[10] = 0x18 // function ID echo: 0x180A
-	payload[11] = 0x0A
-	payload[12] = 0x18
-	payload[13] = 0x0A
-
-	var buf bytes.Buffer
-	if err := WriteFrame(&buf, hdr, payload); err != nil {
-		panic(fmt.Sprintf("synthesise CLOSE reply: %v", err))
-	}
-	return buf.Bytes()
-}
-
-// syntheticRPBDeleteReply builds a 40-byte 0x2800 (DBReply)
-// frame that mimics a successful RPB DELETE response: ORS bitmap
-// echo, ReqRepID echoes (0x1D02), and zeroed ErrorClass +
-// ReturnCode. fakeConn replays this when the original fixture
-// pre-dates the M4 RPB-DELETE cleanup so type-decoder tests don't
-// need fresh captures.
-func syntheticRPBDeleteReply(corr uint32) []byte {
-	hdr := Header{
-		Length:         40,
-		ServerID:       ServerDatabase,
-		CorrelationID:  corr,
-		TemplateLength: 20,
-		ReqRepID:       RepDBReply,
-	}
-	payload := make([]byte, 20)
-	// ORS bitmap echo (matches what we send): 0x80040000.
-	payload[0] = 0x80
-	payload[1] = 0x04
-	// Handles + function ID echo (0x1D02 twice) at template
-	// offsets 8..13. We zero the rest -- ParseDBReply only
-	// reads ErrorClass (14..15) and ReturnCode (16..19), both
-	// of which stay zero for success.
-	payload[10] = 0x1D
-	payload[11] = 0x02
-	payload[12] = 0x1D
-	payload[13] = 0x02
-
-	var buf bytes.Buffer
-	if err := WriteFrame(&buf, hdr, payload); err != nil {
-		panic(fmt.Sprintf("synthesise RPB DELETE reply: %v", err))
-	}
-	return buf.Bytes()
-}

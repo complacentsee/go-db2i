@@ -368,12 +368,19 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
      change); JT400 catches that and resends without CP 0x3830,
      and `setSessionMode` now mirrors that fallback.
   Both fixes commit-pinned and unit-tested.
-- **Re-capture fixtures with M5 RPB DELETE in scope** — every
-  fakeConn-driven test currently appends a `syntheticFetchEndReply`
-  + `syntheticRPBDeleteReply` because the captured `.trace`
-  fixtures predate the M5 cleanup loop. Re-running
-  `mvn -q exec:java` against PUB400 (after the M5 changes are
-  pushed) refreshes the fixtures so synthetic stubs go away.
+- **Re-capture fixtures with M5 RPB DELETE in scope** — landed
+  via #48 fix on 2026-05-09. Rather than re-capturing fixtures,
+  the cursor was refactored to align with JT400's actual wire
+  pattern: the OPEN reply's `(ErrorClass=2, ReturnCode=700)` tuple
+  is JT400's "fetch/close" signal (all rows delivered + cursor
+  auto-closed by server), so the driver now skips the
+  unnecessary continuation `FETCH` and explicit `CLOSE`. The
+  three synthetic test stubs (`syntheticFetchEndReply`,
+  `syntheticCloseReply`, `syntheticRPBDeleteReply`) are gone;
+  offline tests consume the captured PREPARE/OPEN/RPB-DELETE
+  replies directly. Multi-batch results still work via
+  continuation `FETCH` when the server signals more rows pending.
+  Wire-validated against IBM Cloud V7R5M0.
 - **`cmd/diffrunner`** — mentioned in the original M5 plan as a
   nightly Java/Go cross-check. Never built; still a good idea
   during M6 conformance work.
@@ -569,11 +576,9 @@ don't slot into a single milestone.
 - **`hostserver/doc.go` "database (TODO)" stub** — package doc
   was written when M2 was still scoped; needs a refresh now that
   M2-M5 landed.
-- **Re-capture all fixtures post-M5** — the `syntheticFetchEndReply`
-  / `syntheticRPBDeleteReply` helpers in tests exist only because
-  captured `.trace` files predate the M5 continuation-FETCH +
-  RPB-DELETE loop. Re-running the harness against a JT400 build
-  that mirrors the M5 cleanup behavior eliminates the stubs.
+- **Re-capture all fixtures post-M5** — resolved via #48 (cursor
+  aligned with JT400's "fetch/close" signal); see "Deferred from
+  M5" above. The synthetic helpers are gone.
 
 ## Risks (still relevant from feasibility plan)
 

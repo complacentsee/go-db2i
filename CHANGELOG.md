@@ -11,6 +11,36 @@ have all landed.
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor lifecycle aligned with JT400's "fetch/close" wire pattern
+  (#48). Pre-refactor, every SELECT emitted four post-PREPARE
+  frames -- `OPEN_DESCRIBE_FETCH`, a continuation `FETCH`, an
+  explicit `CLOSE`, and `RPB DELETE` -- because the driver always
+  assumed multi-batch and always closed the cursor explicitly. The
+  trailing `FETCH` and `CLOSE` always came back as warnings
+  (`SQL +100`, `SQL -501 / 24501`) when the server had already
+  delivered the entire result in one block-fetch buffer (the
+  typical case JT400 itself optimises for); the offline tests
+  worked around this by feeding three synthetic replies
+  (`syntheticFetchEndReply`, `syntheticCloseReply`,
+  `syntheticRPBDeleteReply`) the captured `.trace` files don't
+  contain. The cursor now interprets the JT400 dispatch tuple from
+  the OPEN reply: `ErrorClass=2, ReturnCode=700` is JT400's
+  documented "fetch/close" signal (all rows delivered + cursor
+  auto-closed; see `JDServerRowCache.fetch`), `ErrorClass=1
+  ReturnCode=100` and `ErrorClass=2 ReturnCode=701` are end-of-data
+  variants where the cursor stays open. `Cursor.Close` skips the
+  explicit `closeCursor` call when the server already closed,
+  emitting only `RPB DELETE` -- byte-for-byte the same wire pattern
+  JT400 produces. Continuation `FETCH` still runs when the server
+  signals more rows pending, so multi-batch result sets work
+  unchanged. The three synthetic test stubs are gone; offline
+  tests now consume the captured PREPARE / OPEN / RPB-DELETE
+  replies directly. Wire-validated against IBM Cloud Power VS
+  (V7R5M0): 19/19 type round-trip, 4163-row pull from
+  `QSYS2.SYSTABLES`, autocommit toggle, all the smoketest paths.
+
 ### Fixed
 
 - DATE descriptor parser USA-format quirk (#53). DSN `?date=usa` (and
