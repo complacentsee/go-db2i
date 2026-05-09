@@ -157,6 +157,117 @@ func TestSetSQLAttributesRequestEncoding(t *testing.T) {
 	}
 }
 
+// TestSetSQLAttributesRequestRoutesDateFormatToCP3807 is the
+// regression test for the USA-format DATE descriptor parser quirk.
+// Pre-fix, opts.DateFormat was pumped into CP 0x3805 (which is
+// JTOpen's TranslateIndicator, not the date format). For DateFormatJOB
+// (0xF0) that accidentally produced the right TranslateIndicator
+// byte; any other format silently broke the connection's translate
+// behaviour AND left the date format at the server default.
+//
+// Post-fix:
+//   - 0x3805 is always 0xF0 (TranslateIndicator).
+//   - 0x3807 (DateFormatParserOption) carries the integer index per
+//     JTOpen's mapping (0..7); omitted entirely for JOB so the
+//     server falls through to its job default.
+//   - 0x3808 (DateSeparatorParserOption) is sent alongside whenever
+//     0x3807 is.
+func TestSetSQLAttributesRequestRoutesDateFormatToCP3807(t *testing.T) {
+	cases := []struct {
+		name        string
+		format      byte
+		wantCP3807  int16
+		wantCP3808  int16
+		wantPresent bool
+	}{
+		{"JOB omits CP 0x3807", DateFormatJOB, 0, 0, false},
+		{"USA -> index 4, sep '/'", DateFormatUSA, 4, 0, true},
+		{"ISO -> index 5, sep '-'", DateFormatISO, 5, 1, true},
+		{"EUR -> index 6, sep '.'", DateFormatEUR, 6, 2, true},
+		{"JIS -> index 7, sep '-'", DateFormatJIS, 7, 1, true},
+		{"MDY -> index 1, sep '/'", DateFormatMDY, 1, 0, true},
+		{"DMY -> index 2, sep '/'", DateFormatDMY, 2, 0, true},
+		{"YMD -> index 3, sep '-'", DateFormatYMD, 3, 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := DefaultDBAttributesOptions()
+			opts.DateFormat = tc.format
+
+			_, payload, err := SetSQLAttributesRequest(opts)
+			if err != nil {
+				t.Fatalf("SetSQLAttributesRequest: %v", err)
+			}
+			cp3805, ok := findShortCP(payload, 0x3805, 1)
+			if !ok {
+				t.Fatalf("CP 0x3805 (TranslateIndicator) missing")
+			}
+			if cp3805 != 0xF0 {
+				t.Errorf("CP 0x3805 = 0x%02X, want 0xF0 (TranslateIndicator)", cp3805)
+			}
+			got3807, present3807 := findShortCP(payload, 0x3807, 2)
+			got3808, present3808 := findShortCP(payload, 0x3808, 2)
+			if present3807 != tc.wantPresent {
+				t.Errorf("CP 0x3807 present=%v, want %v", present3807, tc.wantPresent)
+			}
+			if present3808 != tc.wantPresent {
+				t.Errorf("CP 0x3808 present=%v, want %v", present3808, tc.wantPresent)
+			}
+			if tc.wantPresent {
+				if int16(got3807) != tc.wantCP3807 {
+					t.Errorf("CP 0x3807 = %d, want %d", int16(got3807), tc.wantCP3807)
+				}
+				if int16(got3808) != tc.wantCP3808 {
+					t.Errorf("CP 0x3808 = %d, want %d", int16(got3808), tc.wantCP3808)
+				}
+			}
+		})
+	}
+}
+
+// findShortCP scans an SET_SQL_ATTRIBUTES payload looking for a
+// CP/LL/data triple at the given codepoint and returns the integer
+// value of the data bytes (1- or 2-byte). The payload starts with a
+// 20-byte template (4-byte ORS, 16 bytes other) followed by N
+// LL/CP/data records. PARMCNT lives at offset 18-19. wantBytes is
+// the data length we expect (1 for CP 0x3805, 2 for the parser-
+// option shorts) -- mismatch returns ok=false rather than reading
+// garbage off the next CP.
+//
+// Returns (value, true) if the CP is found and matches the
+// requested data length. Reads at most the first instance of the
+// CP; SET_SQL_ATTRIBUTES never repeats CPs so that's fine.
+func findShortCP(payload []byte, cp uint16, wantBytes int) (uint16, bool) {
+	const tplLen = 20
+	if len(payload) < tplLen {
+		return 0, false
+	}
+	pos := tplLen
+	for pos+6 <= len(payload) {
+		ll := uint32(payload[pos])<<24 | uint32(payload[pos+1])<<16 | uint32(payload[pos+2])<<8 | uint32(payload[pos+3])
+		cur := uint16(payload[pos+4])<<8 | uint16(payload[pos+5])
+		if int(ll) < 6 || pos+int(ll) > len(payload) {
+			return 0, false
+		}
+		if cur == cp {
+			dataLen := int(ll) - 6
+			if dataLen != wantBytes {
+				return 0, false
+			}
+			switch dataLen {
+			case 1:
+				return uint16(payload[pos+6]), true
+			case 2:
+				return uint16(payload[pos+6])<<8 | uint16(payload[pos+7]), true
+			default:
+				return 0, false
+			}
+		}
+		pos += int(ll)
+	}
+	return 0, false
+}
+
 // TestSetSQLAttributesAgainstFixture replays the captured
 // SET_SQL_ATTRIBUTES reply into a fakeConn and confirms the
 // orchestrator parses it cleanly.

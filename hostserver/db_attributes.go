@@ -41,13 +41,24 @@ type DBAttributesOptions struct {
 	// Empty = don't send the CP. JTOpen sends the user's home
 	// library here ("AFTRAEGE11" on PUB400 for AFTRAEGE1).
 	DefaultSQLLibrary string
-	// DateFormat overrides the date format CP 0x3805 we ask the
-	// server to use for date columns. The default 0xF0 (EBCDIC '0',
-	// JOB) lets the server pick its job-default format -- on PUB400
-	// that's YMD ("YY-MM-DD"). Set to DateFormatISO to receive
-	// dates in 10-char "YYYY-MM-DD" with no centruy-boundary
-	// guesswork in the decoder; or to DateFormatJOB to keep the
-	// fixture-compatible default.
+	// DateFormat overrides the session date format CP 0x3807
+	// (DateFormatParserOption). It controls how the server formats
+	// DATE columns in result sets AND how it parses DATE bytes in
+	// prepared-statement binds. The default DateFormatJOB lets the
+	// server pick its job-default format -- on PUB400 that's YMD
+	// ("YY-MM-DD"). Set to DateFormatISO to receive dates in
+	// 10-char "YYYY-MM-DD" with no century-boundary guesswork in
+	// the decoder; or to DateFormatJOB to keep the fixture-
+	// compatible default.
+	//
+	// NOTE: pre-2026-05-08 builds of goJTOpen pumped this byte into
+	// CP 0x3805, which is actually the TranslateIndicator (per
+	// JTOpen's DBSQLAttributesDS.setTranslateIndicator). DateFormatJOB
+	// happened to coincide with the only valid TranslateIndicator
+	// value (0xF0); any other DateFormat silently broke the
+	// connection's translate behaviour AND left the date format at
+	// the server default. The CP is now correctly routed to 0x3807
+	// (short int, 0..7 per JTOpen's parser-option mapping).
 	DateFormat byte
 	// IsolationLevel controls CP 0x380E (commitment control level)
 	// in SET_SQL_ATTRIBUTES. Default IsolationDefault leaves the CP
@@ -58,19 +69,78 @@ type DBAttributesOptions struct {
 	IsolationLevel int16
 }
 
-// DateFormat constants for DBAttributesOptions.DateFormat. EBCDIC
-// digits in CP 0x3805. PUB400 honours the request iff the CP is
-// present (default 0 = JOB).
+// DateFormat constants for DBAttributesOptions.DateFormat. The
+// byte values are EBCDIC digits ('0'..'7') for historical reasons
+// and form the API surface; on the wire we send the integer index
+// (0..7) at CP 0x3807 (DateFormatParserOption) per JTOpen's mapping.
+// JOB means "let the server pick"; the CP is omitted in that case
+// so the server falls through to its job default.
 const (
-	DateFormatJOB byte = 0xF0 // EBCDIC '0' -- server-default
-	DateFormatUSA byte = 0xF1 // MM/DD/YYYY (10 chars)
-	DateFormatISO byte = 0xF2 // YYYY-MM-DD (10 chars)
-	DateFormatEUR byte = 0xF3 // DD.MM.YYYY (10 chars)
-	DateFormatJIS byte = 0xF4 // YYYY-MM-DD (10 chars)
-	DateFormatMDY byte = 0xF5 // MM/DD/YY (8 chars)
-	DateFormatDMY byte = 0xF6 // DD/MM/YY (8 chars)
-	DateFormatYMD byte = 0xF7 // YY-MM-DD (8 chars)
+	DateFormatJOB byte = 0xF0 // server default -- CP 0x3807 not sent
+	DateFormatUSA byte = 0xF1 // MM/DD/YYYY (10 chars), index 4
+	DateFormatISO byte = 0xF2 // YYYY-MM-DD (10 chars), index 5
+	DateFormatEUR byte = 0xF3 // DD.MM.YYYY (10 chars), index 6
+	DateFormatJIS byte = 0xF4 // YYYY-MM-DD (10 chars), index 7
+	DateFormatMDY byte = 0xF5 // MM/DD/YY (8 chars),    index 1
+	DateFormatDMY byte = 0xF6 // DD/MM/YY (8 chars),    index 2
+	DateFormatYMD byte = 0xF7 // YY-MM-DD (8 chars),    index 3
 )
+
+// dateFormatParserIndex maps a DateFormat* byte constant to the
+// integer index JTOpen sends at CP 0x3807 (DateFormatParserOption).
+// Mirrors AS400JDBCConnectionImpl.java's getDateFormatPO mapping:
+// 0=JULIAN, 1=MDY, 2=DMY, 3=YMD, 4=USA, 5=ISO, 6=EUR, 7=JIS.
+//
+// Returns ok=false for DateFormatJOB (caller must omit the CP) and
+// for unrecognised bytes (caller treats as JOB). Julian is not
+// exposed via DateFormat* constants because no captured workload
+// uses it; if a caller needs it they can fall through to JOB and
+// configure on the server side.
+func dateFormatParserIndex(format byte) (int16, bool) {
+	switch format {
+	case DateFormatMDY:
+		return 1, true
+	case DateFormatDMY:
+		return 2, true
+	case DateFormatYMD:
+		return 3, true
+	case DateFormatUSA:
+		return 4, true
+	case DateFormatISO:
+		return 5, true
+	case DateFormatEUR:
+		return 6, true
+	case DateFormatJIS:
+		return 7, true
+	default:
+		// JOB or unknown -- omit CP, server picks.
+		return 0, false
+	}
+}
+
+// dateSeparatorParserIndex returns the CP 0x3808
+// (DateSeparatorParserOption) index implied by a date format. JTOpen
+// pairs each format with a canonical separator (mirrors the wire
+// shapes documented in encodeDateStringForFormat):
+//
+//	USA / MDY / DMY  -> '/'  (index 0)
+//	ISO / JIS / YMD  -> '-'  (index 1)
+//	EUR              -> '.'  (index 2)
+//
+// Returns ok=false for JOB so the caller can omit the CP and let
+// the server pair the separator with its job-default format.
+func dateSeparatorParserIndex(format byte) (int16, bool) {
+	switch format {
+	case DateFormatUSA, DateFormatMDY, DateFormatDMY:
+		return 0, true // SLASH
+	case DateFormatISO, DateFormatJIS, DateFormatYMD:
+		return 1, true // DASH
+	case DateFormatEUR:
+		return 2, true // PERIOD
+	default:
+		return 0, false
+	}
+}
 
 // isolationLevelWireValue maps an IsolationLevel option (which uses
 // -1 to mean "leave at default") to the int16 we send on the wire.
@@ -167,7 +237,12 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		// 0x3803 ClientFunctionalLevel -- fixed CCSID-tagged
 		// 10-byte string with 2 trailing pad bytes (LL=20).
 		DBParamFixedString(0x3803, 37, cflBytes),
-		DBParamByte(0x3805, opts.DateFormat),
+		// CP 0x3805 is JTOpen's TranslateIndicator (per
+		// DBSQLAttributesDS.setTranslateIndicator). 0xF0 = "translate
+		// host server data to the client's CCSID" -- the only value
+		// our wire path is set up to consume. DateFormat lives on a
+		// separate CP (0x3807) appended below.
+		DBParamByte(0x3805, 0xF0),
 		DBParamShort(0x3806, 0x0001),
 		DBParamByte(0x3824, 0xE8),
 		// CP 0x380E: commitment control level. 0 = server default
@@ -188,6 +263,19 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 			return Header{}, nil, fmt.Errorf("hostserver: encode default SQL library: %w", err)
 		}
 		params = append(params, DBParamVarString(0x380F, 273, dlBytes))
+	}
+	// CP 0x3807 (DateFormatParserOption) + CP 0x3808
+	// (DateSeparatorParserOption). Sent as 2-byte shorts only when
+	// the user picks an explicit format -- omitted for JOB so the
+	// server falls back to its job default. Mirrors JTOpen's
+	// AS400JDBCConnectionImpl.java which calls
+	// setDateFormatParserOption only when the JDBC URL set
+	// "date format". Same shape for the separator.
+	if idx, ok := dateFormatParserIndex(opts.DateFormat); ok {
+		params = append(params, DBParamShort(0x3807, idx))
+		if sep, ok := dateSeparatorParserIndex(opts.DateFormat); ok {
+			params = append(params, DBParamShort(0x3808, sep))
+		}
 	}
 	params = append(params,
 		DBParamShort(0x3812, 0x0001),                                    // PackageAddStmtAllowed

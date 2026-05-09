@@ -299,11 +299,14 @@ BCD sign nibbles cover both directions.
   `SELECT CAST(? AS T)` loopback today; per-type bind on
   INSERT/UPDATE picks up in M6 alongside `database/sql.Stmt.Exec`
   and write fixtures.
-- **DATE format negotiation for non-default formats** — encoder
-  supports ISO and YMD output widths; USA/EUR/JIS/MDY/DMY bind
-  not implemented (8-char DATE bind only emits YMD). Decoder
-  recognises all formats. Wire up bind variants when a fixture
-  forces the issue.
+- **DATE format negotiation for non-default formats** — landed
+  via #53 fix on 2026-05-08. SET_SQL_ATTRIBUTES now routes
+  `DateFormat` to the correct CPs (`0x3807` parser option +
+  `0x3808` separator) instead of the wrong `0x3805`
+  (TranslateIndicator); bind path honours `PreparedParam.DateFormat`
+  so USA/EUR/JIS/MDY/DMY/YMD emit format-correct wire bytes.
+  Legacy zero-`DateFormat` callers keep length-based ISO/YMD
+  inference unchanged.
 - **CCSID 65535 (binary "no conversion")** — listed in original
   M4 scope but no captured fixture uses it; the type-decoder
   switch should route 65535 → `[]byte` directly without EBCDIC

@@ -11,6 +11,25 @@ have all landed.
 
 ## [Unreleased]
 
+### Fixed
+
+- DATE descriptor parser USA-format quirk (#53). DSN `?date=usa` (and
+  every non-default `?date=` value) used to silently fail: the
+  driver pumped the EBCDIC date format byte into CP `0x3805`, which
+  is JTOpen's `TranslateIndicator`, not a date format. `DateFormatJOB`
+  happened to coincide with the only valid `TranslateIndicator`
+  value (`0xF0`), so the default kept working; any explicit choice
+  produced an invalid `TranslateIndicator` AND left the actual date
+  format at the server's job default. CP `0x3805` is now always
+  `0xF0`, and the date format / separator are sent on the correct
+  CPs `0x3807` (`DateFormatParserOption`) and `0x3808`
+  (`DateSeparatorParserOption`) using JTOpen's integer index mapping
+  (0..7). The bind path also gained format awareness via
+  `PreparedParam.DateFormat`, so a USA-session prepared `DATE` bind
+  emits `MM/DD/YYYY` instead of always `YYYY-MM-DD`. Legacy callers
+  that leave `DateFormat` zero continue to use the length-based
+  ISO/YMD inference unchanged.
+
 ### Added
 
 - LOB SELECT support: BLOB / CLOB / DBCLOB columns arrive as
@@ -80,4 +99,3 @@ have all landed.
 - TLS sign-on / database (ports 9476 / 9471) (M7).
 - `bradfitz/go-sql-test` formal conformance run (M8).
 - `slog` integration / OpenTelemetry spans (M8).
-- USA-format DATE descriptor parser quirk (issue #53 in tracker).
