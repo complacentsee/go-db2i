@@ -498,8 +498,16 @@ fresh connection.
 - **`LastInsertId` via IDENTITY_VAL_LOCAL()** — currently returns
   a "not supported" error. Not used by labelverification-gw
   (legacy DCLVRP02 has fixed keys, no IDENTITY columns).
-- **`bradfitz/go-sql-test` conformance** — never run; do during
-  M7/M8 hardening.
+- **`bradfitz/go-sql-test` conformance** — landed via commit
+  `2d6cf16` and re-validated 2026-05-09 against PUB400 V7R5M0
+  (post-#48 cursor refactor). Four scenarios pass: TestBlobs,
+  TestManyQueryRow (1000 prepared QueryRow round-trips),
+  TestTxQuery, TestPreparedStmt (10 goroutines × 10 iterations
+  of shared prepared SELECT + INSERT). Build-tag-gated under
+  `//go:build conformance`; opt-in via `GOJTOPEN_DSN`. Surfaced
+  three real bugs during the original run (empty 0x380E CP,
+  open-cursor cleanup ordering, RPB DELETE on error path) which
+  shipped fixed in the same commit.
 - **`cmd/diffrunner`** — never built; useful for conformance work
   but not for shipping the gateway.
 
