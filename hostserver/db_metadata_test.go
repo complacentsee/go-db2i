@@ -92,15 +92,16 @@ func decodeFixtureColumns(t *testing.T, fixture string) []SelectColumn {
 			sqlReceiveds = append(sqlReceiveds, b)
 		}
 	}
-	if len(sqlReceiveds) < 5 {
-		t.Skipf("fixture %s has only %d SQL receiveds", fixture, len(sqlReceiveds))
+	if len(sqlReceiveds) < 6 {
+		t.Skipf("fixture %s has only %d SQL receiveds (need >= 6)", fixture, len(sqlReceiveds))
 	}
+	// PREPARE_DESCRIBE + OPEN_DESCRIBE_FETCH + RPB DELETE replies.
+	// The OPEN reply's JT400 fetch/close signal lets the cursor
+	// skip continuation FETCH and explicit CLOSE.
 	conn := newFakeConn(
 		sqlReceiveds[3],
 		sqlReceiveds[4],
-		syntheticFetchEndReply(6),
-		syntheticCloseReply(7),
-		syntheticRPBDeleteReply(8),
+		sqlReceiveds[5],
 	)
 	res, err := SelectStaticSQL(conn, "VALUES 1", 3)
 	if err != nil {

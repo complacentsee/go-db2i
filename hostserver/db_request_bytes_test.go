@@ -122,7 +122,7 @@ func TestSentBytesMatchSelectDummyFixture(t *testing.T) {
 		t.Fatalf("need >= 5 SQL receiveds, got %d", len(sqlReceiveds))
 	}
 
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticFetchEndReply(6), syntheticCloseReply(7), syntheticRPBDeleteReply(8))
+	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
 	if _, err := SelectStaticSQL(conn,
 		"SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1",
 		3,
@@ -219,7 +219,7 @@ func TestSentBytesMatchPreparedIntParamFixture(t *testing.T) {
 	if len(sqlReceiveds) < 5 {
 		t.Fatalf("need >= 5 SQL receiveds in select_dummy, got %d", len(sqlReceiveds))
 	}
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticFetchEndReply(6), syntheticCloseReply(7), syntheticRPBDeleteReply(8))
+	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
 	_, _ = SelectStaticSQL(conn, preparedSQL, 3)
 	r := bytes.NewReader(conn.written.Bytes())
 
@@ -315,7 +315,7 @@ func TestSentBytesMatchPreparedIntParamFixture(t *testing.T) {
 				sqlReceiveds = append(sqlReceiveds, b)
 			}
 		}
-		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticFetchEndReply(6), syntheticCloseReply(7), syntheticRPBDeleteReply(8))
+		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
 		shapes := []PreparedParam{{
 			SQLType:     497,
 			FieldLength: 4,
@@ -410,7 +410,7 @@ func TestSentBytesMatchPreparedStringParamFixture(t *testing.T) {
 				sqlReceiveds = append(sqlReceiveds, b)
 			}
 		}
-		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticFetchEndReply(6), syntheticCloseReply(7), syntheticRPBDeleteReply(8))
+		conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
 		_, _ = SelectPreparedSQL(conn, preparedSQL, shapes, []any{"hello, IBM i"}, 3)
 
 		r := bytes.NewReader(conn.written.Bytes())

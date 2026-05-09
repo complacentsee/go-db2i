@@ -87,11 +87,17 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 		t.Fatalf("need >= 5 SQL-server receiveds in select_dummy, got %d", len(sqlReceiveds))
 	}
 
-	// SelectStaticSQL reads two replies (after the CREATE_RPB it
-	// doesn't expect a reply, then PREPARE_DESCRIBE -> reply, then
-	// OPEN_DESCRIBE_FETCH -> reply). The fixture's PREPARE_DESCRIBE
-	// reply is sqlReceiveds[3] (the 4th SQL reply: after XChg, StartServer, SET_SQL_ATTR).
-	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], syntheticFetchEndReply(6), syntheticCloseReply(7), syntheticRPBDeleteReply(8))
+	// SelectStaticSQL reads three replies in order: PREPARE_DESCRIBE
+	// (sqlReceiveds[3]), OPEN_DESCRIBE_FETCH (sqlReceiveds[4]), and
+	// RPB DELETE (sqlReceiveds[5]). CREATE_RPB is fire-and-forget so
+	// no reply is expected for it. The OPEN reply carries JT400's
+	// "fetch/close" signal (EC=2, RC=700) which means the server
+	// already auto-closed the cursor and delivered all rows; the
+	// driver therefore skips continuation FETCH and explicit CLOSE.
+	if len(sqlReceiveds) < 6 {
+		t.Fatalf("need >= 6 SQL-server receiveds in select_dummy (incl. RPB DELETE), got %d", len(sqlReceiveds))
+	}
+	conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
 
 	res, err := SelectStaticSQL(conn,
 		"SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1",
@@ -136,13 +142,17 @@ func TestSelectStaticSQLAgainstFixture(t *testing.T) {
 		t.Errorf("col 2 (server) = %q, want %q (from golden)", got, want[2])
 	}
 
-	// Sanity: 6 frames written (CREATE_RPB, PREPARE_DESCRIBE,
-	// OPEN_DESCRIBE_FETCH, continuation FETCH, CLOSE, RPB DELETE).
-	// CLOSE always precedes RPB DELETE so the prepared statement
-	// (STMT0001) is dropped along with the cursor; without it the
-	// next PREPARE on this conn trips SQL-519.
+	// Sanity: 4 frames written (CREATE_RPB, PREPARE_DESCRIBE,
+	// OPEN_DESCRIBE_FETCH, RPB DELETE). The OPEN reply's JT400
+	// "fetch/close" signal (EC=2 RC=700) tells the cursor the
+	// server already delivered all rows AND auto-closed the cursor,
+	// so no continuation FETCH or explicit CLOSE is emitted -- this
+	// matches JT400's own wire pattern. Pre-refactor we always sent
+	// CLOSE+RPB DELETE which required synthetic test stubs because
+	// the captured .trace files don't contain replies for frames
+	// JT400 never sends.
 	r := bytes.NewReader(conn.written.Bytes())
-	for i, want := range []uint16{ReqDBSQLRPBCreate, ReqDBSQLPrepareDescribe, ReqDBSQLOpenDescribeFetch, ReqDBSQLFetch, ReqDBSQLClose, ReqDBSQLRPBDelete} {
+	for i, want := range []uint16{ReqDBSQLRPBCreate, ReqDBSQLPrepareDescribe, ReqDBSQLOpenDescribeFetch, ReqDBSQLRPBDelete} {
 		hdr, _, err := ReadFrame(r)
 		if err != nil {
 			t.Fatalf("re-parse sent frame %d: %v", i, err)

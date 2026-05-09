@@ -46,15 +46,17 @@ func TestMultiRowFetchAgainstFixture(t *testing.T) {
 			sqlReceiveds = append(sqlReceiveds, b)
 		}
 	}
-	if len(sqlReceiveds) < 5 {
-		t.Skipf("fixture %s has only %d SQL receiveds (need >= 5)", fixture, len(sqlReceiveds))
+	if len(sqlReceiveds) < 6 {
+		t.Skipf("fixture %s has only %d SQL receiveds (need >= 6)", fixture, len(sqlReceiveds))
 	}
+	// PREPARE_DESCRIBE + OPEN_DESCRIBE_FETCH (carries all 1000 rows
+	// in one block-fetch buffer) + RPB DELETE. JT400's fetch/close
+	// signal in the OPEN reply means no continuation FETCH or
+	// CLOSE is needed.
 	conn := newFakeConn(
 		sqlReceiveds[3],
 		sqlReceiveds[4],
-		syntheticFetchEndReply(6),
-		syntheticCloseReply(7),
-		syntheticRPBDeleteReply(8),
+		sqlReceiveds[5],
 	)
 	res, err := SelectStaticSQL(conn,
 		"SELECT ID, NAME, AMOUNT FROM AFTRAEGE1.GOJTOPEN_T1 ORDER BY ID",
