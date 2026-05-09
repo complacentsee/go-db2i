@@ -127,5 +127,4 @@ have all landed.
 
 - BLOB/CLOB streaming (M7).
 - TLS sign-on / database (ports 9476 / 9471) (M7).
-- `bradfitz/go-sql-test` formal conformance run (M8).
 - `slog` integration / OpenTelemetry spans (M8).
