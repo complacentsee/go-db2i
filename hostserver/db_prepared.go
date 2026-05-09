@@ -41,6 +41,14 @@ type PreparedParam struct {
 	CCSID       uint16
 	ParamType   byte
 	Value       any
+	// DateFormat selects the wire format for SQLType 384/385 (DATE).
+	// Zero means "infer from FieldLength" (10 -> ISO, 8 -> YMD) for
+	// back-compat with callers that pre-date the format-aware bind
+	// path. Non-zero values are DateFormat* byte constants from
+	// db_attributes.go and must agree with FieldLength (10 for
+	// ISO/JIS/USA/EUR, 8 for MDY/DMY/YMD). Ignored for non-DATE
+	// SQL types.
+	DateFormat byte
 }
 
 // EncodeDBExtendedDataFormat builds the CP 0x381E payload (parameter
@@ -197,7 +205,7 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			if err != nil {
 				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
 			}
-			wire, err := encodeDateString(s, int(p.FieldLength))
+			wire, err := encodeDateForParam(s, int(p.FieldLength), p.DateFormat)
 			if err != nil {
 				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
 			}
@@ -691,6 +699,53 @@ func encodeDateString(s string, fieldLen int) (string, error) {
 		return encodeDateStringForFormat(s, DateFormatYMD)
 	default:
 		return "", fmt.Errorf("date FieldLength %d unsupported (need 8 YMD or 10 ISO)", fieldLen)
+	}
+}
+
+// encodeDateForParam is the bind-path entry point. It honours an
+// explicit format (so a USA-session prepared bind sends MM/DD/YYYY,
+// not ISO YYYY-MM-DD) while keeping the legacy length-only path
+// for callers that haven't been updated to set PreparedParam.DateFormat.
+//
+//   - format == 0:                infer from fieldLen via encodeDateString
+//     (back-compat).
+//   - format == DateFormatJOB:    same as 0 -- "let server pick"; we send
+//     ISO bytes which IBM i parses tolerantly under
+//     job-default formats. (Server's CP 0x3807 will be unset, so its
+//     job default applies.)
+//   - other DateFormat* values:   call encodeDateStringForFormat with
+//     a fieldLen sanity check (10 for ISO/JIS/USA/EUR, 8 for
+//     MDY/DMY/YMD).
+//
+// Mismatched format vs FieldLength is a programmer error and surfaces
+// before any bytes hit the wire.
+func encodeDateForParam(s string, fieldLen int, format byte) (string, error) {
+	if format == 0 || format == DateFormatJOB {
+		return encodeDateString(s, fieldLen)
+	}
+	wantLen := dateFormatWireLen(format)
+	if wantLen == 0 {
+		// Unknown format byte; surface an actionable error rather
+		// than silently truncating in encodeDateStringForFormat.
+		return "", fmt.Errorf("date format byte 0x%02X is not a recognised DateFormat* constant", format)
+	}
+	if fieldLen != wantLen {
+		return "", fmt.Errorf("date FieldLength %d disagrees with format 0x%02X (want %d)", fieldLen, format, wantLen)
+	}
+	return encodeDateStringForFormat(s, format)
+}
+
+// dateFormatWireLen returns the on-wire byte count for a DateFormat
+// constant. Zero for JOB / unknown -- callers treat zero as "no
+// constraint" and fall back to length-only behaviour.
+func dateFormatWireLen(format byte) int {
+	switch format {
+	case DateFormatISO, DateFormatJIS, DateFormatUSA, DateFormatEUR:
+		return 10
+	case DateFormatMDY, DateFormatDMY, DateFormatYMD:
+		return 8
+	default:
+		return 0
 	}
 }
 
