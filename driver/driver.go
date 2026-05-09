@@ -33,6 +33,23 @@
 //	             (matches IBM i Db2's autocommit-permissive baseline).
 //	             db.Begin() flips to *CS for the duration of the
 //	             transaction.
+//	lob          BLOB / CLOB / DBCLOB scan mode. One of materialise
+//	             (default; full content into []byte / string at Scan
+//	             time, fits the small-to-medium LOB common case) or
+//	             stream (returns *gojtopen.LOBReader -- an io.Reader
+//	             + io.Closer the caller drives via successive
+//	             RETRIEVE_LOB_DATA chunks). Stream mode is the only
+//	             way to handle multi-GB LOBs without exhausting Go
+//	             heap. Spelt either materialise or materialize.
+//	tls          true | false. Wraps both as-signon and as-database
+//	             sockets in crypto/tls. Default false; when true the
+//	             default ports flip to 9476 / 9471 (the IBM i SSL
+//	             host-server pair) unless the caller overrode them.
+//	tls-insecure-skip-verify  Disables server-cert verification.
+//	             Useful for self-signed IBM i certs that lack DNS
+//	             SANs; equivalent to JT400's setUseSSL with cert
+//	             validation off.
+//	tls-server-name  Overrides the SNI / cert-verify hostname.
 //
 // # Connection lifecycle
 //
@@ -179,6 +196,15 @@ type Config struct {
 	// a different name than the address you connect to (e.g. the
 	// short hostname vs the FQDN in DNS).
 	TLSServerName string
+
+	// LOBStream switches BLOB / CLOB / DBCLOB columns from the
+	// default "materialise on Scan" behaviour to the streaming
+	// LOBReader API. When true, Rows.Next writes a *LOBReader into
+	// the destination slot for LOB columns; callers must scan into
+	// **gojtopen.LOBReader and Read / Close it before advancing
+	// the row. The materialise default keeps existing callers
+	// working unchanged.
+	LOBStream bool
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -311,6 +337,16 @@ func parseDSN(dsn string) (*Config, error) {
 			cfg.Isolation = hostserver.IsolationSerializable
 		default:
 			return nil, fmt.Errorf("invalid isolation %q (want none|cs|all|rr|rs)", v)
+		}
+	}
+	if v := q.Get("lob"); v != "" {
+		switch strings.ToLower(v) {
+		case "materialise", "materialize":
+			cfg.LOBStream = false
+		case "stream":
+			cfg.LOBStream = true
+		default:
+			return nil, fmt.Errorf("invalid lob %q (want materialise|stream)", v)
 		}
 	}
 	return &cfg, nil

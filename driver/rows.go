@@ -92,18 +92,34 @@ func (r *Rows) Next(dest []driver.Value) error {
 			}
 			dest[i] = t
 		case 960, 961, 964, 965, 968, 969:
-			// BLOB / CLOB / DBCLOB locator. Materialise the full
-			// content via RETRIEVE_LOB_DATA. Streaming via io.Reader
-			// is documented as a follow-up; for now we read the
-			// entire LOB into memory at Scan time (matches the
-			// "small to medium LOB" common case and avoids exposing
-			// a different scan API to callers).
+			// BLOB / CLOB / DBCLOB locator. Default mode materialises
+			// the full content via RETRIEVE_LOB_DATA at Scan time.
+			// DSN `?lob=stream` flips this to the streaming path:
+			// the column slot becomes a *LOBReader the caller can
+			// Read incrementally. Multi-GB LOBs that would blow up
+			// memory in materialise mode flow through fine in
+			// stream mode.
 			loc, ok := v.(hostserver.LOBLocator)
 			if !ok {
 				dest[i] = v
 				continue
 			}
-			out, lerr := r.materialiseLOB(loc, i)
+			// Server expects 1-based column index per JT400's
+			// JDServerRow.newData call (the +1 there). Sending the
+			// 0-based Go index landed the locator on the wrong
+			// column server-side and produced SQL-818 (consistency
+			// tokens do not match) on V7R5+ targets.
+			lobColIdx := i + 1
+			if r.conn != nil && r.conn.cfg != nil && r.conn.cfg.LOBStream {
+				dest[i] = &LOBReader{
+					conn:      r.conn,
+					loc:       loc,
+					colIdx:    lobColIdx,
+					chunkSize: DefaultLOBChunkSize,
+				}
+				continue
+			}
+			out, lerr := r.materialiseLOB(loc, lobColIdx)
 			if lerr != nil {
 				return fmt.Errorf("gojtopen: col %d (%s, lob): %w", i, col.Name, lerr)
 			}
@@ -283,10 +299,19 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 		}
 		return reflect.TypeOf("")
 	case 960, 961:
-		// BLOB locator -- materialised as []byte by Next.
+		// BLOB locator. Default: materialised as []byte at Scan;
+		// `?lob=stream` returns a *LOBReader instead.
+		if r.conn != nil && r.conn.cfg != nil && r.conn.cfg.LOBStream {
+			return reflect.TypeOf((*LOBReader)(nil))
+		}
 		return reflect.TypeOf([]byte{})
 	case 964, 965, 968, 969:
-		// CLOB / DBCLOB locator -- materialised as string by Next.
+		// CLOB / DBCLOB locator. Default: materialised as string;
+		// `?lob=stream` returns a *LOBReader (caller transcodes
+		// per LOBReader.CCSID()).
+		if r.conn != nil && r.conn.cfg != nil && r.conn.cfg.LOBStream {
+			return reflect.TypeOf((*LOBReader)(nil))
+		}
 		return reflect.TypeOf("")
 	case 480, 481:
 		return reflect.TypeOf(float64(0))

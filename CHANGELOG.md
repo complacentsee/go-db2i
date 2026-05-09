@@ -6,10 +6,34 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
-0.5+ once `bradfitz/go-sql-test` conformance, TLS, and LOB streaming
-have all landed.
+0.5+ once LOB bind, slog observability, and OTel spans all land.
 
 ## [Unreleased]
+
+### Added
+
+- LOB streaming via `*gojtopen.LOBReader`. Opt in with the DSN
+  option `?lob=stream`; the default `materialise` mode (full LOB
+  into `[]byte` / `string` at Scan time) stays unchanged. `LOBReader`
+  satisfies `io.Reader` + `io.Closer` and pulls 32 KB chunks per
+  call via `RETRIEVE_LOB_DATA`. Lets callers process multi-GB LOBs
+  without exhausting Go heap, and exposes the column CCSID +
+  SQLType so callers can transcode (CLOB CCSID 273 → CCSID273
+  Decode, etc.). Wire-validated against PUB400 V7R5M0: 200-byte
+  BLOB streamed in 32 KB chunks; 700-char CLOB streamed and
+  decoded via `ebcdic.CCSID273`.
+
+### Fixed
+
+- LOB locator column index off-by-one — the driver passed the Go
+  0-based column index to `RETRIEVE_LOB_DATA` (CP `0x3828`) where
+  JT400's `JDServerRow.newData` uses 1-based (`i+1`). On V7R5+
+  targets this produced `SQL-818` ("consistency tokens do not
+  match") because the locator landed on the wrong column server-
+  side; the LOB SELECT path was therefore broken on PUB400 V7R5M0
+  even though the original validation against IBM Cloud V7R6M0
+  worked. Both materialise and the new stream paths now wire-
+  validate clean on V7R5M0.
 
 ### Changed
 
@@ -125,6 +149,8 @@ have all landed.
 
 ### Limitations / not yet implemented
 
-- BLOB/CLOB streaming (M7).
+- LOB bind on parameter markers (writing large LOBs as INSERT /
+  UPDATE values via `?` placeholders). Inline literals
+  (`X'...'`, string literals) still work for small LOBs.
 - TLS sign-on / database (ports 9476 / 9471) (M7).
 - `slog` integration / OpenTelemetry spans (M8).

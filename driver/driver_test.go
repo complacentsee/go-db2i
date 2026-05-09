@@ -110,6 +110,7 @@ func TestParseDSNRejectsBadInputs(t *testing.T) {
 		"bad date format":  "gojtopen://u:p@h/?date=bogus",
 		"bad isolation":    "gojtopen://u:p@h/?isolation=bogus",
 		"bad signon-port":  "gojtopen://u:p@h/?signon-port=notanumber",
+		"bad lob mode":     "gojtopen://u:p@h/?lob=bogus",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -242,5 +243,37 @@ func TestParseDSNTLSBoolAliases(t *testing.T) {
 func TestParseDSNTLSRejectsBogus(t *testing.T) {
 	if _, err := parseDSN("gojtopen://u:p@h/?tls=notabool"); err == nil {
 		t.Fatal("expected error for tls=notabool, got nil")
+	}
+}
+
+// TestParseDSNLOBMode covers the lob= DSN key. Default (key absent)
+// is materialise; lob=stream flips to the LOBReader path; both
+// "materialise" and "materialize" spellings are accepted to keep
+// US/UK spelling debates out of failing tests.
+func TestParseDSNLOBMode(t *testing.T) {
+	t.Run("default is materialise", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.LOBStream {
+			t.Error("LOBStream = true, want false (default)")
+		}
+	})
+	cases := map[string]bool{
+		"materialise": false,
+		"materialize": false,
+		"stream":      true,
+	}
+	for v, want := range cases {
+		t.Run("lob="+v, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?lob=" + v)
+			if err != nil {
+				t.Fatalf("parseDSN: %v", err)
+			}
+			if cfg.LOBStream != want {
+				t.Errorf("lob=%s -> LOBStream=%v, want %v", v, cfg.LOBStream, want)
+			}
+		})
 	}
 }

@@ -515,8 +515,17 @@ fresh connection.
 
 - BLOB/CLOB handling via the host-server's chunked-data path
   (DBLobLocator-equivalent).
+  - **LOB SELECT (materialise)** — landed via commit `c11e2f1`,
+    fixed for V7R5+ (column-index off-by-one, SQL-818) on
+    2026-05-09.
+  - **LOB SELECT (streaming)** — landed 2026-05-09 via the DSN
+    option `?lob=stream` and `*gojtopen.LOBReader`. Wire-validated
+    on PUB400 V7R5M0 (200-byte BLOB chunked, 700-char CCSID-273
+    CLOB streamed and EBCDIC-decoded).
+  - **LOB bind** — INSERT / UPDATE of large LOBs via `?`
+    placeholders is still TODO. Inline literals work today.
 - SQLCA → typed `*Db2Error{SQLState, SQLCode, Message, Tokens}`
-  with substitution.
+  with substitution. Landed in M6 (`d0ba583`).
 - Connection-level CCSID negotiation. Distinguish the SQL-statement
   CCSID from the application-data CCSID.
 
