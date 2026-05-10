@@ -126,7 +126,7 @@ func parseExtendedResultData(data []byte, cols []SelectColumn, vlfCompressed boo
 			return nil, fmt.Errorf("hostserver: row info array entry %d overruns result data", i)
 		}
 		rowOff := rowInfoHeaderStart + int(be.Uint32(data[offEntry:offEntry+4]))
-		row, _, err := decodeRow(data[rowOff:], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize)
+		row, _, err := decodeRow(data[rowOff:], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize, false)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", i, err)
 		}
@@ -148,7 +148,7 @@ func parseNonVLF(rowsBytes []byte, cols []SelectColumn, indicators []byte, indic
 			return nil, fmt.Errorf("non-VLF row %d (offset %d..%d) overruns row block (%d bytes)", i, start, end, len(rowsBytes))
 		}
 		colCount := len(cols)
-		row, _, err := decodeRow(rowsBytes[start:end], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize)
+		row, _, err := decodeRow(rowsBytes[start:end], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize, true)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", i, err)
 		}
@@ -159,13 +159,32 @@ func parseNonVLF(rowsBytes []byte, cols []SelectColumn, indicators []byte, indic
 
 // decodeRow walks the column descriptors in order, slicing bytes
 // off the start of rowBytes per column. Returns the populated row
-// plus the number of bytes consumed (so the caller can advance to
-// the next row in non-VLF layouts).
-func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicatorSize int) (SelectRow, int, error) {
+// plus the number of bytes consumed.
+//
+// fixedSlots picks how to advance the per-column offset:
+//
+//   - true  — non-VLF layout. Each column occupies exactly its
+//     declared wire-slot width (col.wireLength()), with shorter
+//     payloads padded out (EBCDIC space 0x40 for char types, zero
+//     for binary). Live-confirmed against IBM i V7R6M0 returning
+//     `SELECT AUTHORIZATION_NAME, STATUS FROM QSYS2.USER_INFO`,
+//     where each VARCHAR(10) slot is 12 bytes wide regardless of
+//     the actual string length and the second column's offset is
+//     deterministic from the first column's slot, not its content.
+//   - false — VLF-compressed layout. Each column occupies only
+//     `2 + actualLen` bytes (no padding); decodeColumn's returned
+//     consumed-byte count is what advances `off`.
+//
+// Pre-fix this function always advanced by decodeColumn's return
+// value, which silently under-advanced on non-VLF VARCHARs whose
+// content was shorter than the declared slot, sliding subsequent
+// columns into the previous slot's padding.
+func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicatorSize int, fixedSlots bool) (SelectRow, int, error) {
 	row := make(SelectRow, len(cols))
 	off := 0
 	be := binary.BigEndian
 	for i, col := range cols {
+		slotWidth := int(col.wireLength())
 		// NULL indicator -- if non-zero, the column value is NULL.
 		// JTOpen treats indicator -1 (0xFFFF) as null; some servers
 		// use -2 (default). Anything non-zero we treat as null.
@@ -176,7 +195,7 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 		}
 		if isNull {
 			row[i] = nil
-			off += int(col.wireLength())
+			off += slotWidth
 			continue
 		}
 		val, n, err := decodeColumn(rowBytes[off:], col)
@@ -184,19 +203,26 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 			return nil, 0, fmt.Errorf("column %d (%q, sql_type=%d): %w", i, col.Name, col.SQLType, err)
 		}
 		row[i] = val
-		off += n
+		if fixedSlots {
+			off += slotWidth
+		} else {
+			off += n
+		}
 	}
 	return row, off, nil
 }
 
-// wireLength returns the column's max wire length per its SQL type.
-// For most types this matches col.Length; for VARCHAR it adds the
-// 2-byte length prefix.
+// wireLength returns the column's wire-slot width (the byte count
+// the row-data block reserves for this column in non-VLF layouts).
+//
+// SuperExtended data format already reports the *full* slot width
+// including any SL prefix at offset+4..+7 of the per-field record,
+// so we return col.Length verbatim. The earlier `c.Length + 2`
+// branch for VARCHAR was wrong: PUB400 V7R5M0 and IBM i V7R6M0
+// both report e.g. 12 for a VARCHAR(10), where the 12 already
+// counts the 2 SL bytes. The pre-fix wireLength would have null-
+// skipped 14 bytes and shifted every subsequent column by 2.
 func (c SelectColumn) wireLength() uint32 {
-	switch c.SQLType {
-	case SQLTypeVarChar, 449, SQLTypeVarCharNonBlank, 457:
-		return c.Length + 2
-	}
 	return c.Length
 }
 
