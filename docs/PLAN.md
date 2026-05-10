@@ -152,8 +152,13 @@ connections and prints info from both.
   emits a one-shot stderr warning on first use. Given the PBKDF2
   experience, expect a similar spec-vs-implementation gap to
   surface here too if a real legacy server is ever found.
-- **`signon.go:318` TODO** — error-class wrapping in the sign-on
-  reply parser. Inline; ~15 lines when revisited.
+- **`signon.go:318` TODO** — ✅ already closed (stale PLAN note).
+  Typed `*hostserver.SignonError` with `Category()` / `Subcode()`
+  accessors and an `Unwrap()` chain to sentinel errors
+  (`ErrPasswordIncorrect`, `ErrUserIDUnknown`, `ErrPasswordExpired`,
+  …) lives in `hostserver/signon_errors.go`; `wrapSignonRC(rc)` is
+  the one-line callsite helper. The line-318 comment in `signon.go`
+  just documents the existing type. No action needed.
 - **TLS sign-on / database (ports 9476 / 9471)** — ✅ live-validated
   2026-05-10 against IBM Cloud V7R6M0. Self-signed cert issued via
   DCM (`*SYSTEM` store, signed by a Local CA generated in the same
