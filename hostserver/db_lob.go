@@ -138,21 +138,20 @@ func RetrieveLOBData(conn io.ReadWriter, handle uint32, offset, size int64, colu
 		size = 0x7FFFFFFF
 	}
 	tpl := DBRequestTemplate{
-		// ReturnData + ResultData. The RLE-on-reply bit
-		// (0x00040000 = ORS_BITMAP_REPLY_RLE_COMPRESSION per JT400)
-		// is intentionally NOT set: enabling it on V7R6 caused the
-		// server to wrap the entire reply in CP 0x3832 (the
-		// whole-datastream RLE wrapper, distinct from per-CP RLE),
-		// which our parseDBReply doesn't unwrap. The decompressor
-		// (decompressRLE1) and parseLOBReply's per-CP RLE handling
-		// landed in M7-7 as the foundation for whole-datastream
-		// RLE; turning the bit back on requires the CP 0x3832
-		// reader to land first. See docs/lob-known-gaps.md §4 for
-		// the residual work.
+		// ReturnData + ResultData + RLE-on-reply
+		// (0x00040000 = ORS_BITMAP_REPLY_RLE_COMPRESSION per JT400).
+		// The server is free to skip compression on incompressible
+		// data, and ParseDBReply now unwraps the whole-datastream CP
+		// 0x3832 wrapper when the template's compression marker is
+		// set. Highly compressible LOBs (constant-content BLOBs,
+		// JSON / XML with repeating structure) shrink dramatically
+		// on the wire; mixed-entropy LOBs pay no per-byte cost
+		// because the server skips RLE entirely when it wouldn't
+		// help.
 		//
 		// SQLCA omitted -- locator retrieval is straight wire data,
 		// no statement-level error machinery to surface.
-		ORSBitmap:                 ORSReturnData | ORSResultData,
+		ORSBitmap:                 ORSReturnData | ORSResultData | 0x00040000,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -665,11 +664,16 @@ func encodeUCS2BEStrict(s string) ([]byte, error) {
 // the on-wire payload is shorter than the declared `actualLen`.
 const rleEscapeByte = 0x1B
 
-// decompressRLE1 expands an RLE-1 encoded byte stream into a
+// decompressRLE1 expands a per-CP RLE-1 encoded byte stream into a
 // pre-allocated buffer of `expectedLen` bytes. Mirrors
 // JDUtilities.decompress in JT400 byte-for-byte. Returns an error if
 // the input is malformed (escape byte at end without a payload, or
 // run length that overflows the destination).
+//
+// This is the per-CP variant used inside CP 0x380F (LOB Data)
+// payloads; the whole-datastream wrapper CP 0x3832 uses a different
+// run format (2-byte pattern + 2-byte BE count, total 5 bytes per
+// record) -- see decompressDataStreamRLE.
 //
 // `expectedLen` is the uncompressed byte count parseLOBReply derived
 // from the CP header (with the graphic-LOB doubling already
@@ -723,6 +727,70 @@ func decompressRLE1(src []byte, expectedLen int) ([]byte, error) {
 		}
 		j += count
 		i += 6
+	}
+	return out[:j], nil
+}
+
+// decompressDataStreamRLE expands the whole-datastream RLE-1 wrapper
+// CP 0x3832 carries. Mirrors JT400's DataStreamCompression
+// decompressRLEInternal byte-for-byte:
+//
+//	literal byte       -> emit byte, advance 1
+//	0x1B 0x1B          -> emit one literal 0x1B, advance 2
+//	0x1B b1 b2 count   -> emit (b1, b2) repeated `count` times
+//	                      (2*count bytes), advance 5; count is BE uint16
+//
+// The repeater writes 2 bytes per iteration -- distinct from the
+// per-CP RLE-1 which writes 1 byte per iteration with a 4-byte
+// BE count. Output is sliced to actual decompressed length; the
+// preallocated buffer matches the wrapper's declared
+// decompressed-length field.
+func decompressDataStreamRLE(src []byte, expectedLen int) ([]byte, error) {
+	if expectedLen < 0 {
+		return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: negative expectedLen %d", expectedLen)
+	}
+	out := make([]byte, expectedLen)
+	j := 0
+	for i := 0; i < len(src); {
+		if src[i] != rleEscapeByte {
+			if j >= len(out) {
+				return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: output overflow (literal at src[%d], dst index %d, expected %d bytes)", i, j, expectedLen)
+			}
+			out[j] = src[i]
+			i++
+			j++
+			continue
+		}
+		// Escape sequence -- need at least one trailing byte.
+		if i+1 >= len(src) {
+			return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: truncated escape at src[%d] (need >= 2 bytes)", i)
+		}
+		if src[i+1] == rleEscapeByte {
+			if j >= len(out) {
+				return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: output overflow (escaped 0x1B at src[%d], dst index %d, expected %d)", i, j, expectedLen)
+			}
+			out[j] = rleEscapeByte
+			i += 2
+			j++
+			continue
+		}
+		// Repeater: 0x1B byte1 byte2 count_BE_uint16 -- 5 bytes total.
+		// Emits 2*count bytes (byte1, byte2 pairs).
+		if i+5 > len(src) {
+			return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: truncated repeater header at src[%d] (need 5 bytes, have %d)", i, len(src)-i)
+		}
+		b1 := src[i+1]
+		b2 := src[i+2]
+		count := int(binary.BigEndian.Uint16(src[i+3 : i+5]))
+		if j+2*count > len(out) {
+			return nil, fmt.Errorf("hostserver: decompressDataStreamRLE: repeater overflow (count=%d at src[%d], dst index %d, expected %d)", count, i, j, expectedLen)
+		}
+		for k := 0; k < count; k++ {
+			out[j] = b1
+			out[j+1] = b2
+			j += 2
+		}
+		i += 5
 	}
 	return out[:j], nil
 }

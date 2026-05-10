@@ -276,3 +276,81 @@ func TestParseLOBReply_GraphicLOBCharCount(t *testing.T) {
 		t.Errorf("graphic raw passthrough mismatch (got %d bytes, want %d)", len(out.Bytes), len(payload))
 	}
 }
+
+// TestDecompressDataStreamRLE_RoundTrip covers the whole-datastream
+// RLE-1 wire format used inside CP 0x3832: 1-byte escape + 2-byte
+// pattern + 2-byte BE count = 5-byte record, emits 2*count bytes
+// per repeater. Distinct from the per-CP RLE-1 (6-byte record,
+// 1-byte value, 4-byte BE count) in decompressRLE1.
+func TestDecompressDataStreamRLE_RoundTrip(t *testing.T) {
+	t.Run("passthrough literals", func(t *testing.T) {
+		src := []byte("hello world, IBM i!")
+		got, err := decompressDataStreamRLE(src, len(src))
+		if err != nil {
+			t.Fatalf("decompressDataStreamRLE: %v", err)
+		}
+		if !bytes.Equal(got, src) {
+			t.Errorf("got %q, want %q", got, src)
+		}
+	})
+
+	t.Run("escaped 0x1B", func(t *testing.T) {
+		// 0x1B 0x1B -> one literal 0x1B
+		src := []byte{0x1B, 0x1B, 0x41, 0x1B, 0x1B}
+		want := []byte{0x1B, 0x41, 0x1B}
+		got, err := decompressDataStreamRLE(src, len(want))
+		if err != nil {
+			t.Fatalf("decompressDataStreamRLE: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("got %x, want %x", got, want)
+		}
+	})
+
+	t.Run("repeater of 0xCC 0xCC × 2048 -> 4096 bytes", func(t *testing.T) {
+		// 4 KiB of 0xCC encoded as one repeater (b1=0xCC b2=0xCC,
+		// count=2048): emits 2*2048 = 4096 bytes total.
+		src := []byte{rleEscapeByte, 0xCC, 0xCC, 0x08, 0x00} // count = 0x0800 = 2048
+		want := bytes.Repeat([]byte{0xCC}, 4096)
+		got, err := decompressDataStreamRLE(src, 4096)
+		if err != nil {
+			t.Fatalf("decompressDataStreamRLE: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("4 KiB run mismatch: got %d bytes (first %x...), want %d bytes",
+				len(got), got[:8], len(want))
+		}
+		// Compression ratio sanity: 5 wire bytes -> 4096 decompressed.
+		if len(src) > 8 {
+			t.Errorf("encoded src grew to %d bytes (want ~5)", len(src))
+		}
+	})
+
+	t.Run("zero-pattern fast path", func(t *testing.T) {
+		// JT400 fast-paths zero-byte runs with the same record form.
+		src := []byte{rleEscapeByte, 0x00, 0x00, 0x00, 0x10} // count = 16
+		want := make([]byte, 32) // 16 × 2 = 32 zero bytes
+		got, err := decompressDataStreamRLE(src, 32)
+		if err != nil {
+			t.Fatalf("decompressDataStreamRLE: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("zero-fill mismatch: got %x, want %x", got, want)
+		}
+	})
+
+	t.Run("truncated repeater header", func(t *testing.T) {
+		// 0x1B followed by only 3 bytes -- need 5 total.
+		src := []byte{rleEscapeByte, 0xAA, 0xBB, 0x00}
+		if _, err := decompressDataStreamRLE(src, 100); err == nil {
+			t.Fatal("expected error on truncated repeater, got nil")
+		}
+	})
+
+	t.Run("overflow output", func(t *testing.T) {
+		src := []byte{rleEscapeByte, 0xAA, 0xBB, 0x00, 0x05} // count=5 -> 10 bytes
+		if _, err := decompressDataStreamRLE(src, 4); err == nil {
+			t.Fatal("expected overflow error, got nil")
+		}
+	})
+}

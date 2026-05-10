@@ -48,7 +48,22 @@ const (
 	cpDBResultData         uint16 = 0x3806
 	cpDBSQLCA              uint16 = 0x3807
 	cpDBParameterMarkerFmt uint16 = 0x3808
+	// cpDBDataCompressionRLE wraps the entire post-template parameter
+	// list of a 0x2800 reply when the server applied whole-datastream
+	// RLE-1 compression. The wrapper carries a 4-byte
+	// decompressed-length header followed by the RLE-1 compressed
+	// bytes that, once expanded, form the original LL/CP/data
+	// parameter stream the reply would have shipped uncompressed.
+	// Mirrors JT400's AS400JDBCConnectionImpl.DATA_COMPRESSION_RLE_.
+	cpDBDataCompressionRLE uint16 = 0x3832
 )
+
+// dataCompressedMask is the high bit of the 32-bit word at template
+// offset 4 (full-frame offset 24 in JT400's DBBaseReplyDS.parse).
+// When set, the post-template payload is wrapped in CP
+// cpDBDataCompressionRLE and ParseDBReply must unwrap before walking
+// the parameter list.
+const dataCompressedMask uint32 = 0x80000000
 
 // DBReply is the parsed shell of a 0x2800 reply. ErrorClass /
 // ReturnCode are the SQLCA-style status word from the template;
@@ -90,12 +105,26 @@ func (r *DBReply) VLFCompressed() bool {
 // relevant to the function they invoked. Unknown CPs are kept
 // (rather than skipped) so debugging tools can dump the full
 // reply if needed.
+//
+// Whole-datastream RLE-1 compression (template's high bit of the
+// 32-bit word at offset 4) is unwrapped transparently: when the
+// post-template payload arrives as a single CP 0x3832 wrapper, the
+// helper decompresses its inner bytes and walks the resulting
+// LL/CP/data stream as if it had arrived uncompressed. Mirrors
+// JT400's DBBaseReplyDS.parse rleCompressed_ path.
 func ParseDBReply(payload []byte) (*DBReply, error) {
 	const tplLen = 20
 	if len(payload) < tplLen {
 		return nil, fmt.Errorf("hostserver: db reply too short: %d bytes (want >= %d)", len(payload), tplLen)
 	}
 	be := binary.BigEndian
+	if be.Uint32(payload[4:8])&dataCompressedMask != 0 {
+		var err error
+		payload, err = unwrapCompressedReply(payload)
+		if err != nil {
+			return nil, err
+		}
+	}
 	rep := &DBReply{
 		// Template offsets within the 20-byte template:
 		//   0..3   ORS bitmap echoed
@@ -121,6 +150,58 @@ func ParseDBReply(payload []byte) (*DBReply, error) {
 		pos += int(ll)
 	}
 	return rep, nil
+}
+
+// unwrapCompressedReply inflates a payload that arrived with the
+// whole-datastream RLE-1 wrapper. Returns a new payload whose
+// post-template bytes are the decompressed parameter stream the
+// uncompressed reply would have shipped. The 20-byte template is
+// copied through unchanged; only the high compression bit is left
+// set in template[4:8] (callers don't read those bytes -- the bit
+// is a wire-level marker, not user-visible state).
+//
+// Wire format of the wrapped payload (offsets from payload start):
+//
+//	0..19  Reply template (high bit of payload[4:8] set)
+//	20..23 ll  (compressed payload length + 10) -- informational only
+//	24..25 CP  (cpDBDataCompressionRLE / 0x3832)
+//	26..29 Decompressed length of the inner parameter stream
+//	30..   RLE-1 compressed parameter stream, runs to end of payload
+//
+// The inner LL field is informational; JT400's DBBaseReplyDS.parse
+// ignores it and feeds the decompressor everything from full-frame
+// offset 50 to the end of the frame -- which in our payload world
+// is payload[30:]. We mirror that here. Returns an error if the high
+// bit is set but the first parameter isn't CP 0x3832, matching
+// JT400's IOException when the compression scheme CP is anything
+// other than DATA_COMPRESSION_RLE_.
+func unwrapCompressedReply(payload []byte) ([]byte, error) {
+	const (
+		tplLen         = 20
+		wrapHdrLen     = 10 // ll(4) + CP(2) + decompressed_len(4)
+		minWrapPayload = tplLen + wrapHdrLen
+	)
+	if len(payload) < minWrapPayload {
+		return nil, fmt.Errorf("hostserver: compressed reply too short: %d bytes (want >= %d)", len(payload), minWrapPayload)
+	}
+	be := binary.BigEndian
+	cp := be.Uint16(payload[tplLen+4 : tplLen+6])
+	if cp != cpDBDataCompressionRLE {
+		return nil, fmt.Errorf("hostserver: compressed reply CP 0x%04X (want 0x%04X)", cp, cpDBDataCompressionRLE)
+	}
+	decompressedLen := int(be.Uint32(payload[tplLen+6 : tplLen+10]))
+	compressed := payload[tplLen+wrapHdrLen:]
+	decompressed, err := decompressDataStreamRLE(compressed, decompressedLen)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: decompress reply payload (wire=%d expected=%d): %w", len(compressed), decompressedLen, err)
+	}
+	if len(decompressed) != decompressedLen {
+		return nil, fmt.Errorf("hostserver: decompress reply short (got %d, want %d)", len(decompressed), decompressedLen)
+	}
+	out := make([]byte, tplLen+len(decompressed))
+	copy(out, payload[:tplLen])
+	copy(out[tplLen:], decompressed)
+	return out, nil
 }
 
 // ServerAttributes is the parsed form of a 0x3804 CP payload --

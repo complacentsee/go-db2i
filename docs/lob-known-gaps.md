@@ -163,62 +163,63 @@ result-data column-decoder dispatch to recognise the inline-CLOB
 shape and decode through `decodeLOBChars`. Tracked alongside M7-5
 because the bind-side re-prepare path needs the same trace.
 
-## 4. RLE decompression on RETRIEVE_LOB_DATA (PARTIAL, M7-7)
+## 4. RLE decompression on RETRIEVE_LOB_DATA (CLOSED, M7-7)
 
-**Status.** Decompressor + per-CP RLE plumbing landed in M7-7;
-the request-side bit (`0x00040000`) stays OFF until the
-whole-datastream wrapper (CP `0x3832`) is implemented. The
-remaining work is a parser-layer change, not a wire-format
-discovery.
+**Status.** Both halves landed.
 
-**What landed (M7-7).**
+**M7-7 partial (commit `f288b31`).**
 - `decompressRLE1` in `hostserver/db_lob.go` — Go port of
-  JT400's `JDUtilities.decompress`. RLE-1 wire format
-  (`0x1B value count(4)` runs + `0x1B 0x1B` escaped literals)
-  fully covered by offline tests in `db_lob_rle_test.go`,
-  including the 4 KiB and 1 MiB constant-content cases that
-  motivated the original gap.
-- `parseLOBReply` now reads the CP 0x380F header's `actualLen`
+  JT400's `JDUtilities.decompress`. Per-CP RLE-1 wire format
+  (`0x1B value count(4)` runs + `0x1B 0x1B` escaped literals,
+  6-byte record).
+- `parseLOBReply` reads the CP 0x380F header's `actualLen`
   field and routes payloads where `len(payload) != actualLen`
-  through the decompressor. This is the per-CP RLE path JT400
-  reaches via `DBLobData(actualLength, physicalLength,
-  oldCompressed)`. Graphic-LOB length doubling (CCSID 13488 /
-  1200) is handled.
+  through the decompressor. Graphic-LOB length doubling
+  (CCSID 13488 / 1200) is handled.
 
-**What's deferred.** Re-enabling the request-side RLE bit on
-`RetrieveLOBData` makes the V7R6 server wrap the *entire reply*
-in CP `0x3832` (the `DATA_COMPRESSION_RLE_` code point per
-JT400's `AS400JDBCConnection`), not the per-CP shape M7-7's
-`parseLOBReply` is wired for. CP `0x3832` carries:
+**M7-7 residual.** Re-enabled the request-side RLE bit
+(`0x00040000`) on `RetrieveLOBData`. The V7R6 server now wraps
+the entire reply in CP `0x3832` whenever it judges compression
+worthwhile; `ParseDBReply` unwraps transparently.
 
-```
-  4 bytes ll          (compressed payload length + 10)
-  2 bytes CP          (0x3832)
-  4 bytes decompLen   (uncompressed payload length)
-  ll-10 bytes payload (RLE-1 compressed)
-```
+The whole-datastream wrapper uses a **different RLE format**
+than the per-CP variant we landed in M7-7 partial. JT400
+sources confirm:
+- Per-CP RLE-1 (`JDUtilities.decompress`): 6-byte record
+  `0x1B value count(4_BE)`, emits `count` bytes.
+- Whole-datastream RLE-1 (`DataStreamCompression.decompressRLEInternal`):
+  5-byte record `0x1B pattern_b1 pattern_b2 count(2_BE)`,
+  emits `2*count` bytes (2-byte pattern × count iterations).
 
-After decompression the bytes form the *original* CP-formatted
-reply (CP `0x380F` plus any companion CPs). To re-enable the
-bit safely, `ParseDBReply` (or a wrapper) needs to:
-1. Detect `dataCompressed = (template[4] & 0x80) != 0` on the
-   reply (matches JT400's `DBBaseReplyDS.parse` check).
-2. When set, find the CP `0x3832` block, decompress its payload
-   via `decompressRLE1`, and re-feed the decompressed bytes to
-   `ParseDBReply` so downstream parameter walks see CP `0x380F`
-   normally.
+New `decompressDataStreamRLE` in `hostserver/db_lob.go`
+implements the whole-datastream form; `ParseDBReply` checks
+`payload[4:8] & 0x80000000` (the JT400 `dataCompressed` bit)
+and unwraps the CP `0x3832` parameter before walking the
+parameter list. Offline coverage:
+- `TestDecompressDataStreamRLE_RoundTrip/*` — passthrough,
+  escaped 0x1B, 4 KiB constant-content run, zero-pattern fast
+  path, truncated repeater, overflow.
+- `TestParseDBReplyUnwrapsCP3832` — end-to-end synthetic
+  wrapped reply with CP 0x380F + CP 0x3810 inner params; the
+  decoded `DBReply.Params` byte-match the uncompressed
+  equivalent.
 
-**Workaround.** None needed for correctness; LOB reads work
-without compression. Repetitive-content workloads see a
-bandwidth ceiling, not a correctness one.
+**Live evidence (V7R6M0, 2026-05-10).** 1 MiB constant-content
+0xCC BLOB round-trip via `stress-test/rlemeasure`:
 
-**Verification once enabled.** Round-trip a 1 MiB BLOB of
-identical bytes on the wire (capture with `wiredump`) — wire
-bytes should drop from ~1 MiB to under 100 bytes when
-compression activates. Existing offline test
-`TestParseLOBReply_RLECompressed4KOfCC` already pins the
-per-CP path; add a CP `0x3832` whole-datastream replay test
-when the parser change lands.
+| metric                          | value                |
+|---------------------------------|----------------------|
+| payload (decompressed)          | 1,048,576 bytes      |
+| `rx_bytes` diff on eth0         | **1,228 bytes**      |
+| SELECT wall time                | 18.5 ms              |
+| compression ratio (upper bound) | ~854× shrink         |
+
+The `rx_bytes` diff includes TCP/IP headers and the request
+side of the round trip, so the actual compressed CP `0x3832`
+payload is well under 1 KiB for a 1 MiB constant-content LOB.
+`TestLOBMultiRow` (4 KiB 0xCC BLOBs × 5 rows) is the
+regression gate — pre-fix it failed with a truncated-RLE
+error against the per-CP decompressor; post-fix it PASSes.
 
 ---
 

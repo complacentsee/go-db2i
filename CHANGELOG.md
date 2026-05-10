@@ -51,6 +51,34 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M7-7 RETRIEVE_LOB_DATA RLE compression re-enabled end-to-end on
+  V7R6M0. The request-side bit (`0x00040000`) on
+  `RetrieveLOBData` now stays ON; `ParseDBReply` transparently
+  unwraps the resulting whole-datastream CP `0x3832` wrapper by
+  checking the `dataCompressed` marker (high bit of the 32-bit
+  word at template offset 4, matching JT400's
+  `DBBaseReplyDS.parse`). The wrapper uses a **different RLE
+  format** than the per-CP RLE-1 M7-7 partial shipped: 5-byte
+  record (escape + 2-byte pattern + 2-byte BE count, emits
+  2×count bytes per iteration) vs the per-CP form's 6-byte
+  record (escape + 1-byte value + 4-byte BE count, emits count
+  bytes). New `decompressDataStreamRLE` in
+  `hostserver/db_lob.go` mirrors JT400's
+  `DataStreamCompression.decompressRLEInternal` byte-for-byte.
+  Offline coverage: `TestDecompressDataStreamRLE_RoundTrip/*`
+  (passthrough, escaped 0x1B, 4 KiB run, zero-pattern fast path,
+  truncated, overflow) and `TestParseDBReplyUnwrapsCP3832`
+  (end-to-end synthetic wrapped reply with two inner params,
+  byte-matches the uncompressed equivalent). Live evidence on
+  V7R6M0 via `stress-test/rlemeasure`: 1 MiB constant-content
+  0xCC BLOB SELECT shrinks `rx_bytes` from ~1 MiB to **1,228
+  bytes wire** (~854× upper-bound compression ratio). The 4 KiB
+  0xCC `TestLOBMultiRow` regression that surfaced when the bit
+  was first re-enabled (per-CP decompressor reading
+  whole-datastream bytes -> "truncated run header" parse
+  error) is now the regression gate. Closes
+  `docs/lob-known-gaps.md` §4.
+
 - M7-4 TLS sign-on / database live-validated end-to-end against
   IBM Cloud V7R6M0. The DSN-level scaffolding (`tls=true`,
   `tls-insecure-skip-verify`, `tls-server-name`, default-port flip to
