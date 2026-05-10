@@ -195,7 +195,25 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 		}
 		if isNull {
 			row[i] = nil
-			off += slotWidth
+			// Advance off by the column's on-wire footprint:
+			//
+			//   - non-VLF (fixedSlots=true): col.Length, the full
+			//     declared slot, regardless of null. The slot is
+			//     present and zero/space padded.
+			//
+			//   - VLF (fixedSlots=false): JT400's
+			//     JDServerRow.setRowIndex (the @K54 VLF branch)
+			//     advances by `2 + SL_value` for VARCHAR-like and
+			//     `serverFormat_.getFieldLength(j)` for fixed types,
+			//     regardless of null indicator. For null VARCHAR the
+			//     SL is zero and the column footprint is exactly 2
+			//     bytes; for null fixed-length columns the slot is
+			//     still col.Length bytes wide. Pre-fix we always
+			//     advanced by col.Length here, which on a null
+			//     VARCHAR(50) column tried to skip 52 bytes of an
+			//     8-byte VLF row and panicked
+			//     ("slice bounds out of range [52:12]").
+			off += nullSkipWidth(col, fixedSlots)
 			continue
 		}
 		val, n, err := decodeColumn(rowBytes[off:], col)
@@ -210,6 +228,42 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 		}
 	}
 	return row, off, nil
+}
+
+// nullSkipWidth returns how many bytes to advance past a null column
+// in the row-data block. Non-VLF reserves the full slot
+// (col.Length); VLF compresses VARCHAR-like null columns down to
+// just their 2-byte SL prefix while leaving fixed-length null slots
+// at col.Length. Mirrors JT400's JDServerRow.setRowIndex VLF branch.
+func nullSkipWidth(col SelectColumn, fixedSlots bool) int {
+	if fixedSlots {
+		return int(col.wireLength())
+	}
+	if isVarLengthSQLType(col.SQLType) {
+		return 2
+	}
+	return int(col.wireLength())
+}
+
+// isVarLengthSQLType reports whether the IBM i SQL type code uses a
+// 2-byte length prefix on the wire (i.e. a VARCHAR-family type). The
+// list mirrors the case labels in JT400's JDServerRow.setRowIndex
+// VLF branch (VARCHAR, VARCHAR_FOR_BIT_DATA, LONG_VARCHAR,
+// LONG_VARCHAR_FOR_BIT_DATA, VARBINARY, DATALINK, VARGRAPHIC,
+// LONG_VARGRAPHIC, NVARCHAR, LONG_NVARCHAR) translated to the
+// IBM i wire SQL type numbers (NN/nullable pairs).
+func isVarLengthSQLType(sqlType uint16) bool {
+	switch sqlType {
+	case 448, 449, // VARCHAR
+		456, 457, // VARCHAR_FOR_BIT_DATA / LONG_VARCHAR (NN/nullable)
+		460, 461, // LONG_VARCHAR_FOR_BIT_DATA
+		464, 465, // VARGRAPHIC / LONG_VARGRAPHIC
+		468, 469, // graphic family
+		472, 473, // VARBINARY family
+		908, 909: // DATALINK
+		return true
+	}
+	return false
 }
 
 // wireLength returns the column's wire-slot width (the byte count
