@@ -136,21 +136,46 @@ func (r *Rows) Next(dest []driver.Value) error {
 // columns return []byte; CLOB / DBCLOB return string after
 // transcoding from the wire CCSID.
 //
-// For now we issue a single RETRIEVE call that asks for up to 2 GB
-// (the IBM i wire-format max) and rely on the server to honour the
-// LOB's actual length. Genuinely huge LOBs that exceed memory
-// should use the (deferred) streaming Read API once landed.
+// BLOB / CLOB use a single-shot retrieve with a 2-GiB ceiling --
+// IBM i caps the requested size at int32 and honours the LOB's
+// actual length on top of that. DBCLOB uses a two-step fetch
+// (probe with size 0 to learn the current length, then request
+// that many characters) because requesting 2 GiB on a graphic LOB
+// returns SQL-807: the server tries a CCSID conversion sized off
+// the requested length, not the actual length, and chokes.
 func (r *Rows) materialiseLOB(loc hostserver.LOBLocator, colIdx int) (any, error) {
 	if r.conn == nil {
 		return nil, fmt.Errorf("rows has no connection (offline test path?)")
 	}
 	const maxRequest = int64(0x7FFFFFFF) // server caps at int32
+
+	graphic := loc.SQLType == 968 || loc.SQLType == 969
+	wantBytes := maxRequest
+	if graphic {
+		probe, err := hostserver.RetrieveLOBData(
+			r.conn.conn,
+			loc.Handle,
+			0, 0, // size 0 -> just report current length
+			colIdx,
+			r.conn.nextCorr(),
+		)
+		if err != nil {
+			return nil, r.conn.classifyConnErr(err)
+		}
+		// CurrentLength for graphic LOBs is reported in
+		// characters; the wire RetrieveLOBData adapter still
+		// takes byte count, so multiply by 2.
+		wantBytes = int64(probe.CurrentLength) * 2
+		if wantBytes == 0 {
+			return "", nil
+		}
+	}
 	data, err := hostserver.RetrieveLOBData(
 		r.conn.conn,
 		loc.Handle,
-		0,           // offset
-		maxRequest,  // request the whole thing
-		colIdx,      // column index for server-side validation
+		0,
+		wantBytes,
+		colIdx,
 		r.conn.nextCorr(),
 	)
 	if err != nil {

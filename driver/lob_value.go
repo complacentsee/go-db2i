@@ -44,8 +44,10 @@ import (
 //     pattern). Pass a Go string instead if you want the driver to
 //     transcode for you via internal/ebcdic.
 //   - For DBCLOB columns (968/969) Bytes/Reader content must be
-//     UTF-16 BE (a.k.a. UCS-2 BE). String bind is not yet wired up
-//     for DBCLOB.
+//     UTF-16 BE (a.k.a. UCS-2 BE); the driver halves the byte count
+//     for the requested-size CP per JT400's graphic-LOB convention.
+//     Go strings are also accepted -- the driver runs them through
+//     unicode/utf16 to produce the wire bytes.
 //
 // LOBValue itself doesn't track byte counts as it streams; if Reader
 // returns fewer than Length bytes the driver returns an error rather

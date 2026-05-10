@@ -132,11 +132,36 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
+	// Wire offset/size are in characters for graphic (DBCLOB)
+	// LOBs, bytes for everything else. The reader tracks bytes
+	// internally so the EOF math doesn't have to know about
+	// graphic-ness; we halve at the wire boundary instead. Both
+	// values must stay 2-byte aligned for graphic so the server
+	// doesn't return half-codepoints.
+	wireOffset := r.offset
+	wireSize := requestSize
+	if r.loc.SQLType == 968 || r.loc.SQLType == 969 {
+		if wireOffset%2 != 0 {
+			r.sticky = fmt.Errorf("gojtopen: LOBReader: graphic LOB offset %d not 2-byte aligned", wireOffset)
+			return 0, r.sticky
+		}
+		wireOffset /= 2
+		// Round wireSize down to even bytes -- requesting an
+		// odd byte count from a graphic LOB would split a
+		// codepoint at the seam.
+		if wireSize%2 != 0 {
+			wireSize--
+			if wireSize <= 0 {
+				return 0, io.EOF
+			}
+		}
+		wireSize /= 2
+	}
 	data, err := hostserver.RetrieveLOBData(
 		r.conn.conn,
 		r.loc.Handle,
-		r.offset,
-		requestSize,
+		wireOffset,
+		wireSize,
 		r.colIdx,
 		r.conn.nextCorr(),
 	)
@@ -146,8 +171,15 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 	}
 
 	// Capture the total length from the first reply that carries it.
+	// The server reports CurrentLength in characters for graphic
+	// LOBs (DBCLOB / SQL types 968/969); we track it in bytes so
+	// the chunked-Read EOF math (`offset >= totalLen`) doesn't bail
+	// halfway through a UTF-16 LOB.
 	if r.totalLen == 0 && data.CurrentLength > 0 {
 		r.totalLen = int64(data.CurrentLength)
+		if r.loc.SQLType == 968 || r.loc.SQLType == 969 {
+			r.totalLen *= 2
+		}
 	}
 
 	if len(data.Bytes) == 0 {

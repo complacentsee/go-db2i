@@ -20,14 +20,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	gojtopen "github.com/complacentsee/goJTOpen/driver"
+	"github.com/complacentsee/goJTOpen/ebcdic"
 )
 
 // dsn returns the connection string from GOJTOPEN_DSN, skipping the
@@ -235,6 +238,85 @@ func TestLOBBlob(t *testing.T) {
 		}
 	})
 
+	t.Run("empty []byte", func(t *testing.T) {
+		// Empty BLOB: zero-length WRITE_LOB_DATA still has to land
+		// or the locator stays uninitialised on the server side
+		// and SELECT either returns NULL or (worse) leftover bytes
+		// from a recycled handle. JT400's writeData(0, new byte[0])
+		// is the equivalent path and bindOneLOB has a special-case
+		// branch for it.
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 90, []byte{}); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 90).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("empty BLOB read back as %d bytes; want 0", len(got))
+		}
+	})
+
+	t.Run("empty LOBValue Bytes", func(t *testing.T) {
+		val := &gojtopen.LOBValue{Bytes: []byte{}}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 91, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 91).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("empty LOBValue.Bytes read back as %d bytes; want 0", len(got))
+		}
+	})
+
+	t.Run("empty LOBValue Reader", func(t *testing.T) {
+		val := &gojtopen.LOBValue{Reader: bytes.NewReader(nil), Length: 0}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 92, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 92).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("empty LOBValue.Reader read back as %d bytes; want 0", len(got))
+		}
+	})
+
+	t.Run("nil bind to nullable BLOB", func(t *testing.T) {
+		// nil driver.Value should NOT issue WRITE_LOB_DATA -- the
+		// bindLOBParameters path overrides the shape and lets the
+		// indicator-block null marker fire. SELECT must surface as
+		// SQL NULL, not zero bytes.
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 93, nil); err != nil {
+			t.Fatalf("insert nil: %v", err)
+		}
+		var raw sql.NullString
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 93).Scan(&raw); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if raw.Valid {
+			t.Errorf("BLOB nil bind read back as non-NULL value (%d bytes)", len(raw.String))
+		}
+	})
+
+	t.Run("nil typed pointer bind", func(t *testing.T) {
+		// (*LOBValue)(nil) should also resolve to NULL, not panic.
+		var val *gojtopen.LOBValue
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 94, val); err != nil {
+			t.Fatalf("insert *LOBValue(nil): %v", err)
+		}
+		var raw sql.NullString
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 94).Scan(&raw); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if raw.Valid {
+			t.Errorf("BLOB *LOBValue(nil) bind read back as non-NULL")
+		}
+	})
+
 	t.Run("LOBValue Reader 1MiB", func(t *testing.T) {
 		// 1 MiB stress test -- the explicit Done-criteria size.
 		const total = 1024 * 1024
@@ -252,6 +334,339 @@ func TestLOBBlob(t *testing.T) {
 		}
 		if !bytes.Equal(got, want) {
 			t.Errorf("LOBValue Reader 1MiB round-trip mismatch (%d bytes back, %d sent)", len(got), total)
+		}
+	})
+}
+
+// TestLOBDBClob exercises DBCLOB bind: a UTF-16 BE column type
+// (`DBCLOB(...) CCSID 1200` or `CCSID 13488`). JT400 reports SQL
+// types 968/969 here and the WRITE_LOB_DATA "requested size" CP
+// must carry the *character* count (byteCount / 2), not the byte
+// count -- the bind dispatcher's lobRequestedSize helper handles
+// that.
+//
+// PUB400 sometimes can't create graphic LOB columns when the user
+// profile's CCSID setup excludes DBCS support; the test skips
+// (rather than fails) on that specific CREATE error so the test
+// stays green on accounts that don't have the right NLSS.
+func TestLOBDBClob(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "dbclob"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, dc DBCLOB(64K) CCSID 1200)`, tbl)); err != nil {
+		t.Skipf("CREATE TABLE DBCLOB failed (probably no DBCS NLSS on this profile): %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	t.Run("string round-trip", func(t *testing.T) {
+		// BMP-only payload: ASCII + an em-dash (U+2014). Avoids
+		// the surrogate-pair question; that gets a separate
+		// sub-test below once the basic path works.
+		want := strings.Repeat("DBCLOB Test — Hello, IBM i! ", 20)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 1, want); err != nil {
+			t.Fatalf("insert string: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			diff := -1
+			for i := 0; i < len(got) && i < len(want); i++ {
+				if got[i] != want[i] {
+					diff = i
+					break
+				}
+			}
+			head := 64
+			if head > len(got) {
+				head = len(got)
+			}
+			if head > len(want) {
+				head = len(want)
+			}
+			t.Errorf("DBCLOB string round-trip mismatch at byte %d (got %d bytes, want %d)\n  want = %q\n   got = %q",
+				diff, len(got), len(want), want[:head], got[:head])
+		}
+	})
+
+	t.Run("surrogate-pair round-trip", func(t *testing.T) {
+		// 𝄞 = U+1D11E lives outside the BMP and encodes as a
+		// surrogate pair in UTF-16. Confirms the bind path's
+		// utf16.Encode plumbing handles >BMP runes and that
+		// CCSID 1200 (true UTF-16, surrogates allowed) accepts
+		// them. CCSID 13488 columns would reject surrogates.
+		want := "Music: 𝄞 — done."
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 99, want); err != nil {
+			t.Fatalf("insert string: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 99).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("DBCLOB surrogate pair round-trip: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("LOBReader stream", func(t *testing.T) {
+		// Insert a payload large enough to force at least one
+		// continuation RETRIEVE_LOB_DATA when streamed back via
+		// LOBReader. Confirms graphic LOBs propagate totalLen as
+		// bytes (not chars) through the reader's EOF math; the
+		// pre-fix code rounded EOF down to half the value and the
+		// reader returned partial data.
+		want := strings.Repeat("DBCLOB streamed payload — Hello, IBM i! ", 1500)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 50, want); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		streamDB, err := sql.Open("gojtopen", dsn(t)+"&lob=stream")
+		if err != nil {
+			t.Fatalf("open stream db: %v", err)
+		}
+		defer streamDB.Close()
+		// Use Query+Next so the cursor stays open while we drain
+		// the reader. QueryRow auto-closes on Scan, which would
+		// invalidate the locator handle (server-side it's bound
+		// to the producing cursor's lifetime).
+		rows, err := streamDB.Query(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 50)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			t.Fatalf("no rows")
+		}
+		var r *gojtopen.LOBReader
+		if err := rows.Scan(&r); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		raw, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		r.Close()
+		// LOBReader returns the raw column bytes (UTF-16 BE for
+		// CCSID 1200); decode to compare against the Go string.
+		if len(raw)%2 != 0 {
+			t.Fatalf("DBCLOB stream returned odd byte count: %d", len(raw))
+		}
+		codes := make([]uint16, len(raw)/2)
+		for i := range codes {
+			codes[i] = uint16(raw[2*i])<<8 | uint16(raw[2*i+1])
+		}
+		got := string(utf16.Decode(codes))
+		if got != want {
+			head := 80
+			if head > len(got) {
+				head = len(got)
+			}
+			t.Errorf("DBCLOB LOBReader stream: got %d chars, want %d (head: %q)", len(got), len(want), got[:head])
+		}
+	})
+
+	t.Run("[]byte UTF-16 BE round-trip", func(t *testing.T) {
+		// Caller supplies bytes already encoded as UTF-16 BE; the
+		// driver passes them verbatim and reports byteCount/2 as
+		// the wire char count.
+		runes := []rune("Hello DBCLOB ")
+		codes := []uint16{}
+		for _, r := range runes {
+			codes = append(codes, uint16(r))
+		}
+		bytesUTF16 := make([]byte, 2*len(codes))
+		for i, c := range codes {
+			bytesUTF16[2*i] = byte(c >> 8)
+			bytesUTF16[2*i+1] = byte(c)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 2, bytesUTF16); err != nil {
+			t.Fatalf("insert []byte: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 2).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != string(runes) {
+			t.Errorf("DBCLOB []byte round-trip mismatch: got %q, want %q", got, string(runes))
+		}
+	})
+}
+
+// TestLOBMultiRow exercises multi-tuple INSERT (`VALUES (?,?), (?,?)`).
+// Each parameter marker position gets its own server-allocated
+// locator handle in CP 0x3813 of the PREPARE_DESCRIBE reply, so a
+// 3-row × 2-column INSERT has 6 markers, 3 of them LOB. Confirms
+// bindLOBParameters routes all of them through WRITE_LOB_DATA before
+// the single EXECUTE that carries 6 SQLDA value slots.
+func TestLOBMultiRow(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "lobmulti"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, b BLOB(64K))`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	a := []byte("payload-A")
+	b := []byte("payload-B")
+	c := bytes.Repeat([]byte{0xCC}, 4*1024)
+
+	if _, err := db.Exec(
+		fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?), (?, ?), (?, ?)`, tbl),
+		1, a, 2, b, 3, c,
+	); err != nil {
+		t.Fatalf("multi-row INSERT: %v", err)
+	}
+
+	for _, tc := range []struct {
+		id   int
+		want []byte
+	}{
+		{1, a},
+		{2, b},
+		{3, c},
+	} {
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), tc.id).Scan(&got); err != nil {
+			t.Fatalf("scan id=%d: %v", tc.id, err)
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Errorf("id=%d: got %d bytes, want %d", tc.id, len(got), len(tc.want))
+		}
+	}
+}
+
+// TestLOBSelectBind exercises the SelectPreparedSQL → bindLOBParameters
+// path that openPreparedUntilFirstBatch wires in. JT400 sends the
+// locator-bind sequence (PREPARE_DESCRIBE → CHANGE_DESCRIPTOR →
+// WRITE_LOB_DATA → OPEN_DESCRIBE_FETCH) the same way it does for
+// EXECUTE; this confirms the SELECT side actually drives that flow
+// end-to-end with a BLOB parameter.
+//
+// The trick is forcing the server to type `?` as a BLOB locator.
+// CAST(? AS BLOB(1M)) does it: the parameter marker format reply
+// then carries SQL type 961 with a server-allocated handle, and the
+// driver routes the value through WRITE_LOB_DATA before the cursor
+// opens.
+func TestLOBSelectBind(t *testing.T) {
+	db := openDB(t)
+
+	payload := make([]byte, 8*1024)
+	for i := range payload {
+		payload[i] = byte((i*17 + 3) & 0xFF)
+	}
+
+	t.Run("LENGTH of BLOB bind", func(t *testing.T) {
+		var n int64
+		err := db.QueryRow(
+			`SELECT LENGTH(CAST(? AS BLOB(1M))) FROM SYSIBM.SYSDUMMY1`,
+			payload,
+		).Scan(&n)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		if n != int64(len(payload)) {
+			t.Errorf("LENGTH = %d, want %d", n, len(payload))
+		}
+	})
+
+	t.Run("round-trip BLOB through SELECT", func(t *testing.T) {
+		// SELECT a BLOB ?-bind back as the column value. Confirms
+		// the bytes survive WRITE_LOB_DATA → server materialise →
+		// RETRIEVE_LOB_DATA path even when the ? sits in a SELECT
+		// projection rather than a column comparison.
+		var got []byte
+		err := db.QueryRow(
+			`SELECT CAST(? AS BLOB(1M)) FROM SYSIBM.SYSDUMMY1`,
+			payload,
+		).Scan(&got)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("BLOB round-trip via SELECT: %d bytes back, %d sent", len(got), len(payload))
+		}
+	})
+}
+
+// TestLOBUpdate verifies the locator-bind path runs cleanly under
+// UPDATE (not just INSERT). Two flavours: shrink (replace 8 KiB with
+// 4 KiB) to confirm truncate=0xF0 actually frees the tail, and grow
+// (replace 4 KiB with 16 KiB) to confirm the prepared LOB column
+// can absorb a larger value than the prior row carried.
+func TestLOBUpdate(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "lobupd"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, b BLOB(1M))`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	mkRamp := func(n, mul int) []byte {
+		out := make([]byte, n)
+		for i := range out {
+			out[i] = byte((i * mul) & 0xFF)
+		}
+		return out
+	}
+
+	t.Run("shrink", func(t *testing.T) {
+		big := mkRamp(8*1024, 1)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 1, big); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		small := mkRamp(4*1024, 3)
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET b = ? WHERE id = ?`, tbl), small, 1); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, small) {
+			t.Errorf("UPDATE shrink: got %d bytes, want %d", len(got), len(small))
+		}
+	})
+
+	t.Run("grow", func(t *testing.T) {
+		small := mkRamp(4*1024, 5)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 2, small); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		big := mkRamp(16*1024, 7)
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET b = ? WHERE id = ?`, tbl), big, 2); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 2).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, big) {
+			t.Errorf("UPDATE grow: got %d bytes, want %d", len(got), len(big))
+		}
+	})
+
+	t.Run("update to NULL", func(t *testing.T) {
+		small := mkRamp(2*1024, 11)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 3, small); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET b = ? WHERE id = ?`, tbl), nil, 3); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		var raw sql.NullString
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 3).Scan(&raw); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if raw.Valid {
+			t.Errorf("UPDATE to NULL left non-NULL value (%d bytes)", len(raw.String))
 		}
 	})
 }
@@ -304,6 +719,57 @@ func TestLOBClob(t *testing.T) {
 			}
 			t.Errorf("CLOB string round-trip mismatch at byte %d (len got=%d sent=%d)\n  sent[:%d] = %q\n   got[:%d] = %q",
 				diff, len(got), len(clob), head, clob[:head], head, got[:head])
+		}
+	})
+
+	// CLOB []byte bind: caller hands us bytes that are *already* in
+	// the column's declared CCSID. The driver passes them verbatim
+	// (no transcoding), the server stores them, and SELECT decodes
+	// via the column CCSID's codec. We pre-encode "Hello, IBM i! "
+	// to CCSID 273 so the round-trip lands back as the same Go
+	// string regardless of which side does the transcoding.
+	t.Run("[]byte pre-encoded CCSID 273", func(t *testing.T) {
+		ebc, err := ebcdic.CCSID273.Encode(clob)
+		if err != nil {
+			t.Fatalf("ebcdic.CCSID273.Encode: %v", err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, tbl), 2, ebc); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, tbl), 2).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != clob {
+			t.Errorf("CLOB []byte round-trip mismatch: %d chars back vs %d sent", len(got), len(clob))
+		}
+	})
+
+	// CLOB Reader bind: same pre-encoded-bytes contract, but
+	// streamed through LOBValue.Reader so chunked WRITE_LOB_DATA
+	// frames get exercised on the CLOB side (the BLOB-Reader
+	// chunking case is covered by TestLOBBlob/LOBValue_Reader_*).
+	t.Run("LOBValue Reader pre-encoded 80KiB", func(t *testing.T) {
+		// 80 KiB > 32 KiB chunk size to force >=3 frames.
+		var sb strings.Builder
+		for sb.Len() < 80*1024 {
+			sb.WriteString("Hello, IBM i! ")
+		}
+		want := sb.String()
+		ebc, err := ebcdic.CCSID273.Encode(want)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		val := &gojtopen.LOBValue{Reader: bytes.NewReader(ebc), Length: int64(len(ebc))}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, tbl), 3, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, tbl), 3).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("CLOB Reader 80KiB round-trip: %d chars back vs %d sent", len(got), len(want))
 		}
 	})
 }
