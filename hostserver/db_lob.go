@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
+	"sync"
 	"unicode/utf16"
 )
 
@@ -338,7 +340,23 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 		var bytes []byte
 		switch {
 		case p.SQLType == 968 || p.SQLType == 969:
-			bytes = encodeUTF16BE(v)
+			// DBCLOB: pick encoder by column CCSID.
+			//
+			//   1200  -> UTF-16 BE; surrogate pairs allowed (the
+			//           default DBCLOB encoding negotiated by JT400)
+			//   13488 -> strict UCS-2 BE; surrogate pairs forbidden
+			//           server-side (SQL-330 "character cannot be
+			//           converted"). Substitute non-BMP runes with
+			//           U+003F ('?') to mirror JT400's behaviour and
+			//           emit a one-shot warn so callers notice.
+			//   else  -> assume UTF-16 BE for forward compat; the
+			//           server will reject if the column actually
+			//           wants something stricter.
+			if p.CCSID == 13488 {
+				bytes = encodeUCS2BE(v)
+			} else {
+				bytes = encodeUTF16BE(v)
+			}
 		case p.CCSID == ccsidBinary:
 			bytes = []byte(v)
 		case p.CCSID == 1208:
@@ -497,6 +515,90 @@ func encodeUTF16BE(s string) []byte {
 		out[2*i+1] = byte(c)
 	}
 	return out
+}
+
+// NonBMPRuneError is the typed error encodeUCS2BEStrict returns when
+// it sees a codepoint outside the Basic Multilingual Plane while
+// encoding for a CCSID that forbids surrogate pairs (CCSID 13488 is
+// the only such target today). The default substitute path used by
+// bindOneLOB does not produce this error; callers that opt into
+// strict mode by calling encodeUCS2BEStrict directly receive it so
+// they can surface a meaningful message instead of letting the
+// server reply with SQL-330.
+type NonBMPRuneError struct {
+	CCSID uint16 // column CCSID that forbids surrogates (13488)
+	Rune  rune   // first offending rune
+	Index int    // rune index in the input string
+}
+
+func (e *NonBMPRuneError) Error() string {
+	return fmt.Sprintf("hostserver: rune U+%04X at index %d is outside the BMP and not representable in CCSID %d (UCS-2 BE)", e.Rune, e.Index, e.CCSID)
+}
+
+// ucs2NonBMPWarnOnce rate-limits the substitute warning to one
+// emission per process. Per-process granularity (rather than per
+// *sql.DB as the M7 plan originally sketched) is intentional: the
+// hostserver layer has no stable handle to the database/sql.DB the
+// call originated from, and a single warning is enough to alert a
+// caller that their data is being silently transcoded -- they can
+// switch to encodeUCS2BEStrict via a future opt-in flag if they
+// need per-rune visibility.
+var ucs2NonBMPWarnOnce sync.Once
+
+// encodeUCS2BE encodes s as strict UCS-2 BE, the on-wire encoding for
+// CCSID 13488 DBCLOB columns. Runes outside the BMP (any codepoint
+// > 0xFFFF) are substituted with U+003F (`?`), mirroring JT400's
+// SQLDBClobLocator.writeToServer behaviour where non-representable
+// characters are replaced rather than rejected. The first such
+// substitution emits a one-shot slog.Warn so callers notice their
+// data is being transcoded.
+//
+// Surrogate code units (U+D800..U+DFFF) cannot reach this function
+// from a Go string literal: Go re-encodes lone surrogates as U+FFFD
+// at string-construction time, which is BMP and round-trips
+// verbatim.
+func encodeUCS2BE(s string) []byte {
+	runes := []rune(s)
+	out := make([]byte, 2*len(runes))
+	for i, r := range runes {
+		c := uint16(r)
+		if r > 0xFFFF {
+			c = 0x003F
+			ucs2NonBMPWarnOnce.Do(func() {
+				slog.Warn("goJTOpen: non-BMP rune substituted with '?' for CCSID 13488 DBCLOB bind",
+					"ccsid", 13488,
+					"rune", fmt.Sprintf("U+%04X", r),
+					"note", "first occurrence; subsequent substitutions silent",
+				)
+			})
+		}
+		out[2*i] = byte(c >> 8)
+		out[2*i+1] = byte(c)
+	}
+	return out
+}
+
+// encodeUCS2BEStrict is the opt-in counterpart to encodeUCS2BE. It
+// returns a *NonBMPRuneError on the first non-BMP rune and emits no
+// bytes; callers who would rather surface a typed error than let the
+// substitute path silently corrupt their data route through this
+// helper. Today it is only reachable via direct call from package
+// tests; a future DSN flag (`?dbclob-strict=true` or similar) will
+// wire it into bindOneLOB.
+func encodeUCS2BEStrict(s string) ([]byte, error) {
+	runes := []rune(s)
+	for i, r := range runes {
+		if r > 0xFFFF {
+			return nil, &NonBMPRuneError{CCSID: 13488, Rune: r, Index: i}
+		}
+	}
+	out := make([]byte, 2*len(runes))
+	for i, r := range runes {
+		c := uint16(r)
+		out[2*i] = byte(c >> 8)
+		out[2*i+1] = byte(c)
+	}
+	return out, nil
 }
 
 // dbParamUint32 builds a 4-byte big-endian uint32 LL/CP/Data block.

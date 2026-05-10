@@ -12,35 +12,56 @@ labelverification-gw use case (BLOB / CLOB on CCSID 273 columns,
 single-row INSERT/UPDATE, materialised reads); other consumers
 should read carefully before depending on the affected paths.
 
-## 1. DBCLOB columns declared `CCSID 13488` (high)
+## 1. DBCLOB columns declared `CCSID 13488` (CLOSED, M7-1)
 
-**Symptom.** A surrogate-pair rune (any codepoint outside the BMP,
-e.g. `𝄞 = U+1D11E`) bound to a CCSID-13488 DBCLOB column fails
-server-side, typically with SQL-330 ("character cannot be
-converted") on the INSERT.
+**Status.** Closed by the M7-1 commit
+(`hostserver: CCSID-aware DBCLOB encode for column CCSID 13488`).
+Offline tests pass; live validation is opt-in (see "Live test
+escape hatch" below).
+
+**Symptom (pre-fix).** A surrogate-pair rune (any codepoint outside
+the BMP, e.g. `𝄞 = U+1D11E`) bound to a CCSID-13488 DBCLOB column
+failed server-side with SQL-330 ("character cannot be converted")
+on the INSERT.
 
 **Why.** CCSID 13488 is *strict* UCS-2 BE — surrogates are
-disallowed. CCSID 1200 is UTF-16 BE and accepts surrogates. Our
-driver encodes Go strings via `unicode/utf16` which produces
-surrogate pairs for any non-BMP rune, then ships the bytes with no
-column-CCSID check.
+disallowed. CCSID 1200 is UTF-16 BE and accepts surrogates. The
+driver encoded all DBCLOB string binds via `unicode/utf16`
+unconditionally, which produced surrogate pairs for any non-BMP
+rune regardless of the column's CCSID.
+
+**Fix.** `hostserver.bindOneLOB`'s DBCLOB string branch now
+dispatches on `p.CCSID`: `1200` keeps the existing
+`encodeUTF16BE` (surrogate-aware) path; `13488` routes through
+the new `encodeUCS2BE` helper that BMP-checks each rune and
+substitutes non-BMP runes with `U+003F` (`?`), mirroring JT400's
+`SQLDBClobLocator.writeToServer` behaviour. The first substitute
+event in a process emits a one-shot `slog.Warn` so callers
+notice when their data is being silently transcoded; subsequent
+substitutions stay quiet to avoid log spam.
+
+A typed `*hostserver.NonBMPRuneError` and an opt-in
+`encodeUCS2BEStrict` helper are also available for callers who
+would rather surface a typed error than let the substitute path
+silently corrupt their data. Wiring strict mode into a DSN flag
+is a follow-up; today it is only reachable from package tests.
 
 **Tested column type.** PUB400 V7R5M0 with `DBCLOB(64K) CCSID 1200`
-— surrogate-pair round-trips work
-(`TestLOBDBClob/surrogate-pair_round-trip`). CCSID 13488 is
-**untested** because PUB400 doesn't readily expose a CCSID-13488
-target.
+continues to surrogate-pair round-trip
+(`TestLOBDBClob/surrogate-pair_round-trip`). The fix itself is
+covered by offline tests in `hostserver/db_lob_ucs2_test.go`
+(`TestEncodeUCS2BE_BMP_HappyPath`, `TestEncodeUCS2BE_NonBMP_Substitute`,
+`TestEncodeUCS2BE_NonBMP_StrictError`, `TestEncodeUCS2BE_BoundaryRunes`).
 
-**Workaround.** Callers targeting CCSID 13488 columns must filter
-their input strings to BMP-only (`r <= 0xFFFF` for every rune)
-before binding. We don't surface a `LOBValue.RestrictToBMP` knob
-yet.
-
-**Fix path.** Detect `p.CCSID == 13488` in
-`hostserver.bindOneLOB`'s string branch and either reject
-surrogates with a typed error, or fall back to UCS-2 substitute
-(`U+003F`) for non-BMP runes — JT400's behaviour. Tracked as a
-follow-up in `docs/PLAN.md` M7.
+**Live test escape hatch.** `TestLOBDBClobCCSID13488` in
+`test/conformance/conformance_test.go` exercises the substitute
+path against a real CCSID-13488 column when the
+`GOJTOPEN_TEST_CCSID13488_TABLE` env var is set to a
+fully-qualified table name. PUB400 V7R5M0 does not readily expose
+a CCSID-13488 target, so the test skips on free-tier targets;
+sites with DBCS-capable NLSS can wire it in by setting the env
+var. The substitute behaviour itself is byte-pinned by the
+offline tests.
 
 ## 2. Multi-row batch INSERT via CP 0x381F `RowCount > 1` (medium)
 

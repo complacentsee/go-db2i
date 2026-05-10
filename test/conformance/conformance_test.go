@@ -494,6 +494,73 @@ func TestLOBDBClob(t *testing.T) {
 	})
 }
 
+// TestLOBDBClobCCSID13488 exercises the strict-UCS-2 BE encode path
+// against a real `DBCLOB(...) CCSID 13488` column. CCSID 13488 forbids
+// surrogate pairs server-side (SQL-330 "character cannot be
+// converted") so the bind path must substitute non-BMP runes with
+// U+003F; this test confirms both the BMP round-trip and the
+// substitute fallback against a live target.
+//
+// Gated on GOJTOPEN_TEST_CCSID13488_TABLE because PUB400 V7R5M0
+// (the typical free-tier target) does not readily expose a
+// CCSID-13488 table, so most live runs cannot exercise this path.
+// The env var should be set to a fully-qualified table name
+// ("SCHEMA.NAME") that the test owns; the test recreates the table
+// on every entry.
+func TestLOBDBClobCCSID13488(t *testing.T) {
+	tbl := os.Getenv("GOJTOPEN_TEST_CCSID13488_TABLE")
+	if tbl == "" {
+		t.Skip("GOJTOPEN_TEST_CCSID13488_TABLE not set; skipping CCSID 13488 live test (no widely-available target)")
+	}
+	db := openDB(t)
+
+	// Recreate the table -- the schema is fixed (id + DBCLOB CCSID
+	// 13488) so the test is self-contained against a clean slate.
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, dc DBCLOB(64K) CCSID 13488)`, tbl)); err != nil {
+		t.Skipf("CREATE TABLE DBCLOB CCSID 13488 failed (target may not have DBCS NLSS): %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	t.Run("BMP-only round-trip", func(t *testing.T) {
+		// Same payload pattern as TestLOBDBClob's BMP test; should
+		// behave identically to the CCSID-1200 column for BMP
+		// input.
+		want := strings.Repeat("DBCLOB 13488 — Hello, IBM i! ", 20)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 1, want); err != nil {
+			t.Fatalf("insert BMP string: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("CCSID 13488 BMP round-trip: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("non-BMP substituted with ?", func(t *testing.T) {
+		// Pre-fix, this INSERT failed with SQL-330 because the bind
+		// path emitted a surrogate pair (0xD834 0xDD1E) that CCSID
+		// 13488 rejects. Post-fix, the rune is substituted with
+		// U+003F before the bind, so the INSERT succeeds and the
+		// stored payload contains "?" where the treble clef was.
+		input := "Music: 𝄞 — done."
+		want := "Music: ? — done."
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 2, input); err != nil {
+			t.Fatalf("insert non-BMP string: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT dc FROM %s WHERE id = ?`, tbl), 2).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("CCSID 13488 non-BMP substitute: got %q, want %q (treble clef replaced with '?')", got, want)
+		}
+	})
+}
+
 // TestLOBMultiRow exercises multi-tuple INSERT (`VALUES (?,?), (?,?)`).
 // Each parameter marker position gets its own server-allocated
 // locator handle in CP 0x3813 of the PREPARE_DESCRIBE reply, so a

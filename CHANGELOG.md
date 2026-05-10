@@ -51,6 +51,25 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Fixed
 
+- DBCLOB string bind now picks the encoder by column CCSID instead
+  of always emitting UTF-16 BE. Pre-fix, binding a Go string with
+  any non-BMP rune (e.g. `𝄞 = U+1D11E`) to a `DBCLOB(...) CCSID
+  13488` column failed server-side with SQL-330 ("character cannot
+  be converted") because CCSID 13488 is strict UCS-2 BE and rejects
+  surrogate pairs. Post-fix, CCSID 13488 columns route through a new
+  `encodeUCS2BE` helper that substitutes non-BMP runes with `U+003F`
+  (`?`), mirroring JT400's `SQLDBClobLocator.writeToServer` parity
+  behaviour; CCSID 1200 (UTF-16 BE) keeps the existing
+  surrogate-aware `encodeUTF16BE` path. The first substitute event
+  in a process emits a one-shot `slog.Warn` so callers notice their
+  data is being transcoded. A typed `*hostserver.NonBMPRuneError`
+  and an `encodeUCS2BEStrict` opt-in helper are also available for
+  callers who would rather surface an error than silently
+  substitute (no DSN flag wires this in yet — follow-up).
+  Offline-tested via `TestEncodeUCS2BE_*`; live test
+  (`TestLOBDBClobCCSID13488`) gated on
+  `GOJTOPEN_TEST_CCSID13488_TABLE` because PUB400 V7R5M0 does not
+  expose a CCSID-13488 target. Closes `docs/lob-known-gaps.md` §1.
 - LOB reads no longer set the RLE compression bit (0x00040000) in
   the RETRIEVE_LOB_DATA ORS bitmap. Pre-fix, BLOBs whose content
   RLE-compressed well (4 KiB of identical bytes, headers padded
