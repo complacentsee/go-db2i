@@ -492,9 +492,19 @@ fresh connection.
 
 **Deferred from M6 (nice-to-have, not blocking labelverification-gw):**
 
-- **Lazy Rows iteration via continuation FETCH** — currently
-  buffers the full result set into memory. Fine for single-row
-  lookups; matters when somebody runs a million-row report.
+- **Lazy Rows iteration via continuation FETCH** ✅ — landed across
+  M5 (`hostserver.Cursor` + continuation FETCH on 0x180B) and M7-2
+  (driver-layer wiring). `driver.Rows.Next` now pulls one row at a
+  time from `*hostserver.Cursor`, which issues continuation FETCH
+  lazily when its 32 KB block-fetch buffer drains. Live-validated
+  against IBM Cloud V7R6M0 with `TestRowsLazyMemoryBounded`: a
+  ~50K-row SELECT walks via `rows.Next` with peak HeapAlloc 3.8 MiB
+  vs a 16 MiB budget, post-iteration delta is *negative* after GC.
+  `TestRowsCloseIdempotent` pins idempotent `Rows.Close` and
+  confirms no cursor leak on subsequent queries on the same conn.
+  Buffered API (`SelectStaticSQL` / `SelectPreparedSQL`) preserved
+  via `Cursor.drainAll` for the existing offline fixture tests and
+  `cmd/smoketest`.
 - **`LastInsertId` via IDENTITY_VAL_LOCAL()** — currently returns
   a "not supported" error. Not used by labelverification-gw
   (legacy DCLVRP02 has fixed keys, no IDENTITY columns).

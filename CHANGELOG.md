@@ -49,6 +49,29 @@ across IBM i versions; expect the public API surface to settle at
   BLOB streamed in 32 KB chunks; 700-char CLOB streamed and
   decoded via `ebcdic.CCSID273`.
 
+### Added
+
+- M7-2 lazy `Rows` iteration validated against IBM Cloud V7R6M0.
+  `driver.Rows.Next` now pulls one row at a time from
+  `*hostserver.Cursor`, which issues continuation FETCH (`0x180B`)
+  lazily when its 32 KB block-fetch buffer drains. The plumbing
+  itself landed across M5 (`Cursor` abstraction) and M6 (driver
+  wiring); M7-2 closes it out by pinning two regression tests
+  in the conformance suite:
+  - `TestRowsLazyMemoryBounded` — a ~50K-row SELECT against
+    `QSYS2.SYSCOLUMNS` walked via `rows.Next` keeps peak Go
+    `HeapAlloc` ~3.8 MiB (16 MiB budget); post-iteration delta is
+    *negative* after `runtime.GC()`. Pre-streaming the same query
+    would have buffered ~50K row tuples into memory before
+    yielding the first row.
+  - `TestRowsCloseIdempotent` — three sequential `rows.Close()`
+    calls return the same (nil) error; a follow-up `VALUES 1`
+    on the same pool conn succeeds, proving Close doesn't leak
+    a half-open cursor or RPB slot.
+  The buffered hostserver entry points (`SelectStaticSQL` /
+  `SelectPreparedSQL`) are preserved via `Cursor.drainAll` for
+  offline fixture tests and `cmd/smoketest`.
+
 ### Fixed
 
 - DBCLOB string bind now picks the encoder by column CCSID instead

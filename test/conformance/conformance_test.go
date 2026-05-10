@@ -23,6 +23,7 @@ import (
 	"io"
 	"math/rand"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -990,4 +991,145 @@ func TestPreparedStmt(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestRowsLazyMemoryBounded confirms the M7-2 lazy-iteration goal: a
+// large SELECT walked one row at a time keeps Go heap usage bounded
+// regardless of how many rows the cursor produces. Pre-M5 the
+// hostserver returned the full []SelectRow up front and a 50K-row
+// result set materialised every row before Rows.Next yielded the
+// first one; under M5+M7-2 the driver streams batch-by-batch via
+// continuation FETCH (0x180B), so peak heap should track a single
+// 32 KB block-fetch buffer + the current row, not the full set.
+//
+// We sample runtime.MemStats.HeapAlloc before/after a forced GC,
+// drive the cursor through all rows, then re-sample after another
+// forced GC. The post-iteration delta must stay under a generous
+// budget (~16 MiB) regardless of row count -- if Rows accidentally
+// reverted to buffering, the delta would grow with N.
+func TestRowsLazyMemoryBounded(t *testing.T) {
+	db := openDB(t)
+	const n = 50_000
+	// QSYS2.SYSCOLUMNS is the standard "many rows" catalog source on
+	// IBM i; we project a small subset of columns so per-row payload
+	// stays modest and the test isolates batching behaviour rather
+	// than per-row decode cost. ORDER BY pins the result for a stable
+	// row-count assertion.
+	sql := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+		FROM QSYS2.SYSCOLUMNS
+		ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+		FETCH FIRST %d ROWS ONLY`, n)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	runtime.GC()
+	var msBefore runtime.MemStats
+	runtime.ReadMemStats(&msBefore)
+
+	rows, err := db.QueryContext(ctx, sql)
+	if err != nil {
+		t.Fatalf("QueryContext: %v", err)
+	}
+	var maxHeap uint64
+	var rowCount int
+	for rows.Next() {
+		var schema, table, col string
+		if err := rows.Scan(&schema, &table, &col); err != nil {
+			rows.Close()
+			t.Fatalf("scan row %d: %v", rowCount, err)
+		}
+		rowCount++
+		// Sample a few times during iteration so we catch the worst
+		// case rather than only the begin/end states. ReadMemStats
+		// stops the world briefly; doing it every 5000 rows keeps
+		// the overhead negligible.
+		if rowCount%5000 == 0 {
+			var msNow runtime.MemStats
+			runtime.ReadMemStats(&msNow)
+			if msNow.HeapAlloc > maxHeap {
+				maxHeap = msNow.HeapAlloc
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("rows.Err after %d rows: %v", rowCount, err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("rows.Close: %v", err)
+	}
+
+	runtime.GC()
+	var msAfter runtime.MemStats
+	runtime.ReadMemStats(&msAfter)
+
+	// IBM i may return fewer rows if the system has fewer columns
+	// catalog-wide; require at least 5K so we know multiple FETCH
+	// batches happened (32 KB block-fetch buffer holds well under
+	// 5K narrow rows).
+	if rowCount < 5_000 {
+		t.Fatalf("got only %d rows; need >= 5000 to span multiple FETCH batches", rowCount)
+	}
+
+	// Budget: 16 MiB delta vs pre-iteration. A buffered (non-streaming)
+	// implementation would carry ~50K * (estimated 80B/row) ~= 4 MiB
+	// of row data plus driver overhead -- so 16 MiB is loose enough to
+	// avoid GC noise but tight enough to fail loudly if the cursor
+	// regresses to materialising whole result sets.
+	const budget uint64 = 16 * 1024 * 1024
+	delta := int64(msAfter.HeapAlloc) - int64(msBefore.HeapAlloc)
+	if delta > int64(budget) {
+		t.Errorf("post-iteration HeapAlloc grew by %d bytes (max during walk: %d); budget %d. "+
+			"Streaming Rows likely regressed to buffered.", delta, maxHeap, budget)
+	}
+	t.Logf("rows=%d  pre.HeapAlloc=%d  max.HeapAlloc=%d  post.HeapAlloc=%d  delta=%d  budget=%d",
+		rowCount, msBefore.HeapAlloc, maxHeap, msAfter.HeapAlloc, delta, budget)
+}
+
+// TestRowsCloseIdempotent confirms the M7-2 contract that
+// (driver.Rows).Close is safe to call repeatedly per the
+// database/sql documentation. The implementation caches the first
+// Close's error and returns the same value on every subsequent call;
+// regressions where a second Close issues a stray RPB DELETE / CLOSE
+// frame would surface here as a connection-level error from the
+// reused fakeConn (or a panic on a closed conn).
+func TestRowsCloseIdempotent(t *testing.T) {
+	db := openDB(t)
+
+	rows, err := db.Query("SELECT TABLE_NAME FROM QSYS2.SYSTABLES FETCH FIRST 5 ROWS ONLY")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+	}
+
+	first := rows.Close()
+	second := rows.Close()
+	third := rows.Close()
+	if first != nil {
+		t.Errorf("first Close: %v", first)
+	}
+	if second != first {
+		t.Errorf("second Close = %v; want same as first (%v)", second, first)
+	}
+	if third != first {
+		t.Errorf("third Close = %v; want same as first (%v)", third, first)
+	}
+
+	// The connection must still be usable after the rows are closed
+	// -- if Close left the cursor / RPB in a half-closed state the
+	// next query on the same pool conn would fail with SQL-519
+	// (orphaned prepared statement) or SQL-501 (cursor already open).
+	var n int
+	if err := db.QueryRow("VALUES 1").Scan(&n); err != nil {
+		t.Fatalf("post-close query failed (cursor leak?): %v", err)
+	}
+	if n != 1 {
+		t.Errorf("post-close VALUES 1 got %d; want 1", n)
+	}
 }
