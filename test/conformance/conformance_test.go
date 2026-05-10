@@ -1226,3 +1226,152 @@ func TestRowsCloseIdempotent(t *testing.T) {
 		t.Errorf("post-close VALUES 1 got %d; want 1", n)
 	}
 }
+
+// TestTLSConnectivity exercises the M7-4 contract that the driver can
+// complete the full host-server protocol (sign-on, start-database,
+// prepare, execute, fetch) over a crypto/tls-wrapped connection to the
+// IBM i SSL host-server ports (9476 / 9471).
+//
+// Gated on GOJTOPEN_TLS_TARGET so it skips on plaintext-only targets
+// (PUB400, any LPAR where DCM hasn't assigned a cert to the
+// QIBM_OS400_QZBS_SVR_DATABASE / _SIGNON / _CENTRAL application IDs).
+// The env var holds a full DSN with tls=true set, e.g.:
+//
+//	GOJTOPEN_TLS_TARGET="gojtopen://USER:PWD@host:9471/?signon-port=9476&tls=true&tls-insecure-skip-verify=true"
+//
+// When GOJTOPEN_DSN is *also* set (plaintext counterpart against the
+// same LPAR), the test additionally diffs a multi-row result against
+// the plaintext result to prove the protocol above the TLS layer is
+// byte-identical -- a regression where TLS sign-on negotiated a
+// different attribute set than plaintext would surface here.
+func TestTLSConnectivity(t *testing.T) {
+	tlsDSN := os.Getenv("GOJTOPEN_TLS_TARGET")
+	if tlsDSN == "" {
+		t.Skip("GOJTOPEN_TLS_TARGET not set; skipping live TLS conformance test")
+	}
+
+	tlsDB, err := sql.Open("gojtopen", tlsDSN)
+	if err != nil {
+		t.Fatalf("sql.Open(tls): %v", err)
+	}
+	t.Cleanup(func() { tlsDB.Close() })
+	tlsDB.SetMaxOpenConns(2)
+
+	// Warm-up Ping with retry to cover dial / TLS handshake / sign-on /
+	// start-database all running for the first time on a cold prestart
+	// job. Reuses the openDB cadence (30 s per attempt, 2 min budget).
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := tlsDB.PingContext(ctx)
+		cancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("TLS warm-up Ping never succeeded: %v", err)
+		}
+		t.Logf("TLS warm-up Ping failed, retrying: %v", err)
+		time.Sleep(2 * time.Second)
+	}
+
+	// Smoketest: a single-row query exercises sign-on, start-database,
+	// PREPARE, EXECUTE, OPEN, FETCH, CLOSE -- the full critical path
+	// the M5/M7-2 cursor work walks, now wrapped in TLS records.
+	t.Run("smoketest", func(t *testing.T) {
+		var (
+			ts   time.Time
+			user string
+		)
+		if err := tlsDB.QueryRow(
+			"SELECT CURRENT_TIMESTAMP, CURRENT_USER FROM SYSIBM.SYSDUMMY1").
+			Scan(&ts, &user); err != nil {
+			t.Fatalf("TLS smoketest query: %v", err)
+		}
+		if ts.IsZero() {
+			t.Error("CURRENT_TIMESTAMP came back zero")
+		}
+		if user == "" {
+			t.Error("CURRENT_USER came back empty")
+		}
+		t.Logf("TLS round-trip OK: user=%q ts=%s", user, ts.Format(time.RFC3339))
+	})
+
+	// Multi-row pull: walks several FETCH continuations and confirms
+	// row-data parse works over TLS. SYSTABLES is a stable target on
+	// every IBM i target; using SYSTEM_TABLE_SCHEMA = 'QSYS2' bounds
+	// the result deterministically.
+	t.Run("multi-row", func(t *testing.T) {
+		rows, err := tlsDB.Query(
+			`SELECT SYSTEM_TABLE_NAME, SYSTEM_TABLE_SCHEMA FROM QSYS2.SYSTABLES
+			   WHERE SYSTEM_TABLE_SCHEMA = 'QSYS2'
+			   ORDER BY SYSTEM_TABLE_NAME FETCH FIRST 5 ROWS ONLY`)
+		if err != nil {
+			t.Fatalf("multi-row query: %v", err)
+		}
+		defer rows.Close()
+		var got [][2]string
+		for rows.Next() {
+			var name, sch string
+			if err := rows.Scan(&name, &sch); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, [2]string{strings.TrimSpace(name), strings.TrimSpace(sch)})
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if len(got) != 5 {
+			t.Fatalf("got %d rows, want 5", len(got))
+		}
+		for i, row := range got {
+			if row[1] != "QSYS2" {
+				t.Errorf("row %d schema = %q, want QSYS2", i, row[1])
+			}
+			if row[0] == "" {
+				t.Errorf("row %d name empty", i)
+			}
+		}
+
+		// Plaintext byte-equivalence diff. Only runs when GOJTOPEN_DSN
+		// is also set and points at the same LPAR -- the comparison is
+		// only meaningful if both DSNs reach the same catalog.
+		plainDSN := os.Getenv("GOJTOPEN_DSN")
+		if plainDSN == "" {
+			t.Log("GOJTOPEN_DSN not set; skipping plaintext equivalence diff")
+			return
+		}
+		plainDB, err := sql.Open("gojtopen", plainDSN)
+		if err != nil {
+			t.Logf("plaintext open failed (skipping diff): %v", err)
+			return
+		}
+		defer plainDB.Close()
+		plainDB.SetMaxOpenConns(2)
+		plainRows, err := plainDB.Query(
+			`SELECT SYSTEM_TABLE_NAME, SYSTEM_TABLE_SCHEMA FROM QSYS2.SYSTABLES
+			   WHERE SYSTEM_TABLE_SCHEMA = 'QSYS2'
+			   ORDER BY SYSTEM_TABLE_NAME FETCH FIRST 5 ROWS ONLY`)
+		if err != nil {
+			t.Logf("plaintext query failed (skipping diff): %v", err)
+			return
+		}
+		defer plainRows.Close()
+		var plain [][2]string
+		for plainRows.Next() {
+			var name, sch string
+			if err := plainRows.Scan(&name, &sch); err != nil {
+				t.Fatalf("plaintext scan: %v", err)
+			}
+			plain = append(plain, [2]string{strings.TrimSpace(name), strings.TrimSpace(sch)})
+		}
+		if len(plain) != len(got) {
+			t.Fatalf("row count diverged: tls=%d plain=%d", len(got), len(plain))
+		}
+		for i := range got {
+			if got[i] != plain[i] {
+				t.Errorf("row %d diverged: tls=%v plain=%v", i, got[i], plain[i])
+			}
+		}
+	})
+}

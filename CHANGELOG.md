@@ -51,6 +51,29 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M7-4 TLS sign-on / database live-validated end-to-end against
+  IBM Cloud V7R6M0. The DSN-level scaffolding (`tls=true`,
+  `tls-insecure-skip-verify`, `tls-server-name`, default-port flip to
+  9476 / 9471) shipped in an earlier commit; M7-4 closes the loop by
+  proving the host-server protocol runs unchanged above the TLS layer
+  on a real IBM i SSL host server. A self-signed cert was issued via
+  DCM (`*SYSTEM` cert store, RSA 2048 + SAN: DNS:localhost +
+  IP:192.168.20.3, signed by a Local CA created at the same time and
+  imported into `*SYSTEM` as a trusted CA cert) and assigned to the
+  `QIBM_OS400_QZBS_SVR_DATABASE`, `_SIGNON`, and `_CENTRAL`
+  application IDs. Once assigned, the host servers automatically
+  begin listening on ports 9470-9476 alongside the existing
+  8470-8476 plaintext pair -- no `STRHOSTSVR SSL(*YES)` switch
+  exists on V7R6. New `TestTLSConnectivity` in
+  `test/conformance/`, gated on `GOJTOPEN_TLS_TARGET`, exercises
+  sign-on + start-database + PREPARE + EXECUTE + multi-row FETCH
+  through TLS and (when `GOJTOPEN_DSN` is also set against the
+  same LPAR) byte-diffs the result against the plaintext path.
+  Both subtests PASS on V7R6M0:
+  `TestTLSConnectivity/smoketest` (single-row CURRENT_TIMESTAMP /
+  CURRENT_USER) and `TestTLSConnectivity/multi-row` (5-row
+  `QSYS2.SYSTABLES` pull, TLS result byte-equal to plaintext).
+
 - M7-7 (partial) ships the RLE-1 decompressor as the foundation
   for compressed `RETRIEVE_LOB_DATA` replies. New
   `hostserver.decompressRLE1` is a Go port of JT400's

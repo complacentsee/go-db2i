@@ -154,9 +154,18 @@ connections and prints info from both.
   surface here too if a real legacy server is ever found.
 - **`signon.go:318` TODO** — error-class wrapping in the sign-on
   reply parser. Inline; ~15 lines when revisited.
-- **TLS sign-on / database (ports 9476 / 9471)** — IBM i certs
-  sometimes lack DNS SAN; `crypto/tls` rejects by default. Land
-  with M7 alongside the rest of the connection-level work.
+- **TLS sign-on / database (ports 9476 / 9471)** — ✅ live-validated
+  2026-05-10 against IBM Cloud V7R6M0. Self-signed cert issued via
+  DCM (`*SYSTEM` store, signed by a Local CA generated in the same
+  flow), assigned to `QIBM_OS400_QZBS_SVR_DATABASE` / `_SIGNON` /
+  `_CENTRAL`. Host servers light up 9470-9476 alongside 8470-8476
+  automatically once the application-ID cert assignment lands -- no
+  `STRHOSTSVR SSL(*YES)` switch on V7R6. DSN scaffolding
+  (`tls=true`, `tls-insecure-skip-verify`, `tls-server-name`,
+  port flip) landed in commit `1e8ad69`; `TestTLSConnectivity` in
+  `test/conformance/` (gated on `GOJTOPEN_TLS_TARGET`) pins the
+  full sign-on → start-database → multi-row FETCH flow plus a
+  byte-diff against the plaintext result.
 
 ### M2 — Static SELECT round-trip (~2-3 weeks)
 
@@ -627,8 +636,9 @@ don't slot into a single milestone.
 4. **Connection-level CCSID double-meaning** -- one CCSID for SQL
    statement text, another for application data. Get this wrong and
    "broken EBCDIC" errors appear.
-5. **TLS quirks if/when SSL ports come up** -- IBM i certs sometimes
-   have IP in CN with no DNS SAN; `crypto/tls` rejects by default.
+5. **TLS quirks if/when SSL ports come up** -- ✅ closed 2026-05-10.
+   Live-validated against IBM Cloud V7R6M0; see "Deferred from M1"
+   above for the cert-assignment flow.
 
 ## Testing strategy
 
