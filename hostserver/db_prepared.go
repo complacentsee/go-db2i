@@ -313,6 +313,23 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			default:
 				return nil, fmt.Errorf("hostserver: param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
 			}
+		case 960, 961, 964, 965, 968, 969:
+			// LOB locator bind: BLOB (960/961), CLOB (964/965),
+			// DBCLOB (968/969). The SQLDA value at this slot is the
+			// 4-byte server-allocated locator handle (the actual
+			// content already shipped via WRITE_LOB_DATA before
+			// EXECUTE). FieldLength must be 4 -- the descriptor
+			// declared during CHANGE_DESCRIPTOR has FieldLength=4
+			// regardless of the column's max LOB size.
+			if p.FieldLength != 4 {
+				return nil, fmt.Errorf("hostserver: param %d: LOB SQL type %d expects FieldLength=4, got %d", i, p.SQLType, p.FieldLength)
+			}
+			h, err := toUint32Handle(v)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+			}
+			be.PutUint32(buf[dataOff:dataOff+4], h)
+			dataOff += 4
 		case 448, 449: // VARCHAR (NN, nullable)
 			// VARCHAR wire layout: 2-byte SL + payload bytes,
 			// padded out to FieldLength-2 bytes. CCSID determines
@@ -493,6 +510,19 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse column descriptors: %w", err)
 	}
+	pmf, err := prepRep.findSuperExtendedParameterMarkerFormat()
+	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse parameter marker format: %w", err)
+	}
+	// Ship LOB parameter content via WRITE_LOB_DATA before the
+	// CHANGE_DESCRIPTOR / OPEN_DESCRIBE_FETCH frames so the locator
+	// handles the SQLDA carries are already populated. Non-LOB
+	// params are no-ops.
+	if err := bindLOBParameters(conn, paramShapes, paramValues, pmf, nextCorr); err != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
+	}
 
 	// --- 3) CHANGE_DESCRIPTOR. ---
 	{
@@ -647,6 +677,26 @@ func toFloat64(v any) (float64, error) {
 		return float64(x), nil
 	default:
 		return 0, fmt.Errorf("cannot bind %T as REAL/DOUBLE (need float)", v)
+	}
+}
+
+// toUint32Handle accepts a LOB locator handle as uint32, int32, int,
+// or int64 and returns the 32-bit value. The bind dispatcher upstream
+// of EncodeDBExtendedData turns the user's []byte/string/*LOBValue
+// into a handle once WRITE_LOB_DATA has shipped the bytes; this
+// helper just unifies the acceptable Go integer shapes.
+func toUint32Handle(v any) (uint32, error) {
+	switch x := v.(type) {
+	case uint32:
+		return x, nil
+	case int32:
+		return uint32(x), nil
+	case int:
+		return uint32(x), nil
+	case int64:
+		return uint32(x), nil
+	default:
+		return 0, fmt.Errorf("LOB bind value must be uint32 locator handle, got %T", v)
 	}
 }
 

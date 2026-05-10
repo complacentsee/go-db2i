@@ -44,6 +44,100 @@ func (r *DBReply) findSuperExtendedDataFormat() ([]SelectColumn, error) {
 	return nil, nil
 }
 
+// ParameterMarkerField is one input parameter as the server
+// described it in the PREPARE_DESCRIBE reply. The fields mirror
+// JT400's DBSuperExtendedDataFormat getters that the
+// AS400JDBCPreparedStatement.bindParameter path consumes.
+//
+// LOBLocator is the per-parameter locator handle the server has
+// pre-allocated when the parameter targets a LOB column. Non-LOB
+// parameters carry zero. Captured handles for our PUB400 V7R5M0
+// fixtures: first LOB parameter -> 0x100, second -> 0x200.
+//
+// SQLType is the raw IBM i type code; the LOB families are
+// 960/961 (BLOB), 964/965 (CLOB), 968/969 (DBCLOB).
+type ParameterMarkerField struct {
+	SQLType     uint16
+	FieldLength uint32
+	Scale       uint16
+	Precision   uint16
+	CCSID       uint16
+	ParamType   byte
+	LOBLocator  uint32
+	LOBMaxSize  uint32
+	Name        string
+}
+
+// IsLOB reports whether this parameter targets a LOB column and
+// therefore needs the WRITE_LOB_DATA path on bind.
+func (p ParameterMarkerField) IsLOB() bool { return IsLOBSQLType(p.SQLType) }
+
+// findSuperExtendedParameterMarkerFormat returns the parsed list
+// of input-parameter shapes from a PREPARE_DESCRIBE reply, scanning
+// for CP 0x3813. Returns (nil, nil) if the reply doesn't contain
+// the CP -- e.g. a SQL statement with no `?` markers.
+func (r *DBReply) findSuperExtendedParameterMarkerFormat() ([]ParameterMarkerField, error) {
+	for _, p := range r.Params {
+		if p.CodePoint == 0x3813 {
+			return parseSuperExtendedParameterMarkerFormat(p.Data)
+		}
+	}
+	return nil, nil
+}
+
+// parseSuperExtendedParameterMarkerFormat decodes the CP 0x3813
+// payload. Layout matches CP 0x3812 (DBSuperExtendedDataFormat) --
+// 16-byte header + N x 48-byte field records + per-field variable
+// info. The bind side cares about three extra slots that the
+// SELECT-column parser ignores: ParamType (relative offset 14),
+// LOBLocator (relative offset 33; the server-allocated handle that
+// WRITE_LOB_DATA references), and LOBMaxSize (relative offset 42).
+//
+// Documented in detail in docs/lob-bind-wire-protocol.md.
+func parseSuperExtendedParameterMarkerFormat(data []byte) ([]ParameterMarkerField, error) {
+	if len(data) < 16 {
+		return nil, fmt.Errorf("hostserver: super-extended parameter marker format too short: %d bytes", len(data))
+	}
+	be := binary.BigEndian
+	numFields := int(be.Uint32(data[4:8]))
+	if numFields == 0 {
+		return nil, nil
+	}
+	const perFieldFixed = 48
+	const headerLen = 16
+	if numFields < 0 || numFields > 1<<16 {
+		return nil, fmt.Errorf("hostserver: super-extended parameter marker format implausible field count: %d", numFields)
+	}
+	if len(data) < headerLen+numFields*perFieldFixed {
+		return nil, fmt.Errorf("hostserver: super-extended parameter marker format truncated: have %d bytes, need >= %d for %d fields",
+			len(data), headerLen+numFields*perFieldFixed, numFields)
+	}
+
+	out := make([]ParameterMarkerField, 0, numFields)
+	for i := 0; i < numFields; i++ {
+		base := headerLen + i*perFieldFixed
+		f := ParameterMarkerField{
+			SQLType:     be.Uint16(data[base+2 : base+4]),
+			FieldLength: be.Uint32(data[base+4 : base+8]),
+			Scale:       be.Uint16(data[base+8 : base+10]),
+			Precision:   be.Uint16(data[base+10 : base+12]),
+			CCSID:       be.Uint16(data[base+12 : base+14]),
+			ParamType:   data[base+14],
+			LOBLocator:  be.Uint32(data[base+17 : base+21]),
+			LOBMaxSize:  be.Uint32(data[base+26 : base+30]),
+		}
+		offToVar := int(be.Uint32(data[base+32 : base+36]))
+		varLen := int(be.Uint32(data[base+36 : base+40]))
+		if offToVar > 0 && varLen > 0 {
+			if name, err := readSuperExtendedFieldName(data, base, offToVar, varLen); err == nil {
+				f.Name = name
+			}
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --
 // JTOpen's DBSuperExtendedDataFormat. Layout (per the JTOpen source
 // header comment):

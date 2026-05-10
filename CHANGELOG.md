@@ -12,6 +12,32 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- LOB *bind* via parameter markers. `db.Exec("INSERT INTO t (id, b)
+  VALUES (?, ?)", id, payload)` now writes BLOB / CLOB / DBCLOB
+  columns through the JT400 `WRITE_LOB_DATA` (function `0x1817`)
+  flow. The driver reads the server-allocated locator handles out
+  of the `PREPARE_DESCRIBE` reply (CP `0x3813` Super Extended
+  Parameter Marker Format), uploads the bytes in one or more
+  frames, and EXECUTE carries the 4-byte locator handle in the
+  SQLDA value slot. `[]byte` and `string` work directly for
+  materialised binds; the new `*gojtopen.LOBValue` type adds an
+  explicit form (`Bytes` for materialised, `Reader` + `Length` for
+  streamed binds that chunk across multiple `WRITE_LOB_DATA` frames
+  at advancing offsets). CLOB strings are pre-encoded via the
+  column-declared CCSID's codec (`ebcdic.CCSID37`, `ebcdic.CCSID273`,
+  …) so EBCDIC code-point mismatches like "!" = 0x5A on US vs 0x4F
+  on German round-trip cleanly. Wire-validated end-to-end against
+  PUB400 V7R5M0: 8 KiB BLOB byte-equal byte-equal, 80 KiB streamed
+  BLOB across three chunks, 1 MiB streamed BLOB across 32 chunks,
+  ~8 KiB CLOB EBCDIC round-trip.
+- `*gojtopen.LOBValue` public type (`driver/lob_value.go`) for
+  callers who want explicit LOB-intent at the call site or need
+  the streaming form (`Reader` + `Length`).
+- Wire-protocol reference doc at `docs/lob-bind-wire-protocol.md`
+  pinning the bind sequence (PREPARE_DESCRIBE → CHANGE_DESCRIPTOR
+  → WRITE_LOB_DATA × N → EXECUTE) plus the corrected CP map for
+  any future re-derivation: LOB Data is `0x381D`, truncation is
+  `0x3822`, locator handles are server-allocated (not client).
 - LOB streaming via `*gojtopen.LOBReader`. Opt in with the DSN
   option `?lob=stream`; the default `materialise` mode (full LOB
   into `[]byte` / `string` at Scan time) stays unchanged. `LOBReader`
@@ -25,6 +51,13 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Fixed
 
+- CLOB read decode now picks the column's actual CCSID codec
+  instead of always using CCSID 37. Without this, columns declared
+  CCSID 273 (German EBCDIC, the PUB400 default) round-tripped some
+  punctuation incorrectly — e.g. "!" wrote as 0x4F but read back as
+  "|" because the encoder used CCSID 273's mapping while the
+  decoder used CCSID 37's. The 17 divergent code-points are now
+  symmetric.
 - LOB locator column index off-by-one — the driver passed the Go
   0-based column index to `RETRIEVE_LOB_DATA` (CP `0x3828`) where
   JT400's `JDServerRow.newData` uses 1-based (`i+1`). On V7R5+
@@ -149,8 +182,8 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Limitations / not yet implemented
 
-- LOB bind on parameter markers (writing large LOBs as INSERT /
-  UPDATE values via `?` placeholders). Inline literals
-  (`X'...'`, string literals) still work for small LOBs.
+- DBCLOB string bind (UCS-2 BE on the wire, CCSID 13488). `[]byte`
+  with pre-encoded UCS-2 bytes works; pure-Go string → UTF-16 BE
+  transcoding lands with the next CCSID 13488 codec milestone.
 - TLS sign-on / database (ports 9476 / 9471) (M7).
 - `slog` integration / OpenTelemetry spans (M8).

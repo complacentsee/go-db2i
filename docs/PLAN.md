@@ -523,7 +523,14 @@ fresh connection.
     on PUB400 V7R5M0 (200-byte BLOB chunked, 700-char CCSID-273
     CLOB streamed and EBCDIC-decoded).
   - **LOB bind** — INSERT / UPDATE of large LOBs via `?`
-    placeholders is still TODO. Inline literals work today.
+    placeholders landed 2026-05-10. `[]byte`, `string`, and the
+    new `*gojtopen.LOBValue` type all route through the JT400
+    `WRITE_LOB_DATA` (function `0x1817`) flow with server-allocated
+    locator handles read out of `PREPARE_DESCRIBE` reply CP `0x3813`.
+    Wire-validated end-to-end on PUB400 V7R5M0: 8 KiB BLOB
+    byte-equal vs JT400 fixture, 1 MiB streamed BLOB across 32
+    chunks, ~8 KiB CLOB EBCDIC round-trip via `ebcdic.CCSID273`.
+    Wire-protocol reference at `docs/lob-bind-wire-protocol.md`.
 - SQLCA → typed `*Db2Error{SQLState, SQLCode, Message, Tokens}`
   with substitution. Landed in M6 (`d0ba583`).
 - Connection-level CCSID negotiation. Distinguish the SQL-statement
