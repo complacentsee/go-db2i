@@ -426,7 +426,7 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 // any error after CREATE_RPB. Returned fetchOutcome reports
 // whether the OPEN reply already drained the cursor and whether
 // the server auto-closed it (JT400's "fetch/close" path).
-func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
+func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32, opts selectOpts) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	if !strings.ContainsRune(sql, '?') {
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: OpenSelectPrepared called on SQL without parameter markers; use OpenSelectStatic")
 	}
@@ -469,19 +469,30 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	stmtBytes := utf16BE(sql)
 	prepCorr := nextCorr()
 	{
+		ors := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | uint32(0x00040000)
+		if opts.extendedMetadata {
+			ors |= ORSExtendedColumnDescrs
+		}
 		tpl := DBRequestTemplate{
-			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | 0x00040000,
+			ORSBitmap:                 ors,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, []DBParam{
+		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, 2),
 			DBParamByte(cpDBPrepareOption, 0x00),
-		})
+		}
+		if opts.extendedMetadata {
+			// CP 0x3829 = 0xF1 -- without it the server ships
+			// CP 0x3811 with zero bytes. Mirrors JT400's
+			// DBSQLRequestDS.setExtendedColumnDescriptorOption.
+			prepParams = append(prepParams, DBParamByte(0x3829, 0xF1))
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {
 			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
 		}
@@ -509,6 +520,14 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse column descriptors: %w", err)
+	}
+	if opts.extendedMetadata {
+		for _, p := range prepRep.Params {
+			if p.CodePoint == 0x3811 {
+				enrichWithExtendedColumnDescriptors(cols, p.Data)
+				break
+			}
+		}
 	}
 	pmf, err := prepRep.findSuperExtendedParameterMarkerFormat()
 	if err != nil {

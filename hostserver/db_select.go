@@ -314,6 +314,25 @@ type SelectColumn struct {
 	DisplaySize int
 	Nullable    bool
 	Signed      bool
+
+	// Extended-metadata fields (populated when the request set the
+	// ORSExtendedColumnDescrs bit; otherwise empty). Sourced from
+	// the CP 0x3811 reply parameter and decoded per JT400's
+	// DBColumnDescriptorsDataFormat: 0x3900 = base column name,
+	// 0x3901 = base table name, 0x3902 = column label (carries its
+	// own CCSID), 0x3904 = schema name.
+	//
+	// Schema, Table, BaseColumnName are EBCDIC bytes pre-decoded
+	// through the column's server-job CCSID; Label is decoded
+	// through the CCSID the server stamped on its 0x3902 record.
+	// All four are empty strings when the server didn't include
+	// them, the caller didn't ask for extended metadata, or the
+	// query target doesn't have a single base table (e.g. computed
+	// columns, joins, expressions).
+	Schema         string
+	Table          string
+	BaseColumnName string
+	Label          string
 }
 
 // SelectResult bundles the column descriptors with the rows
@@ -357,6 +376,49 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 	return cursor.drainAll()
 }
 
+// SelectOption tweaks request-side behaviour of OpenSelectStatic /
+// OpenSelectPrepared. Compose with the variadic tail of each:
+//
+//	hostserver.OpenSelectStatic(conn, sql, nextCorr,
+//	    hostserver.WithExtendedMetadata(true))
+//
+// Zero options reproduces the historical behaviour byte-for-byte.
+type SelectOption func(*selectOpts)
+
+type selectOpts struct {
+	// extendedMetadata, when true, ORs the
+	// ORSExtendedColumnDescrs bit (0x00020000) into the
+	// PREPARE_DESCRIBE / OPEN_DESCRIBE_FETCH ORS bitmaps. The
+	// server then includes a CP 0x3811 parameter in the reply
+	// carrying per-column schema / table / base column name /
+	// label. enrichWithExtendedColumnDescriptors overlays those
+	// fields onto the SelectColumn slice once the data format CP
+	// has been parsed.
+	extendedMetadata bool
+}
+
+// WithExtendedMetadata asks the server to ship per-column schema,
+// table, base column name, and label in the PREPARE_DESCRIBE
+// reply. Mirrors JT400's `extended metadata=true` JDBC URL knob.
+//
+// The default-OFF behaviour keeps the wire shape byte-identical to
+// pre-M4-deferred captures so existing fixtures still replay
+// cleanly; callers opt in per-statement when they need
+// `Rows.ColumnTypeSchemaName` / `Rows.ColumnTypeTableName`.
+func WithExtendedMetadata(b bool) SelectOption {
+	return func(o *selectOpts) { o.extendedMetadata = b }
+}
+
+func resolveSelectOpts(opts []SelectOption) selectOpts {
+	var o selectOpts
+	for _, fn := range opts {
+		if fn != nil {
+			fn(&o)
+		}
+	}
+	return o
+}
+
 // openStaticUntilFirstBatch is the shared implementation used by
 // both SelectStaticSQL (which then drains all rows) and
 // OpenSelectStatic (which wraps the result in a *Cursor for lazy
@@ -371,7 +433,7 @@ func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*S
 // On any error after CREATE_RPB has run, the RPB slot is freed
 // before the function returns so the next SELECT on the connection
 // can chain cleanly.
-func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
+func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() uint32, opts selectOpts) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	// --- 1) CREATE_RPB. ---
 	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
 	if err != nil {
@@ -431,6 +493,9 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	if strings.ContainsRune(sql, '?') {
 		ors |= ORSParameterMarkerFmt
 	}
+	if opts.extendedMetadata {
+		ors |= ORSExtendedColumnDescrs
+	}
 	prepCorr := nextCorr()
 	{
 		tpl := DBRequestTemplate{
@@ -447,6 +512,15 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes), // UCS-2 BE
 			DBParamShort(cpDBStatementType, 2),                            // SELECT
 			DBParamByte(cpDBPrepareOption, 0x00),
+		}
+		if opts.extendedMetadata {
+			// CP 0x3829 (ExtendedColumnDescriptorOption) = 0xF1
+			// asks the server to populate CP 0x3811 with per-column
+			// schema / table / base column / label. Without it the
+			// server ships CP 0x3811 with zero data, even when the
+			// request's ORS bit asks for it. Per JT400's
+			// DBSQLRequestDS.setExtendedColumnDescriptorOption.
+			params = append(params, DBParamByte(0x3829, 0xF1))
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, params)
 		if err != nil {
@@ -485,6 +559,22 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse column descriptors: %w", err)
+	}
+	if opts.extendedMetadata {
+		// CP 0x3811 carries the extended descriptors. Best-effort
+		// overlay -- ParseDBReply already validated the LL/CP shape,
+		// so we just walk the parsed parameter list looking for our
+		// CP. Skipping silently on absence keeps the path resilient
+		// against servers that ignore the ORS bit on certain
+		// statement shapes (computed columns, joins, etc.) or that
+		// ship the CP with empty data when the per-statement option
+		// CP 0x3829 wasn't accepted.
+		for _, p := range prepRep.Params {
+			if p.CodePoint == 0x3811 && len(p.Data) > 0 {
+				enrichWithExtendedColumnDescriptors(cols, p.Data)
+				break
+			}
+		}
 	}
 	if len(cols) == 0 {
 		// List the CPs that did come back -- helps when the

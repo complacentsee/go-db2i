@@ -255,6 +255,18 @@ type Config struct {
 	// locator path so RETRIEVE_LOB_DATA covers anything beyond the
 	// chosen threshold.
 	LOBThreshold uint32
+
+	// ExtendedMetadata, when true, asks the server to include CP
+	// 0x3811 (extended column descriptors) in every PREPARE_DESCRIBE
+	// reply by ORing the ORSExtendedColumnDescrs (0x00020000) bit
+	// into the request ORS bitmap. The driver then surfaces the
+	// per-column schema name, base table name, base column name,
+	// and column label through goJTOpen-specific Rows methods
+	// (Rows.ColumnTypeSchemaName / Rows.ColumnTypeTableName etc.).
+	// Mirrors JT400's "extended metadata=true" JDBC URL knob;
+	// configured via the DSN "extended-metadata=true" query key.
+	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	ExtendedMetadata bool
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -412,6 +424,13 @@ func parseDSN(dsn string) (*Config, error) {
 			return nil, fmt.Errorf("invalid lob-threshold %q (want unsigned 32-bit int): %w", v, err)
 		}
 		cfg.LOBThreshold = uint32(n)
+	}
+	if v := q.Get("extended-metadata"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid extended-metadata %q (want true|false): %w", v, err)
+		}
+		cfg.ExtendedMetadata = b
 	}
 	return &cfg, nil
 }

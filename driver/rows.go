@@ -288,6 +288,46 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	return r.cursor.Columns()[index].TypeName
 }
 
+// ColumnTypeSchemaName returns the base schema for the named column,
+// or empty when the connection didn't request extended metadata
+// (DSN "extended-metadata=true") or the query target doesn't have a
+// single underlying table (computed columns, joins, expressions).
+// Mirrors JDBC's ResultSetMetaData.getSchemaName.
+//
+// Not part of the database/sql.RowsColumnType* interface set; reach
+// it via type assertion:
+//
+//	if mr, ok := rows.(interface{ ColumnTypeSchemaName(int) string }); ok {
+//	    schema := mr.ColumnTypeSchemaName(0)
+//	}
+func (r *Rows) ColumnTypeSchemaName(index int) string {
+	return r.cursor.Columns()[index].Schema
+}
+
+// ColumnTypeTableName returns the base table for the named column,
+// or empty under the same conditions as ColumnTypeSchemaName.
+// Mirrors JDBC's ResultSetMetaData.getTableName.
+func (r *Rows) ColumnTypeTableName(index int) string {
+	return r.cursor.Columns()[index].Table
+}
+
+// ColumnTypeBaseColumnName returns the underlying base column name
+// for an aliased SELECT column, or empty when extended metadata
+// wasn't requested or the column isn't a direct projection of a
+// base column. Mirrors JT400's DBColumnDescriptorsDataFormat
+// .getBaseColumnName.
+func (r *Rows) ColumnTypeBaseColumnName(index int) string {
+	return r.cursor.Columns()[index].BaseColumnName
+}
+
+// ColumnTypeLabel returns the column label (SQL `AS` alias) the
+// server reports, or empty when extended metadata wasn't requested
+// or the server didn't include a label. Mirrors JT400's
+// DBColumnDescriptorsDataFormat.getColumnLabel.
+func (r *Rows) ColumnTypeLabel(index int) string {
+	return r.cursor.Columns()[index].Label
+}
+
 func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	return r.cursor.Columns()[index].Nullable, true
 }

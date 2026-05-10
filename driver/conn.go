@@ -155,6 +155,19 @@ func (c *Conn) nextCorr() uint32 {
 // (no block reservation). Used by streaming flows (OpenSelectStatic
 // and friends) where the driver and a long-lived *hostserver.Cursor
 // need to share the counter across multiple Next / Close calls.
+// selectOptions returns the hostserver.SelectOption slice the
+// per-Stmt SELECT entry points should pass. Folds in connection-
+// level knobs (ExtendedMetadata today; future per-conn select
+// behaviours land here). Returns nil when no options are active so
+// the OpenSelectStatic / OpenSelectPrepared call sites stay zero-
+// allocation for the common path.
+func (c *Conn) selectOptions() []hostserver.SelectOption {
+	if c.cfg == nil || !c.cfg.ExtendedMetadata {
+		return nil
+	}
+	return []hostserver.SelectOption{hostserver.WithExtendedMetadata(true)}
+}
+
 func (c *Conn) nextCorrFunc() func() uint32 {
 	return func() uint32 {
 		return atomic.AddUint32(&c.corrCount, 1)

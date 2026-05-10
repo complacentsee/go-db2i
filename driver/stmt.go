@@ -122,8 +122,9 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if !isSelect(s.query) {
 		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT; use Exec")
 	}
+	selectOpts := s.conn.selectOptions()
 	if len(args) == 0 {
-		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc())
+		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc(), selectOpts...)
 		if err != nil {
 			return nil, s.conn.classifyConnErr(err)
 		}
@@ -133,7 +134,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc())
+	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}

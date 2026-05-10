@@ -151,11 +151,11 @@ func (c *Cursor) Close() error {
 // holds onto it so continuation FETCH (issued lazily from Next) and
 // RPB DELETE (from Close) keep advancing the same counter the
 // driver Conn uses.
-func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32) (*Cursor, error) {
+func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error) {
 	if nextCorr == nil {
 		return nil, errors.New("hostserver: OpenSelectStatic requires a non-nil nextCorr")
 	}
-	cols, firstBatch, outcome, err := openStaticUntilFirstBatch(conn, sql, nextCorr)
+	cols, firstBatch, outcome, err := openStaticUntilFirstBatch(conn, sql, nextCorr, resolveSelectOpts(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -165,11 +165,11 @@ func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32) (*
 // OpenSelectPrepared opens a streaming cursor for a parameterised
 // SELECT. Same shape as OpenSelectStatic, plus the CHANGE_DESCRIPTOR
 // + bound-value frames between PREPARE and OPEN.
-func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32) (*Cursor, error) {
+func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error) {
 	if nextCorr == nil {
 		return nil, errors.New("hostserver: OpenSelectPrepared requires a non-nil nextCorr")
 	}
-	cols, firstBatch, outcome, err := openPreparedUntilFirstBatch(conn, sql, paramShapes, paramValues, nextCorr)
+	cols, firstBatch, outcome, err := openPreparedUntilFirstBatch(conn, sql, paramShapes, paramValues, nextCorr, resolveSelectOpts(opts))
 	if err != nil {
 		return nil, err
 	}

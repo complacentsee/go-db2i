@@ -371,3 +371,46 @@ func TestParseDSNLOBThreshold(t *testing.T) {
 		}
 	})
 }
+
+// TestParseDSNExtendedMetadata covers the M4 ?extended-metadata=true
+// knob: default false, explicit true/false, the bool aliases, and
+// rejection of bogus input.
+func TestParseDSNExtendedMetadata(t *testing.T) {
+	t.Run("default false", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.ExtendedMetadata {
+			t.Error("default ExtendedMetadata = true, want false")
+		}
+	})
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"true", true},
+		{"false", false},
+		{"yes", true},
+		{"no", false},
+		{"on", true},
+		{"off", false},
+		{"1", true},
+		{"0", false},
+	} {
+		t.Run("extended-metadata="+tc.raw, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?extended-metadata=" + tc.raw)
+			if err != nil {
+				t.Fatalf("parseDSN: %v", err)
+			}
+			if cfg.ExtendedMetadata != tc.want {
+				t.Errorf("ExtendedMetadata = %v, want %v", cfg.ExtendedMetadata, tc.want)
+			}
+		})
+	}
+	t.Run("rejects bogus", func(t *testing.T) {
+		if _, err := parseDSN("gojtopen://u:p@h/?extended-metadata=maybe"); err == nil {
+			t.Error("extended-metadata=maybe should be rejected")
+		}
+	})
+}

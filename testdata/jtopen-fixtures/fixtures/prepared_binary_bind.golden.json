@@ -1,0 +1,44 @@
+{
+  "case" : "prepared_binary_bind",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "C",
+      "label" : "C",
+      "typeName" : "CHAR () FOR BIT DATA",
+      "sqlType" : -2,
+      "displaySize" : 8,
+      "precision" : 8,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "B",
+      "label" : "B",
+      "typeName" : "BINARY",
+      "sqlType" : -2,
+      "displaySize" : 8,
+      "precision" : 8,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "V",
+      "label" : "V",
+      "typeName" : "VARBINARY",
+      "sqlType" : -3,
+      "displaySize" : 32,
+      "precision" : 32,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "0001020304050607", "aabbccddeeff0011", "deadbeefcafebabe" ] ]
+  } ],
+  "updateCount" : 1
+}

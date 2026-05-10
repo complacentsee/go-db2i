@@ -243,9 +243,12 @@ type matrix on top of this scaffold.
 
 **Deferred from M3:**
 
-- **`bool` parameter binding** — listed in the original M3 scope
-  but no IBM i SQL type maps cleanly to BOOL pre-V7R5. Skip until
-  someone needs it; SMALLINT(1) is the standard substitute.
+- **`bool` parameter binding** — ✅ closed 2026-05-10 by the M3
+  deferred wrap-up. V7R5+ native `BOOLEAN` (SQL types 2436/2437)
+  decodes via the 1-byte `0xF0 = false / else = true` form;
+  bind via SMALLINT(1) and let the server coerce. Live-validated
+  on V7R6M0 via `TestBooleanRoundTrip`. SMALLINT(1) substitute
+  still works for V7R4 and earlier.
 - **String CCSIDs beyond 37 / 273** — UTF-8 (1208) and UCS-2 BE
   (13488) for column data are referenced in the connection
   metadata path but not used for VARCHAR bind. Lands with the M7
@@ -316,14 +319,24 @@ BCD sign nibbles cover both directions.
   so USA/EUR/JIS/MDY/DMY/YMD emit format-correct wire bytes.
   Legacy zero-`DateFormat` callers keep length-based ISO/YMD
   inference unchanged.
-- **CCSID 65535 (binary "no conversion")** — listed in original
-  M4 scope but no captured fixture uses it; the type-decoder
-  switch should route 65535 → `[]byte` directly without EBCDIC
-  decode. Still a parking-lot item.
-- **Schema/table column metadata** — `SelectColumn.Schema` and
-  `SelectColumn.Table` are blank because JT400 only sends them
-  when the connection set `extended metadata=true`. Decision
-  deferred to the M6 driver design (default vs opt-in).
+- **CCSID 65535 (binary "no conversion")** — ✅ closed 2026-05-10.
+  CHAR FOR BIT DATA / VARCHAR FOR BIT DATA always routed
+  through the CCSID-65535 → `[]byte` path; the M4 deferred
+  wrap-up added the standalone V7R3+ types BINARY (912/913) and
+  VARBINARY (908/909) to the same decoder shape. Captured
+  fixture `prepared_binary_bind` + live conformance
+  `TestBinaryTypeRoundTrip` pin all three byte-flavours.
+- **Schema/table column metadata** — ✅ closed 2026-05-10. DSN
+  `?extended-metadata=true` ORs the ORS bit `0x00020000` AND
+  sends the per-statement CP `0x3829 = 0xF1` so the server
+  populates CP `0x3811` with per-column schema / table / base
+  column / label. Both knobs are required: ORS-only returns CP
+  `0x3811` with zero bytes (JT400's "empty descriptor" case).
+  Surfaced via driver-level `Rows.ColumnTypeSchemaName` /
+  `Rows.ColumnTypeTableName` / `Rows.ColumnTypeBaseColumnName` /
+  `Rows.ColumnTypeLabel`. Live-validated on V7R6M0 via
+  `TestExtendedMetadata`. Default-off keeps the wire shape
+  byte-identical to pre-flag fixtures.
 
 ### M5 — ResultSet metadata, transactions, isolation (~1-2 weeks)
 

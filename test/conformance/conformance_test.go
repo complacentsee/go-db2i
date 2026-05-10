@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -1406,6 +1407,308 @@ func TestTLSConnectivity(t *testing.T) {
 		for i := range got {
 			if got[i] != plain[i] {
 				t.Errorf("row %d diverged: tls=%v plain=%v", i, got[i], plain[i])
+			}
+		}
+	})
+}
+
+// TestExtendedMetadata exercises the M4 ?extended-metadata=true
+// knob: when set, the driver requests CP 0x3811 from the server
+// and surfaces per-column schema name, base table name, and base
+// column name through goJTOpen-specific Rows accessors. Closes the
+// M4 "deferred: schema/table column metadata" gap from PLAN.md.
+//
+// Without the flag the same accessors return empty strings (the
+// pre-flag wire shape stays byte-identical to historic captures).
+// The test compares both modes against the same SELECT to pin the
+// flag's effect.
+//
+// Reaches the driver-level Rows via sql.Conn.Raw + driver.Stmt
+// directly because database/sql.Rows hides driver methods that
+// aren't part of its frozen interface set. Bracketed by ConnRaw
+// so the underlying goJTOpen connection is the same one that
+// supplied the driver.Rows.
+func TestExtendedMetadata(t *testing.T) {
+	tbl := schema() + "." + tablePrefix + "extmeta"
+	tblShort := tablePrefix + "extmeta"
+
+	setupDB := openDB(t)
+	setupDB.Exec("DROP TABLE " + tbl)
+	if _, err := setupDB.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, name VARCHAR(64))`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer setupDB.Exec("DROP TABLE " + tbl)
+	if _, err := setupDB.Exec(fmt.Sprintf(`INSERT INTO %s (id, name) VALUES (?, ?)`, tbl), 1, "alice"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Open a second DB with extended-metadata=true so we can compare
+	// the same SELECT against the same row through both paths.
+	extDSN := dsn(t)
+	if strings.Contains(extDSN, "extended-metadata=") {
+		t.Skip("DSN already sets extended-metadata; can't toggle deterministically")
+	}
+	sep := "?"
+	if strings.Contains(extDSN, "?") {
+		sep = "&"
+	}
+	extDB, err := sql.Open("gojtopen", extDSN+sep+"extended-metadata=true")
+	if err != nil {
+		t.Fatalf("sql.Open(ext): %v", err)
+	}
+	t.Cleanup(func() { extDB.Close() })
+
+	query := fmt.Sprintf("SELECT id, name FROM %s WHERE id = 1", tbl)
+
+	t.Run("flag off: schema and table empty", func(t *testing.T) {
+		got := selectFirstColumnMetadata(t, setupDB, query)
+		for i, m := range got {
+			if m.schema != "" {
+				t.Errorf("col %d Schema = %q without flag, want empty", i, m.schema)
+			}
+			if m.table != "" {
+				t.Errorf("col %d Table = %q without flag, want empty", i, m.table)
+			}
+			if m.base != "" {
+				t.Errorf("col %d BaseColumnName = %q without flag, want empty", i, m.base)
+			}
+		}
+	})
+
+	t.Run("flag on: schema and table populate", func(t *testing.T) {
+		got := selectFirstColumnMetadata(t, extDB, query)
+		wantTable := strings.ToUpper(tblShort)
+		for i, want := range []struct{ schema, table, base string }{
+			{schema(), wantTable, "ID"},
+			{schema(), wantTable, "NAME"},
+		} {
+			if got[i].schema != want.schema {
+				t.Errorf("col %d Schema = %q, want %q", i, got[i].schema, want.schema)
+			}
+			if got[i].table != want.table {
+				t.Errorf("col %d Table = %q, want %q", i, got[i].table, want.table)
+			}
+			if got[i].base != want.base {
+				t.Errorf("col %d BaseColumnName = %q, want %q", i, got[i].base, want.base)
+			}
+		}
+	})
+}
+
+type extColMeta struct {
+	schema, table, base string
+}
+
+// selectFirstColumnMetadata reaches the driver-level Rows via
+// sql.Conn.Raw and pulls the extended-metadata fields off each
+// column. The bridge sidesteps database/sql.Rows hiding driver-
+// specific methods: Raw hands us the underlying driver.Conn, and
+// from there we drive driver.Conn.Prepare + Stmt.Query directly.
+func selectFirstColumnMetadata(t *testing.T, db *sql.DB, query string) []extColMeta {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer c.Close()
+
+	var out []extColMeta
+	if err := c.Raw(func(rawConn any) error {
+		dc, ok := rawConn.(driver.Conn)
+		if !ok {
+			t.Fatalf("raw conn type %T does not implement driver.Conn", rawConn)
+		}
+		stmt, err := dc.Prepare(query)
+		if err != nil {
+			return fmt.Errorf("driver Prepare: %w", err)
+		}
+		defer stmt.Close()
+		queryer, ok := stmt.(driver.StmtQueryContext)
+		if !ok {
+			return errors.New("driver Stmt does not implement StmtQueryContext")
+		}
+		rows, err := queryer.QueryContext(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("driver Query: %w", err)
+		}
+		defer rows.Close()
+		mr, ok := rows.(interface {
+			ColumnTypeSchemaName(int) string
+			ColumnTypeTableName(int) string
+			ColumnTypeBaseColumnName(int) string
+		})
+		if !ok {
+			return errors.New("driver Rows missing extended-metadata accessors")
+		}
+		ncols := len(rows.Columns())
+		out = make([]extColMeta, ncols)
+		for i := 0; i < ncols; i++ {
+			out[i] = extColMeta{
+				schema: mr.ColumnTypeSchemaName(i),
+				table:  mr.ColumnTypeTableName(i),
+				base:   mr.ColumnTypeBaseColumnName(i),
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Raw: %v", err)
+	}
+	return out
+}
+
+// TestBinaryTypeRoundTrip exercises the three CCSID-65535 binary
+// flavours on V7R3+: CHAR FOR BIT DATA (SQL types 452/453 +
+// CCSID 65535), the native BINARY type (912/913), and the native
+// VARBINARY type (908/909). Each round-trips a deterministic byte
+// pattern and asserts byte-equality on the SELECT-back side.
+//
+// Closes the M4 "deferred: CCSID 65535 binary handling" gap from
+// PLAN.md -- the decode path was always wired but had no live
+// regression test. The TestBlobs case covers VARCHAR FOR BIT DATA
+// (449 + CCSID 65535); this test adds the remaining three.
+func TestBinaryTypeRoundTrip(t *testing.T) {
+	db := openDB(t)
+	tbl := schema() + "." + tablePrefix + "binary"
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CHAR(8) FOR BIT DATA, b BINARY(8), v VARBINARY(32))`, tbl)); err != nil {
+		t.Skipf("CREATE TABLE with BINARY / VARBINARY failed (pre-V7R3?): %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	wantC := []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}
+	wantB := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}
+	wantV := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE}
+
+	if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c, b, v) VALUES (?, ?, ?, ?)`, tbl),
+		1, wantC, wantB, wantV); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	t.Run("CHAR FOR BIT DATA", func(t *testing.T) {
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, wantC) {
+			t.Errorf("CHAR FOR BIT DATA mismatch: got %x, want %x", got, wantC)
+		}
+	})
+
+	t.Run("BINARY", func(t *testing.T) {
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, wantB) {
+			t.Errorf("BINARY mismatch: got %x, want %x", got, wantB)
+		}
+	})
+
+	t.Run("VARBINARY", func(t *testing.T) {
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT v FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, wantV) {
+			t.Errorf("VARBINARY mismatch: got %x, want %x", got, wantV)
+		}
+	})
+
+	t.Run("all three in one row", func(t *testing.T) {
+		// Multi-column read exercises the row-stride accounting: a
+		// regression where the BINARY-fixed-length decoder advanced
+		// by the wrong byte count would shift VARBINARY by 8 bytes
+		// and surface as a content mismatch on `v`.
+		var c, b, v []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c, b, v FROM %s WHERE id = ?`, tbl), 1).Scan(&c, &b, &v); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(c, wantC) || !bytes.Equal(b, wantB) || !bytes.Equal(v, wantV) {
+			t.Errorf("multi-column shift detected:\n  c=%x want=%x\n  b=%x want=%x\n  v=%x want=%x",
+				c, wantC, b, wantB, v, wantV)
+		}
+	})
+}
+
+// TestBooleanRoundTrip exercises V7R5+ native BOOLEAN columns
+// (SQL types 2436 NN / 2437 nullable). The driver binds Go bool as
+// SMALLINT(1) (the standard substitute IBM Db2 for i coerces into
+// BOOLEAN server-side) and decodes BOOLEAN result columns via the
+// 1-byte wire form (0xF0 = false, anything else = true) that
+// mirrors JT400's `SQLBoolean.convertFromRawBytes`.
+//
+// Closes the M3 "deferred: bool parameter binding" gap from PLAN.md.
+// Skips automatically if the LPAR doesn't accept `CREATE TABLE ...
+// (flag BOOLEAN)` so the suite stays green on V7R4 and earlier.
+func TestBooleanRoundTrip(t *testing.T) {
+	db := openDB(t)
+	tbl := schema() + "." + tablePrefix + "bool"
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, flag BOOLEAN)`, tbl)); err != nil {
+		t.Skipf("CREATE TABLE ... BOOLEAN failed (V7R4 or earlier?): %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	// Four rows so any bit-position swap in the row-stride layout
+	// (e.g. shifting between SQLDA slots) would diverge from the
+	// expected sequence.
+	cases := []struct {
+		id   int
+		want bool
+	}{{1, true}, {2, false}, {3, true}, {4, false}}
+	for _, c := range cases {
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, flag) VALUES (?, ?)`, tbl), c.id, c.want); err != nil {
+			t.Fatalf("insert id=%d flag=%v: %v", c.id, c.want, err)
+		}
+	}
+
+	t.Run("scalar via parameter marker", func(t *testing.T) {
+		for _, c := range cases {
+			var got bool
+			if err := db.QueryRow(fmt.Sprintf(`SELECT flag FROM %s WHERE id = ?`, tbl), c.id).Scan(&got); err != nil {
+				t.Fatalf("scan id=%d: %v", c.id, err)
+			}
+			if got != c.want {
+				t.Errorf("id=%d flag = %v, want %v", c.id, got, c.want)
+			}
+		}
+	})
+
+	t.Run("full pull preserves order", func(t *testing.T) {
+		rows, err := db.Query(fmt.Sprintf(`SELECT id, flag FROM %s ORDER BY id`, tbl))
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var got []struct {
+			id   int
+			flag bool
+		}
+		for rows.Next() {
+			var r struct {
+				id   int
+				flag bool
+			}
+			if err := rows.Scan(&r.id, &r.flag); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			got = append(got, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if len(got) != len(cases) {
+			t.Fatalf("got %d rows, want %d", len(got), len(cases))
+		}
+		for i, c := range cases {
+			if got[i].id != c.id || got[i].flag != c.want {
+				t.Errorf("row %d: got id=%d flag=%v, want id=%d flag=%v",
+					i, got[i].id, got[i].flag, c.id, c.want)
 			}
 		}
 	})

@@ -51,6 +51,59 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M3 deferred: native BOOLEAN (V7R5+) bind + decode live-validated
+  on V7R6M0. Driver binds Go `bool` as SMALLINT(1) (the standard
+  server-side coercion path JT400 documents); decoder learns
+  SQL types 2436/2437 with the 1-byte wire form
+  `0xF0 = false, anything else = true`, mirroring JT400's
+  `SQLBoolean.convertFromRawBytes`. Offline coverage:
+  `TestDecodeColumnBoolean/*` (NN + nullable, 0xF0 / 0xF1 /
+  out-of-spec true sentinels). Live coverage:
+  `TestBooleanRoundTrip/{scalar_via_parameter_marker,
+  full_pull_preserves_order}` exercises bind + multi-row decode
+  against a `CREATE TABLE ... (flag BOOLEAN)`. Skips on V7R4 and
+  earlier (CREATE returns a syntax error).
+
+- M4 deferred: native BINARY (912/913) and VARBINARY (908/909)
+  result-data decoders. CHAR FOR BIT DATA (452/453 + CCSID 65535)
+  and VARCHAR FOR BIT DATA (449 + CCSID 65535) already handled the
+  byte-data emulation; V7R3+ servers expose the standalone BINARY
+  / VARBINARY types under distinct SQL type codes that hit the
+  "unsupported SQL type" path pre-fix. New decoders share the
+  []byte-output shape with their CHAR-with-bit-data siblings.
+  Also fixes a mislabel in `isVarLengthSQLType`: 472/473 was
+  commented as "VARBINARY family" but is actually LONGVARGRAPHIC
+  (per JT400's SQLDataFactory mapping); VARBINARY's real native
+  type is 908/909. New offline tests
+  `TestDecodeColumnBINARY` / `TestDecodeColumnVARBINARY`; new
+  fixture case `prepared_binary_bind` captures JT400's
+  three-column wire pattern (`CHAR(8) FOR BIT DATA` + `BINARY(8)`
+  + `VARBINARY(32)`). Live coverage:
+  `TestBinaryTypeRoundTrip/{CHAR FOR BIT DATA, BINARY, VARBINARY,
+  all three in one row}` PASS on V7R6M0.
+
+- M4 deferred: extended column metadata (schema, table, base column
+  name, label) via DSN `?extended-metadata=true`. Plumbs the
+  ORS bit `0x00020000` (ORSExtendedColumnDescrs) + the per-statement
+  CP `0x3829 = 0xF1` (ExtendedColumnDescriptorOption) through
+  PREPARE_DESCRIBE. The CP `0x3829` knob is **required**: pre-fix
+  iterations of the patch ORed only the ORS bit and saw CP `0x3811`
+  come back with zero bytes — JT400 documents this as the "empty
+  descriptor" warning case. With both knobs set the server fills
+  CP `0x3811` with the per-column variable-info section (LL/CP
+  records 0x3900 base column / 0x3901 base table / 0x3902 label
+  with CCSID prefix / 0x3904 schema name). New `SelectColumn`
+  fields `Schema`, `Table`, `BaseColumnName`, `Label`; driver
+  surfaces them via goJTOpen-specific `Rows.ColumnTypeSchemaName`
+  / `ColumnTypeTableName` / `ColumnTypeBaseColumnName` /
+  `ColumnTypeLabel` methods (callers reach them via the driver-
+  level Rows; `database/sql.Rows` hides them). Offline coverage:
+  `TestEnrichWithExtendedColumnDescriptors` walks a synthetic
+  two-column payload. Live coverage:
+  `TestExtendedMetadata/{flag off..., flag on:schema and table
+  populate}` PASS on V7R6M0; flag-off side stays empty (no wire
+  regression vs pre-flag captures).
+
 - Bug #15 TestLOBClob CCSID 273 byte-mode mismatch resolved. The
   test was pre-encoding "Hello, IBM i! " via
   `ebcdic.CCSID273.Encode` and inserting the bytes verbatim into a

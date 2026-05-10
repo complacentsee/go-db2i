@@ -87,6 +87,7 @@ final class Cases {
         cases.add(new PreparedBlobInsertLarge(schema));
         cases.add(new PreparedBlobBatch(schema));
         cases.add(new PreparedBlobThreshold(schema));
+        cases.add(new PreparedBinaryBind(schema));
 
         // Block fetch — needs a real table.
         cases.add(new MultiRowFetch(schema));
@@ -410,6 +411,72 @@ final class Cases {
             // Round-trip read pins the SELECT-side wire for bug #14.
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT B, C FROM " + table + " WHERE ID = 1");
+                 ResultSet rs = ps.executeQuery()) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    // PreparedBinaryBind captures JT400's wire pattern for the three
+    // binary-flavoured CHAR/VARCHAR variants on V7R3+: CHAR FOR BIT
+    // DATA (SQL types 452/453 + CCSID 65535), the native BINARY type
+    // (912/913), and the native VARBINARY type (908/909). Used to
+    // pin the type-dispatch byte-equality on the read side and
+    // document JT400's parameter-marker shape for binary binds.
+    //
+    // Settles the M4 "deferred: CCSID 65535 binary" gap from
+    // docs/PLAN.md -- the decoder already routes CCSID 65535 to
+    // []byte but had no captured fixture exercising the path.
+    private static final class PreparedBinaryBind extends Case {
+        private static final String TABLE_SHORT = "GOJT_BIN";
+        private final String schema;
+        private final String table;
+
+        PreparedBinaryBind(String schema) {
+            super("prepared_binary_bind");
+            this.schema = schema;
+            this.table = schema + "." + TABLE_SHORT;
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+                st.execute("CREATE TABLE " + table + " ("
+                        + "ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "C CHAR(8) FOR BIT DATA, "
+                        + "B BINARY(8), "
+                        + "V VARBINARY(32))");
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            // Deterministic content so the read-back golden is
+            // byte-stable: ascending bytes for CHAR FOR BIT DATA, a
+            // recognisable hex fill for BINARY, and a "DEADBEEF
+            // CAFEBABE" pattern for VARBINARY.
+            byte[] charBin = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+            byte[] binFixed = {(byte) 0xAA, (byte) 0xBB, (byte) 0xCC, (byte) 0xDD,
+                    (byte) 0xEE, (byte) 0xFF, 0x00, 0x11};
+            byte[] varBin = {(byte) 0xDE, (byte) 0xAD, (byte) 0xBE, (byte) 0xEF,
+                    (byte) 0xCA, (byte) 0xFE, (byte) 0xBA, (byte) 0xBE};
+
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, C, B, V) VALUES (?, ?, ?, ?)")) {
+                ps.setInt(1, 1);
+                ps.setBytes(2, charBin);
+                ps.setBytes(3, binFixed);
+                ps.setBytes(4, varBin);
+                int n = ps.executeUpdate();
+                golden.recordUpdateCount(n);
+            }
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT C, B, V FROM " + table + " WHERE ID = 1");
                  ResultSet rs = ps.executeQuery()) {
                 golden.recordResultSet(rs);
             }

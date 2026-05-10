@@ -272,13 +272,13 @@ func nullSkipWidth(col SelectColumn, fixedSlots bool) int {
 // IBM i wire SQL type numbers (NN/nullable pairs).
 func isVarLengthSQLType(sqlType uint16) bool {
 	switch sqlType {
-	case 448, 449, // VARCHAR
-		456, 457, // VARCHAR_FOR_BIT_DATA / LONG_VARCHAR (NN/nullable)
-		460, 461, // LONG_VARCHAR_FOR_BIT_DATA
-		464, 465, // VARGRAPHIC / LONG_VARGRAPHIC
-		468, 469, // graphic family
-		472, 473, // VARBINARY family
-		908, 909: // DATALINK
+	case 448, 449, // VARCHAR (also covers VARCHAR FOR BIT DATA when CCSID=65535)
+		456, 457, // LONG_VARCHAR
+		460, 461, // LONG_VARCHAR_FOR_BIT_DATA (rare; typically same shape as 456/457)
+		464, 465, // VARGRAPHIC (graphic, 2-byte SL of char-count)
+		468, 469, // VARGRAPHIC family alt
+		472, 473, // LONG_VARGRAPHIC
+		908, 909: // VARBINARY (JT400 SQLVarbinary.getNativeType -> 908)
 		return true
 	}
 	return false
@@ -412,6 +412,58 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, fmt.Errorf("decode varchar ccsid %d: %w", col.CCSID, err)
 		}
 		return s, 2 + n, nil
+
+	case 912, 913:
+		// BINARY (fixed-length) -- NN / nullable. JT400's
+		// SQLBinary.getNativeType returns 912; the column carries
+		// CCSID 65535 by definition. Wire format is `col.Length`
+		// bytes of raw payload, no length prefix -- shares shape with
+		// CHAR FOR BIT DATA (452/453 + CCSID 65535) but ships under a
+		// distinct SQL type code on V7R3+ servers that expose the
+		// native BINARY type alongside the older CHAR-with-bit-data
+		// emulation.
+		if len(b) < int(col.Length) {
+			return nil, 0, fmt.Errorf("binary wants %d bytes, have %d", col.Length, len(b))
+		}
+		out := make([]byte, col.Length)
+		copy(out, b[:col.Length])
+		return out, int(col.Length), nil
+
+	case 908, 909:
+		// VARBINARY (variable-length) -- NN / nullable. JT400's
+		// SQLVarbinary.getNativeType returns 908; column CCSID is
+		// always 65535. Wire format mirrors VARCHAR FOR BIT DATA
+		// (449 + CCSID 65535): 2-byte BE actual-length prefix
+		// followed by `length` bytes of payload, slot-padded to
+		// col.Length in non-VLF layouts. Ships under a distinct
+		// SQL type code on V7R3+ servers that expose native
+		// VARBINARY alongside the older VARCHAR-with-bit-data
+		// emulation.
+		if len(b) < 2 {
+			return nil, 0, fmt.Errorf("varbinary header wants 2 bytes, have %d", len(b))
+		}
+		n := int(binary.BigEndian.Uint16(b[:2]))
+		if n > int(col.Length) {
+			return nil, 0, fmt.Errorf("varbinary declared length %d exceeds column max %d", n, col.Length)
+		}
+		if len(b) < 2+n {
+			return nil, 0, fmt.Errorf("varbinary wants %d bytes (header+data), have %d", 2+n, len(b))
+		}
+		out := make([]byte, n)
+		copy(out, b[2:2+n])
+		return out, 2 + n, nil
+
+	case 2436, 2437: // BOOLEAN NN / nullable (V7R5+ native BOOLEAN type)
+		// One byte on the wire; JT400's SQLBoolean.convertFromRawBytes
+		// treats 0xF0 (EBCDIC '0') as false and anything else as
+		// true. The encoder writes 0xF1 (EBCDIC '1') for true so
+		// the round trip stays inside the {0xF0, 0xF1} pair, but
+		// the read side trusts the false-sentinel and treats every
+		// other byte as true to match JT400's behaviour.
+		if len(b) < 1 {
+			return nil, 0, fmt.Errorf("boolean wants 1 byte, have %d", len(b))
+		}
+		return b[0] != 0xF0, 1, nil
 
 	case SQLTypeInteger, 497: // 496 NN, 497 nullable
 		if len(b) < 4 {

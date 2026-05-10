@@ -320,3 +320,94 @@ func decodeFieldNameByCCSID(ccsid uint16, b []byte) string {
 	s, _ := ebcdic.CCSID37.Decode(b)
 	return s
 }
+
+// enrichWithExtendedColumnDescriptors overlays SelectColumn.Schema,
+// .Table, .BaseColumnName, and .Label fields from CP 0x3811's data
+// payload. Mirrors JT400's DBExtendedColumnDescriptors +
+// DBColumnDescriptorsDataFormat.overlay.
+//
+// Wire layout of CP 0x3811 payload (`ext` here, the bytes after
+// LL+CP):
+//
+//	0..3   numberOfColumns (BE uint32)
+//	4..9   reserved (6 bytes)
+//	10..   per-column fixed record, 16 bytes each:
+//	         0..0  byte    updateable
+//	         1..1  byte    searchable
+//	         2..3  uint16  attributes (identity / index bits)
+//	         4..7  uint32  offset of variable data from LL start
+//	         8..11 uint32  length of variable data
+//	         12..15 reserved
+//	then  variable-data records, each:
+//	         0..3  LL (length of this record)
+//	         4..5  CP (0x3900 / 0x3901 / 0x3902 / 0x3904)
+//	         6..7  CCSID (for 0x3902 only; other CPs are CCSID-less)
+//	         6.. or 8..  value bytes
+//
+// The variable-data offset in the fixed record is measured from the
+// start of the CP 0x3811 LL header -- i.e. 6 bytes before `ext[0]`.
+// We subtract that offset adjustment when indexing into `ext`.
+//
+// Silently no-ops on malformed extended-descriptor data: we surface
+// what we can and leave the rest empty. The non-extended fields
+// (Name, SQLType, ...) stay as the super-extended parser left them.
+func enrichWithExtendedColumnDescriptors(cols []SelectColumn, ext []byte) {
+	const headerLen = 10
+	const perColFixed = 16
+	if len(ext) < headerLen {
+		return
+	}
+	be := binary.BigEndian
+	numCols := int(be.Uint32(ext[0:4]))
+	if numCols <= 0 || numCols > len(cols) {
+		numCols = len(cols)
+	}
+	for i := 0; i < numCols; i++ {
+		recBase := headerLen + i*perColFixed
+		if recBase+perColFixed > len(ext) {
+			return
+		}
+		// Offset is measured from the LL start (6 bytes before
+		// ext[0]); subtract the 6 to land in ext-space.
+		varOff := int(be.Uint32(ext[recBase+4 : recBase+8]))
+		varLen := int(be.Uint32(ext[recBase+8 : recBase+12]))
+		if varLen <= 0 {
+			continue
+		}
+		varOff -= 6
+		if varOff < 0 || varOff+varLen > len(ext) {
+			continue
+		}
+		parseExtendedDescriptorRecords(&cols[i], ext[varOff:varOff+varLen])
+	}
+}
+
+// parseExtendedDescriptorRecords walks a single column's
+// variable-info section and fills in the Schema / Table /
+// BaseColumnName / Label fields per the CP it encounters. Mirrors
+// DBColumnDescriptorsDataFormat.overlay.
+func parseExtendedDescriptorRecords(col *SelectColumn, section []byte) {
+	be := binary.BigEndian
+	for pos := 0; pos+6 <= len(section); {
+		ll := int(be.Uint32(section[pos : pos+4]))
+		if ll < 6 || pos+ll > len(section) {
+			return
+		}
+		cp := be.Uint16(section[pos+4 : pos+6])
+		switch cp {
+		case 0x3900: // base column name -- EBCDIC, no CCSID prefix
+			col.BaseColumnName = decodeFieldNameByCCSID(0, section[pos+6:pos+ll])
+		case 0x3901: // base table name -- EBCDIC, no CCSID prefix
+			col.Table = decodeFieldNameByCCSID(0, section[pos+6:pos+ll])
+		case 0x3902: // column label -- CCSID prefix at +6, value at +8
+			if pos+8 > pos+ll {
+				break
+			}
+			labelCCSID := be.Uint16(section[pos+6 : pos+8])
+			col.Label = decodeFieldNameByCCSID(labelCCSID, section[pos+8:pos+ll])
+		case 0x3904: // schema name -- EBCDIC, no CCSID prefix
+			col.Schema = decodeFieldNameByCCSID(0, section[pos+6:pos+ll])
+		}
+		pos += ll
+	}
+}
