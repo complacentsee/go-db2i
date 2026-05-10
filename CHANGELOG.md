@@ -51,6 +51,28 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- Bug #15 TestLOBClob CCSID 273 byte-mode mismatch resolved. The
+  test was pre-encoding "Hello, IBM i! " via
+  `ebcdic.CCSID273.Encode` and inserting the bytes verbatim into a
+  `CLOB(1M)` column that took the *job-default* CCSID at table
+  creation -- 37 on the IBM Cloud English-locale LPAR. CCSID 37
+  and CCSID 273 agree on 239 of 256 wire bytes but disagree on 17;
+  the `!` character is one of them (0x4F in 273 vs 0x5A in 37), so
+  the pre-encoded payload's `!` bytes decoded back as `|` and every
+  iteration of the test phrase mismatched. The codec itself was
+  symmetric (per the existing `TestCCSID273RoundTripASCII` /
+  `TestCCSID273DivergentChars` / `TestCCSID273MatchesCCSID37OnSharedBytes`
+  coverage) -- the test just assumed the wrong column CCSID.
+  Fixed by declaring the column `CLOB(1M) CCSID 273` so the
+  pre-encoded bytes align with the column's storage CCSID
+  regardless of the connecting job's locale. New offline
+  `TestCCSID273ByteRoundTripIsBijective` walks every wire byte
+  through Decode-then-Encode and pins the bijection (exempting
+  U+001A SUBSTITUTE bytes, the one-to-many "no destination
+  mapping" sentinel). Both `TestLOBClob/[]byte_pre-encoded_CCSID_273`
+  and `TestLOBClob/LOBValue_Reader_pre-encoded_80KiB` now PASS on
+  V7R6M0; predicted to pass on any LPAR regardless of job CCSID.
+
 - M7-5 + bug #14 `lob threshold` inline-small-LOB end-to-end. DSN
   flag `?lob-threshold=N` plumbs through to the
   `SET_SQL_ATTRIBUTES` CP `0x3822` (LOBFieldThreshold) parameter,

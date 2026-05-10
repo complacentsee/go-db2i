@@ -741,16 +741,24 @@ func TestLOBUpdate(t *testing.T) {
 
 // TestLOBClob exercises the locator-bind path on a CLOB column. The
 // driver transcodes the Go string to the column's declared CCSID
-// (typically 273 on PUB400) before shipping; the read side decodes
-// back. Confirms the EBCDIC round-trip works for the basic ASCII
-// subset and that long strings cross the chunking boundary cleanly.
+// (273 here, declared explicitly) before shipping; the read side
+// decodes back. Confirms the EBCDIC round-trip works for the basic
+// ASCII subset and that long strings cross the chunking boundary
+// cleanly.
+//
+// The column CCSID is pinned to 273 because the []byte-bind subtests
+// pre-encode their payload via ebcdic.CCSID273.Encode -- if the
+// column inherited the job-default CCSID (e.g. 37 on an English
+// LPAR), the `!` character would round-trip as `|` (0x4F in 273
+// decodes to `|` in 37). Declaring the column CCSID at table-create
+// time keeps the test deterministic across LPAR job locales.
 func TestLOBClob(t *testing.T) {
 	db := openDB(t)
 	dropTestTables(t, db)
 
 	tbl := schema() + "." + tablePrefix + "lobclob"
 	if _, err := db.Exec(fmt.Sprintf(
-		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CLOB(1M))`, tbl)); err != nil {
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CLOB(1M) CCSID 273)`, tbl)); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	defer db.Exec("DROP TABLE " + tbl)
