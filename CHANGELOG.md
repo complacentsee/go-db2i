@@ -51,6 +51,26 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- Cross-cutting: `tx_rollback` fixture re-captured as happy-path
+  against V7R6M0 / GOTEST schema. Pre-existing trace was an
+  SQL-error capture (schema had no commitment control); new trace
+  shows the full rollback sequence including CP 0x1808 ROLLBACK
+  and a post-rollback SELECT returning zero rows. Journal
+  (`GOJTJ*`) + receiver (`GOJTR*`) bring-up retries cleanly on
+  subsequent fixture runs (CPF0006 "already journaling" warnings
+  are expected and don't gate the capture).
+
+- Cross-cutting: `hostserver/doc.go` package doc refreshed for
+  the M2-M7 surface. New sections: wire format breakdown, top-
+  level entry points by phase (connection setup / statement
+  execution / LOB I/O / transaction control), CCSID handling
+  conventions, LOB compression (per-CP + whole-datastream RLE
+  variants), extended-metadata two-knob requirement, cursor /
+  RPB lifecycle, error classification. Cross-references to the
+  contributor-facing docs (lob-bind-wire-protocol.md,
+  lob-known-gaps.md, configuration.md, PLAN.md) and the JT400
+  source map for contributors adding new wire flows.
+
 - M3 deferred: native BOOLEAN (V7R5+) bind + decode live-validated
   on V7R6M0. Driver binds Go `bool` as SMALLINT(1) (the standard
   server-side coercion path JT400 documents); decoder learns

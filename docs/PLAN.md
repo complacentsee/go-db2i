@@ -645,20 +645,23 @@ The closed-milestone "Deferred" subsections above are the
 authoritative list. Items below are cross-cutting concerns that
 don't slot into a single milestone.
 
-- **`tx_commit` fixture re-captured as happy-path** — after
-  enabling QSQJRN on AFTRAEGE11, JT400's tx_commit case now
-  produces a successful commit + result-set golden. `tx_rollback`
-  is still a SQL-error capture; re-capture is straightforward
-  with the same harness invocation but hasn't been done yet.
-  (Both rollback and commit semantics are validated live via the
-  goJTOpen driver itself, so the rollback fixture is documentary
-  rather than gating.)
-- **CCSID 65535 binary handling** — make sure every type-decoding
-  path checks the column CCSID before attempting EBCDIC decode.
-  No captured fixture exercises this today, so it's untested.
-- **`hostserver/doc.go` "database (TODO)" stub** — package doc
-  was written when M2 was still scoped; needs a refresh now that
-  M2-M5 landed.
+- **`tx_commit` + `tx_rollback` fixtures captured as happy-path** —
+  ✅ both done. tx_commit re-captured 2026-05-09 after enabling
+  QSQJRN on AFTRAEGE11; tx_rollback re-captured 2026-05-10 against
+  the GOTEST schema on IBM Cloud V7R6M0 (journal `GOJTJ*` +
+  receiver `GOJTR*` created on first run, reused on subsequent
+  runs). The new tx_rollback trace shows the full happy-path
+  sequence: CREATE_RPB → PREPARE_DESCRIBE → CHANGE_DESCRIPTOR →
+  EXECUTE → RPB cleanup → ROLLBACK (0x1808) → re-prepared SELECT
+  returning zero rows → autocommit-on COMMIT + disconnect.
+- **CCSID 65535 binary handling** — ✅ closed 2026-05-10; see
+  "Deferred from M4" above.
+- **`hostserver/doc.go` "database (TODO)" stub** — ✅ refreshed
+  2026-05-10. Package doc now covers the full M2-M7 surface
+  (wire format, top-level entry points, CCSID handling, LOB
+  compression, extended metadata, cursor lifecycle, error
+  semantics) plus cross-references to the contributor-facing
+  docs and the JT400 source map.
 - **Re-capture all fixtures post-M5** — resolved via #48 (cursor
   aligned with JT400's "fetch/close" signal); see "Deferred from
   M5" above. The synthetic helpers are gone.
