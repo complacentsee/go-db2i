@@ -211,5 +211,12 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Limitations / not yet implemented
 
+- LOB known gaps: DBCLOB on CCSID 13488 columns (surrogate
+  rejection), CP 0x381F `RowCount > 1` batched LOB INSERT,
+  JT400's `lob threshold` inline-small-LOB optimisation, and
+  RLE-decompression on read. Each is documented with workaround
+  + fix-path notes in [`docs/lob-known-gaps.md`](docs/lob-known-gaps.md);
+  none affects the BLOB / CLOB CCSID 273 / single-row paths the
+  conformance suite exercises live.
 - TLS sign-on / database (ports 9476 / 9471) (M7).
 - `slog` integration / OpenTelemetry spans (M8).
