@@ -530,7 +530,13 @@ fresh connection.
 - **`cmd/diffrunner`** — never built; useful for conformance work
   but not for shipping the gateway.
 
-### M7 — LOB streaming, CCSID negotiation, error mapping (~3-4 weeks)
+### M7 — LOB streaming, CCSID negotiation, error mapping (COMPLETE, 2026-05-10)
+
+All seven plan items closed; residual plan items (M7-4 TLS,
+M7-5 lob threshold + bug #14, M7-7 RLE whole-datastream wrapper,
+bug #15 CCSID 273 byte-mode) also landed. See CHANGELOG
+`[Unreleased]` for per-item closure notes and live-evidence
+citations.
 
 - BLOB/CLOB handling via the host-server's chunked-data path
   (DBLobLocator-equivalent).
@@ -550,10 +556,31 @@ fresh connection.
     byte-equal vs JT400 fixture, 1 MiB streamed BLOB across 32
     chunks, ~8 KiB CLOB EBCDIC round-trip via `ebcdic.CCSID273`.
     Wire-protocol reference at `docs/lob-bind-wire-protocol.md`.
+  - **LOB inline (M7-5 + bug #14)** — DSN `?lob-threshold=N`
+    drives CP `0x3822` `LOBFieldThreshold` in
+    `SET_SQL_ATTRIBUTES`. Result-data decoder learnt the inline
+    LOB SQL types (404/405 BLOB, 408/409 CLOB, 412/413 DBCLOB).
+    The pre-fix `CLOB(4K) CCSID 1208` SELECT regression is
+    pinned by `TestCCSID1208RoundTrip/CLOB small inline`.
+  - **LOB read compression (M7-7)** — RLE-1 decompressor + the
+    whole-datastream CP `0x3832` unwrap landed in two commits.
+    1 MiB constant-content BLOB SELECT shrinks `rx_bytes` from
+    ~1 MiB to **1,228 bytes wire** (~854× shrink); offline
+    coverage in `TestDecompressDataStreamRLE_RoundTrip/*` and
+    `TestParseDBReplyUnwrapsCP3832`.
 - SQLCA → typed `*Db2Error{SQLState, SQLCode, Message, Tokens}`
   with substitution. Landed in M6 (`d0ba583`).
-- Connection-level CCSID negotiation. Distinguish the SQL-statement
-  CCSID from the application-data CCSID.
+- Connection-level CCSID negotiation (M7-3). DSN `?ccsid=N`
+  overrides the connection-default ClientCCSID and per-bind tag;
+  CHAR/VARCHAR/CLOB decode is column-CCSID-aware via
+  `ebcdicForCCSID`. Live-validated end-to-end on V7R6M0 via
+  `TestCCSID1208RoundTrip`.
+- TLS sign-on / database (M7-4). DSN `?tls=true` +
+  `tls-insecure-skip-verify` + `tls-server-name`; default ports
+  flip to 9476 / 9471. Live-validated on V7R6M0 with a self-
+  signed cert assigned to `QIBM_OS400_QZBS_SVR_DATABASE` /
+  `_SIGNON` / `_CENTRAL` via DCM. See `docs/configuration.md`
+  for the LPAR turn-up.
 
 ### M8 — Hardening, observability, docs (~2-3 weeks)
 
