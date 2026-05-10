@@ -242,6 +242,19 @@ type Config struct {
 	// -- the per-column CCSID always wins. CCSID is for the
 	// "untagged" / connection-default case.
 	CCSID uint16
+
+	// LOBThreshold is the byte count below which the server returns
+	// LOB columns inline in row data (and accepts inline LOB shapes
+	// on bind) instead of allocating a server-side locator. Sent as
+	// CP 0x3822 in SET_SQL_ATTRIBUTES; matches JT400's "lob
+	// threshold" JDBC URL knob. Configured via the DSN
+	// "lob-threshold" query key.
+	//
+	// 0 = the historical default (32768). Raising it inlines bigger
+	// LOBs at the cost of buffer memory; lowering it forces the
+	// locator path so RETRIEVE_LOB_DATA covers anything beyond the
+	// chosen threshold.
+	LOBThreshold uint32
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -392,6 +405,13 @@ func parseDSN(dsn string) (*Config, error) {
 			return nil, fmt.Errorf("invalid ccsid %q (want unsigned 16-bit int): %w", v, err)
 		}
 		cfg.CCSID = uint16(n)
+	}
+	if v := q.Get("lob-threshold"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid lob-threshold %q (want unsigned 32-bit int): %w", v, err)
+		}
+		cfg.LOBThreshold = uint32(n)
 	}
 	return &cfg, nil
 }

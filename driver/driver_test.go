@@ -322,3 +322,52 @@ func TestParseDSNCCSID(t *testing.T) {
 		}
 	})
 }
+
+// TestParseDSNLOBThreshold covers the M7-5 ?lob-threshold=N knob:
+// default zero (hostserver substitutes the historical 32768),
+// explicit values, the 15728640 documented cap, and rejection of
+// non-numeric / overflowing inputs.
+func TestParseDSNLOBThreshold(t *testing.T) {
+	t.Run("default zero", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.LOBThreshold != 0 {
+			t.Errorf("default LOBThreshold = %d, want 0", cfg.LOBThreshold)
+		}
+	})
+	for _, tc := range []struct {
+		raw  string
+		want uint32
+	}{
+		{"0", 0},
+		{"1", 1},
+		{"32768", 32768},
+		{"65536", 65536},
+		{"15728640", 15728640}, // server-documented cap
+	} {
+		t.Run("lob-threshold="+tc.raw, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?lob-threshold=" + tc.raw)
+			if err != nil {
+				t.Fatalf("parseDSN: %v", err)
+			}
+			if cfg.LOBThreshold != tc.want {
+				t.Errorf("LOBThreshold = %d, want %d", cfg.LOBThreshold, tc.want)
+			}
+		})
+	}
+	t.Run("rejects out-of-range", func(t *testing.T) {
+		// uint32 max is 4294967295; anything larger must be rejected.
+		_, err := parseDSN("gojtopen://u:p@h/?lob-threshold=4294967296")
+		if err == nil {
+			t.Errorf("lob-threshold=4294967296 should be rejected (overflow uint32)")
+		}
+	})
+	t.Run("rejects non-numeric", func(t *testing.T) {
+		_, err := parseDSN("gojtopen://u:p@h/?lob-threshold=32k")
+		if err == nil {
+			t.Errorf("lob-threshold=32k should be rejected (not an integer)")
+		}
+	})
+}

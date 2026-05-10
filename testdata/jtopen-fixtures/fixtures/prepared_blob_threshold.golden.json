@@ -1,0 +1,32 @@
+{
+  "case" : "prepared_blob_threshold",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "B",
+      "label" : "B",
+      "typeName" : "BLOB",
+      "sqlType" : 2004,
+      "displaySize" : 65536,
+      "precision" : 65536,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "C",
+      "label" : "C",
+      "typeName" : "CLOB",
+      "sqlType" : 2005,
+      "displaySize" : 4096,
+      "precision" : 4096,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "hello-lob-threshold-CLOB CCSID 1208 inline-return case 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ] ]
+  } ],
+  "updateCount" : 1
+}

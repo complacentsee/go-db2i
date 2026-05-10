@@ -4,9 +4,27 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"unicode/utf16"
 
 	"github.com/complacentsee/goJTOpen/ebcdic"
 )
+
+// decodeGraphicLOB renders a UCS-2 BE / UTF-16 BE byte slice as a
+// Go UTF-8 string. Used for inline DBCLOB columns (SQL types
+// 412/413) whose CCSID is 13488 (strict UCS-2 BE) or 1200
+// (UTF-16 BE). Non-BMP runes only appear in CCSID 1200 -- the 13488
+// encoder substitutes them with U+003F on write, so the inverse
+// round-trip is lossy but consistent.
+func decodeGraphicLOB(b []byte) string {
+	if len(b) < 2 {
+		return ""
+	}
+	codes := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		codes = append(codes, uint16(b[i])<<8|uint16(b[i+1]))
+	}
+	return string(utf16.Decode(codes))
+}
 
 // ccsidBinary is the IBM i sentinel CCSID for "no conversion /
 // binary" -- the FOR BIT DATA flag on CHAR/VARCHAR columns. Columns
@@ -468,6 +486,82 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, err
 		}
 		return s, nbytes, nil
+
+	case 404, 405, 408, 409, 412, 413:
+		// Inline LOB result-data columns. The server ships these
+		// instead of locator-typed (960..969) columns when the
+		// connection-level LOB threshold (CP 0x3822 in
+		// SET_SQL_ATTRIBUTES, "lob threshold") is set and the
+		// column's stored value is at or below that threshold.
+		// Wire format mirrors JT400's SQLBlob / SQLClob / SQLDBClob
+		// convertFromRawBytes: a 4-byte BE actual-length prefix
+		// followed by `length` bytes of payload, slot-padded to
+		// col.Length so the next column lines up.
+		//
+		//   404 / 405  BLOB  inline   (NN / nullable)
+		//   408 / 409  CLOB  inline   (NN / nullable)
+		//   412 / 413  DBCLOB inline  (NN / nullable, graphic CCSID)
+		//
+		// BLOB returns []byte; CLOB / DBCLOB return string decoded
+		// per the column's CCSID. Mirrors the locator-path
+		// materialise behaviour in driver/rows.go for the small-LOB
+		// inline case. Closes the M7-3 follow-up gap where
+		// CLOB(<=32K) CCSID 1208 columns returned zero rows because
+		// the server inlined them and the parser refused the
+		// unrecognised type code.
+		if len(b) < 4 {
+			return nil, 0, fmt.Errorf("inline lob header wants 4 bytes, have %d", len(b))
+		}
+		n := int(binary.BigEndian.Uint32(b[:4]))
+		// col.Length carries `max_payload + 4` (the 4-byte length
+		// header is part of the slot width). Sanity-check the
+		// declared length against the slot so a server bug or a
+		// misaligned column descriptor can't drive an out-of-bounds
+		// slice.
+		if n < 0 || n > int(col.Length)-4 {
+			return nil, 0, fmt.Errorf("inline lob declared length %d exceeds column max %d", n, int(col.Length)-4)
+		}
+		consumed := int(col.Length)
+		if len(b) < consumed {
+			return nil, 0, fmt.Errorf("inline lob wants %d bytes (header+data+pad), have %d", consumed, len(b))
+		}
+		payload := b[4 : 4+n]
+		switch col.SQLType {
+		case 404, 405:
+			out := make([]byte, n)
+			copy(out, payload)
+			return out, consumed, nil
+		case 408, 409:
+			// CLOB inline -- decode through the column CCSID. Mirrors
+			// driver/rows.decodeLOBChars (1208 = UTF-8 passthrough,
+			// 273 = German EBCDIC, default = CCSID 37) but lives at
+			// the hostserver layer where the row walker can return
+			// the string directly.
+			switch col.CCSID {
+			case ccsidBinary:
+				out := make([]byte, n)
+				copy(out, payload)
+				return out, consumed, nil
+			case 1208:
+				return string(payload), consumed, nil
+			default:
+				s, err := ebcdicForCCSID(col.CCSID).Decode(payload)
+				if err != nil {
+					return nil, 0, fmt.Errorf("decode inline clob ccsid %d: %w", col.CCSID, err)
+				}
+				return s, consumed, nil
+			}
+		case 412, 413:
+			// DBCLOB inline -- graphic CCSID. Payload is 2-byte
+			// codeunits; CCSID 13488 is UCS-2 BE, 1200 is UTF-16 BE.
+			// Both decode through the same UTF-16 BE helper because
+			// non-BMP runes don't appear in 13488 by definition (the
+			// encoder substitutes them with U+003F on write).
+			if n%2 != 0 {
+				return nil, 0, fmt.Errorf("dbclob inline declared length %d not even", n)
+			}
+			return decodeGraphicLOB(payload), consumed, nil
+		}
 
 	case 960, 961, 964, 965, 968, 969:
 		// LOB locators: BLOB(960/961), CLOB(964/965), DBCLOB(968/969).

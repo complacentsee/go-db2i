@@ -1058,13 +1058,11 @@ func TestCCSID1208RoundTrip(t *testing.T) {
 	})
 
 	t.Run("CLOB round-trip", func(t *testing.T) {
-		// CLOB declared at 1M to avoid the small-LOB inline-return
-		// path: V7R6M0 returns CLOB columns declared <= 32K as inline
-		// VARCHAR-shaped data when the column carries an explicit
-		// CCSID, and the result-data parser currently drops those
-		// rows. CLOB(1M) forces the server-side locator path that
-		// the LOB-SELECT decoder is wired for. See gap §5 in
-		// docs/lob-known-gaps.md (added in M7-3 alongside this test).
+		// CLOB(1M) forces the server-side locator path so this
+		// subtest exercises the RETRIEVE_LOB_DATA decoder
+		// regardless of the connection-level "lob threshold"
+		// setting. The small-CLOB inline counterpart lives in the
+		// "CLOB small inline" subtest below.
 		clobTbl := schema() + "." + tablePrefix + "utf8clob"
 		db.Exec("DROP TABLE " + clobTbl)
 		if _, err := db.Exec(fmt.Sprintf(
@@ -1082,6 +1080,35 @@ func TestCCSID1208RoundTrip(t *testing.T) {
 		}
 		if got != clobWant {
 			t.Errorf("CCSID 1208 CLOB byte-level mismatch (lengths got=%d want=%d)", len(got), len(clobWant))
+		}
+	})
+
+	t.Run("CLOB small inline", func(t *testing.T) {
+		// CLOB(4K) CCSID 1208 sits below the connection-level
+		// "lob threshold" (default 32768), so the server returns
+		// the column inline as SQL type 408/409 rather than as a
+		// locator. Pre-fix this hit "unsupported SQL type 409 (col
+		// len=4100, ccsid=1208)" and dropped the row. Closes bug
+		// #14 in docs/lob-known-gaps.md §5.
+		clobTbl := schema() + "." + tablePrefix + "utf8clob_small"
+		db.Exec("DROP TABLE " + clobTbl)
+		if _, err := db.Exec(fmt.Sprintf(
+			`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CLOB(4K) CCSID 1208)`, clobTbl)); err != nil {
+			t.Skipf("CREATE CLOB(4K) CCSID 1208 failed: %v", err)
+		}
+		defer db.Exec("DROP TABLE " + clobTbl)
+		// Same content as the locator-path subtest so the only
+		// variable is the column-size declaration (and therefore
+		// whether the server picks inline vs locator).
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, clobTbl), 1, want); err != nil {
+			t.Fatalf("insert small CLOB: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, clobTbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan small CLOB: %v", err)
+		}
+		if got != want {
+			t.Errorf("CCSID 1208 small CLOB mismatch:\n  want = %q\n   got = %q", want, got)
 		}
 	})
 }

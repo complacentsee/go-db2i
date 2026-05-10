@@ -102,66 +102,94 @@ or multi-tuple `INSERT VALUES (?, ?), (?, ?), ...` (covered by
 **Wire-protocol ref.** `docs/lob-bind-wire-protocol.md` "Multi-row
 batched INSERT — settled" has the full byte-level walkthrough.
 
-## 3. JT400 `lob threshold` inline-small-LOB optimisation (low)
+## 3. JT400 `lob threshold` inline-small-LOB optimisation (CLOSED, M7-5)
 
-**Symptom.** Every BLOB / CLOB / DBCLOB column INSERT pays one
-extra `WRITE_LOB_DATA` round trip even when the payload is a
-handful of bytes. JT400 has a connection property `lob threshold`
-(default 0 / 32 KB depending on version) that, when the bound
-value is below the threshold, ships the bytes inline as a regular
-VARCHAR FOR BIT DATA parameter and skips the locator entirely.
+**Status.** `?lob-threshold=N` DSN knob lands the threshold into the
+SET_SQL_ATTRIBUTES CP `0x3822` parameter, mirroring JT400's
+`JDProperties.LOB_THRESHOLD`. The server then drives the
+inline-vs-locator decision per LOB column it ships back, and the
+result-data parser handles either shape (the second half lived in
+gap §5 below, closed by the same commit).
 
-**Why we don't do this.** Pre-PREPARE_DESCRIBE we don't know
-which markers target LOB columns vs VARCHAR-FOR-BIT-DATA; routing
-decisions happen *after* the parameter marker format reply. By
-that point we'd need to re-encode the value if we want to send it
-inline. Not impossible, but adds complexity for a perf win that
-hasn't been measured against any real workload.
+**What the trace settled.** The `prepared_blob_threshold` fixture
+case captures JT400 with `lob threshold=32768` against V7R6M0
+inserting a 32-byte BLOB + 256-byte CLOB into `BLOB(64K)` +
+`CLOB(4K) CCSID 1208` columns. The wire pattern vs the default
+`prepared_blob_insert` fixture (same payload mix, no threshold
+override):
 
-**Workaround.** Callers writing LOB-typed columns with small
-content who care about latency can reshape the column to
-`VARCHAR(<n>) FOR BIT DATA` (for binary) or `VARCHAR(<n>) CCSID <c>`
-(for character). The existing inline-bind path (covered by
-`TestBlobs`) carries those payloads in one frame.
+|                              | `prepared_blob_insert` | `prepared_blob_threshold` |
+|------------------------------|------------------------|---------------------------|
+| `WRITE_LOB_DATA` (bind side) | 2                      | **1**                     |
+| `RETRIEVE_LOB_DATA` (read)   | 4                      | **2**                     |
 
-**Fix path.** Add a `Conn.LOBThreshold` config field. In the
-bind dispatcher, when `p.IsLOB() && p.LOBMaxSize <= threshold &&
-len(value) <= threshold`, route through the VARCHAR FOR BIT DATA
-path instead. Skips one round trip per small LOB at the cost of
-metadata-driven branching.
+JT400 inlined one of the two LOBs at the EXECUTE stage and the
+server inlined both LOB columns in the SELECT-back result data --
+halving the wire-frame count for the read side. The bind-side
+inline shape is driven by the `PREPARE_DESCRIBE` reply (server
+describes the LOB param as inline VARCHAR-shape, type 404/405 for
+BLOB or 408/409 for CLOB, instead of the locator 960..969 types),
+not by client-side size checks. goJTOpen already follows the
+server's chosen shape on bind, so wiring `LOBThreshold` through to
+CP `0x3822` was sufficient.
 
-## 5. CLOB columns ≤ 32 KB with explicit CCSID return zero rows (medium)
+**Implementation.** `driver.Config.LOBThreshold` (`uint32`) plumbed
+through to `hostserver.DBAttributesOptions.LOBThreshold`. Zero
+falls back to the historical 32768 default so the wire shape
+matches the pre-M7-5 capture. Set via DSN:
 
-**Symptom.** `SELECT c FROM t` (or any projection that includes the
-CLOB column) against a `CLOB(N) CCSID NNNN` column where `N <= 32K`
-yields zero rows even when `SELECT COUNT(*)` and `SELECT id` confirm
-rows exist. Without an explicit CCSID, or with `CLOB(1M)` and
-larger, the same SELECT works.
+```
+gojtopen://USER:PWD@host/?lob-threshold=65536
+```
 
-**Reproduces.** Discovered against IBM Cloud V7R6M0 LPAR:
-- `CLOB(4K) CCSID 1208` → 0 rows on SELECT
-- `CLOB(32K) CCSID 1208` → 0 rows on SELECT
-- `CLOB(1M) CCSID 1208` → works
-- Same pattern for CCSID 37 and CCSID 273.
+Server caps at 15728640 per JT400's
+`AS400JDBCConnectionImpl.setLOBFieldThreshold`; values above that
+are accepted by the driver (the server clamps).
 
-**Cause (suspected).** Server returns small CLOB columns inline in
-the result-data stream rather than via a locator handle when the
-declared maximum size fits one wire frame. The driver's result-data
-parser (`hostserver/db_result_data.go`) only handles the locator-
-shaped LOB column descriptor; an inline-CLOB column either drops
-the row or mis-decodes it. Connected to the M7-5 `lob threshold`
-work, which is about the *bind* side of the same heuristic.
+**Live evidence.** `TestCCSID1208RoundTrip/CLOB small inline` PASS
+on V7R6M0 with the default threshold (32768 → server inlines
+`CLOB(4K) CCSID 1208`). With `?lob-threshold=1` (forces locator
+path even for tiny LOBs), the same subtest still PASS via the
+locator code path -- both shapes round-trip the same content.
 
-**Workaround.** Declare CLOB columns at `1M` or larger when an
-explicit CCSID is required. `TestCCSID1208RoundTrip/CLOB round-trip`
-in the conformance suite uses `CLOB(1M) CCSID 1208` for this
-reason.
+## 5. CLOB columns ≤ 32 KB with explicit CCSID return zero rows (CLOSED, M7-5 + bug #14)
 
-**Fix path.** Capture a small-CLOB SELECT trace via `wiredump` and
-compare to the locator-shaped CLOB SELECT bytes. Likely needs the
-result-data column-decoder dispatch to recognise the inline-CLOB
-shape and decode through `decodeLOBChars`. Tracked alongside M7-5
-because the bind-side re-prepare path needs the same trace.
+**Status.** Fixed by the M7-5 result-data inline-LOB type
+dispatch. The server returns small LOB columns inline as SQL
+types 404/405 (BLOB), 408/409 (CLOB), and 412/413 (DBCLOB)
+when the connection-level `lob threshold` covers them; the
+parser now decodes those shapes alongside the locator
+(960..969) shapes.
+
+**Root cause.** The result-data column decoder
+(`hostserver.decodeColumn`) only matched the locator SQL types.
+Inline LOB types reached the `default` arm and surfaced as
+`unsupported SQL type 409 (col len=4100, ccsid=1208)`, dropping
+the row before the next column was decoded. Pre-fix reproducer:
+
+```
+CREATE TABLE t (id INTEGER NOT NULL PRIMARY KEY, c CLOB(4K) CCSID 1208);
+INSERT INTO t VALUES (1, 'hello-small-clob-bug14');
+SELECT c FROM t WHERE id=1;   -- driver error, 0 rows
+```
+
+**Wire format.** Inline LOB columns ship as a 4-byte BE
+actual-length prefix followed by `length` bytes of payload,
+slot-padded to `col.Length`. Mirrors JT400's
+`SQLBlob.convertFromRawBytes`, `SQLClob.convertFromRawBytes`,
+and `SQLDBClob.convertFromRawBytes`. BLOB returns `[]byte`,
+CLOB decodes through the column CCSID (1208 = UTF-8
+passthrough, 273 = German EBCDIC, others = CCSID 37 fallback),
+DBCLOB decodes through the UCS-2 BE / UTF-16 BE graphic
+helper.
+
+**Live evidence.** `TestCCSID1208RoundTrip/CLOB small inline`
+on V7R6M0 (PASS, 0.10s). The full LOB conformance suite
+(`TestLOBBlob/*`, `TestLOBDBClob/*`, `TestLOBSelectBind/*`,
+`TestLOBUpdate/*`, `TestLOBMultiRow`, `TestLOBClob/string`)
+remains green; the pre-existing `TestLOBClob/[]byte_pre-encoded_CCSID_273`
+failure is tracked separately as bug #15 (CCSID 273 byte-mode
+codec asymmetry).
 
 ## 4. RLE decompression on RETRIEVE_LOB_DATA (CLOSED, M7-7)
 

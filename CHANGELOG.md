@@ -51,6 +51,44 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M7-5 + bug #14 `lob threshold` inline-small-LOB end-to-end. DSN
+  flag `?lob-threshold=N` plumbs through to the
+  `SET_SQL_ATTRIBUTES` CP `0x3822` (LOBFieldThreshold) parameter,
+  mirroring JT400's `JDProperties.LOB_THRESHOLD` ("lob threshold"
+  JDBC URL knob). Zero falls back to the historical 32768 default
+  so the wire shape matches pre-M7-5 captures. New
+  `driver.Config.LOBThreshold` (`uint32`) field; `TestParseDSNLOBThreshold`
+  covers parsing edge cases including the 15728640 server cap.
+  The trace capture (new `prepared_blob_threshold` fixture case)
+  settles the open question on JT400's wire behaviour: with
+  `lob threshold=32768` against V7R6M0, JT400 emits **1 `WRITE_LOB_DATA`
+  + 2 `RETRIEVE_LOB_DATA`** for a 32-byte BLOB + 256-byte CLOB pair,
+  compared to **2 + 4** without the threshold -- the server inlines
+  both LOB columns in the SELECT-back row data, and JT400 inlines one
+  of the two on EXECUTE. The inline-vs-locator decision is driven
+  by the `PREPARE_DESCRIBE` reply's SQL type code; goJTOpen already
+  followed that shape on bind so this commit only needed to add the
+  CP `0x3822` plumbing on the request side.
+
+  Read-side fix (bug #14): `decodeColumn` now handles inline LOB
+  result-data shapes. SQL types `404/405` (BLOB), `408/409` (CLOB),
+  and `412/413` (DBCLOB) decode through a 4-byte BE actual-length
+  prefix followed by `length` bytes of payload, slot-padded to
+  `col.Length`. Mirrors JT400's `SQLBlob.convertFromRawBytes` /
+  `SQLClob.convertFromRawBytes` / `SQLDBClob.convertFromRawBytes`.
+  BLOB returns `[]byte`; CLOB decodes through the column CCSID
+  (1208 UTF-8 passthrough, 273 German EBCDIC, default CCSID 37);
+  DBCLOB decodes through a new `decodeGraphicLOB` helper.
+
+  Pre-fix reproducer (`CLOB(4K) CCSID 1208` SELECT) surfaced as
+  `unsupported SQL type 409 (col len=4100, ccsid=1208)` against
+  V7R6M0; post-fix the new `TestCCSID1208RoundTrip/CLOB small
+  inline` subtest exercises that path and PASSes both with the
+  default threshold (server inlines) and with `?lob-threshold=1`
+  (server forced to use locators) -- the same content round-trips
+  byte-equal through either code path. Closes
+  `docs/lob-known-gaps.md` §3 + §5.
+
 - M7-7 RETRIEVE_LOB_DATA RLE compression re-enabled end-to-end on
   V7R6M0. The request-side bit (`0x00040000`) on
   `RetrieveLOBData` now stays ON; `ParseDBReply` transparently

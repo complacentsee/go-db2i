@@ -86,6 +86,7 @@ final class Cases {
         cases.add(new PreparedBlobInsert(schema));
         cases.add(new PreparedBlobInsertLarge(schema));
         cases.add(new PreparedBlobBatch(schema));
+        cases.add(new PreparedBlobThreshold(schema));
 
         // Block fetch — needs a real table.
         cases.add(new MultiRowFetch(schema));
@@ -322,6 +323,93 @@ final class Cases {
             // the SELECT-back path used by goJTOpen tests.
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT ID, B, C FROM " + table + " ORDER BY ID");
+                 ResultSet rs = ps.executeQuery()) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    // PreparedBlobThreshold captures the wire pattern when JT400's
+    // "lob threshold" connection property is set and the bound LOB
+    // payload is *below* that threshold. The open question
+    // (docs/lob-known-gaps.md §3): does JT400 skip locator allocation
+    // entirely (no WRITE_LOB_DATA frames) and inline the LOB bytes in
+    // the EXECUTE SQLDA as VARCHAR FOR BIT DATA? If so, the goJTOpen
+    // bind side can mirror it to avoid the ~2-RTT locator overhead on
+    // small LOB inserts.
+    //
+    // Pairs with the read-side regression bug #14: a CLOB <= 32 KB
+    // declared with an explicit CCSID (e.g. CLOB(4K) CCSID 1208)
+    // returns zero rows from SELECT because the server ships the
+    // small payload inline as VARCHAR-shaped data and goJTOpen's
+    // result-data parser only recognises the locator shape. The
+    // trace from this case settles both ends of the wire heuristic.
+    private static final class PreparedBlobThreshold extends Case {
+        private static final String TABLE_SHORT = "GOJT_LOBT";
+        private final String schema;
+        private final String table;
+
+        PreparedBlobThreshold(String schema) {
+            super("prepared_blob_threshold");
+            this.schema = schema;
+            this.table = schema + "." + TABLE_SHORT;
+        }
+
+        @Override public java.util.Map<String, String> extraConnectionProperties() {
+            // "lob threshold" is JT400's per-connection inline-LOB
+            // knob; payloads at or below this byte count get inlined
+            // into the EXECUTE SQLDA instead of going through the
+            // locator + WRITE_LOB_DATA round trip.
+            return java.util.Collections.singletonMap("lob threshold", "32768");
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+                // BLOB(64K) for the bind-side (M7-5) path; CLOB(4K)
+                // CCSID 1208 for the read-side small-CLOB-inline path
+                // that's currently regressing (bug #14). Both are
+                // below 32 KB so the inline-threshold heuristic
+                // applies symmetrically on bind and read.
+                st.execute("CREATE TABLE " + table + " ("
+                        + "ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "B BLOB(64K), "
+                        + "C CLOB(4K) CCSID 1208)");
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            // 32-byte BLOB: deeply below the 32768 threshold so JT400
+            // is guaranteed to take the inline path if it has one.
+            byte[] blob = new byte[32];
+            for (int i = 0; i < blob.length; i++) {
+                blob[i] = (byte) (i & 0xFF);
+            }
+            // ~256-byte CLOB so the small-CLOB read regression is in
+            // play on the SELECT-back side. ASCII content keeps the
+            // CCSID 1208 encode trivially comparable.
+            String clob = "hello-lob-threshold-CLOB CCSID 1208 inline-return case " +
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" +
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" +
+                    "0123456789abcdef0123456789abcdef";
+
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, B, C) VALUES (?, ?, ?)")) {
+                ps.setInt(1, 1);
+                ps.setBytes(2, blob);
+                ps.setString(3, clob);
+                int n = ps.executeUpdate();
+                golden.recordUpdateCount(n);
+            }
+            // Round-trip read pins the SELECT-side wire for bug #14.
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT B, C FROM " + table + " WHERE ID = 1");
                  ResultSet rs = ps.executeQuery()) {
                 golden.recordResultSet(rs);
             }

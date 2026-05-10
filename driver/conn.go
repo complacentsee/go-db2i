@@ -67,6 +67,12 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		// dispatches per column.
 		opts.ClientCCSID = c.cfg.CCSID
 	}
+	if c.cfg.LOBThreshold != 0 {
+		// CP 0x3822 LOBFieldThreshold -- inline cutoff for LOB
+		// columns. SetSQLAttributes substitutes the historical
+		// 32768 default for zero.
+		opts.LOBThreshold = c.cfg.LOBThreshold
+	}
 	if _, err := hostserver.SetSQLAttributes(db, opts); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("gojtopen: set sql attributes: %w", err)

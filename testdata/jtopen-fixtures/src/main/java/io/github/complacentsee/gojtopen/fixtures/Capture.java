@@ -158,7 +158,7 @@ public final class Capture {
             Trace.setTraceErrorOn(true);
             Trace.setTraceWarningOn(true);
             Trace.setTraceOn(true);
-            try (Connection conn = openConnection(cfg)) {
+            try (Connection conn = openConnection(cfg, c.extraConnectionProperties())) {
                 try {
                     c.execute(conn, golden);
                 } catch (SQLException e) {
@@ -188,6 +188,11 @@ public final class Capture {
     }
 
     private static Connection openConnection(Config cfg) throws SQLException {
+        return openConnection(cfg, java.util.Collections.emptyMap());
+    }
+
+    private static Connection openConnection(Config cfg,
+                                             java.util.Map<String, String> extras) throws SQLException {
         String url = "jdbc:as400://" + cfg.host;
         Properties props = new Properties();
         props.setProperty("user", cfg.user);
@@ -209,6 +214,10 @@ public final class Capture {
         // Login + connect timeouts so a half-open TCP path can't hang
         // openConnection itself indefinitely.
         props.setProperty("login timeout", "30");
+        // Apply per-case overrides last so they win over the defaults.
+        for (java.util.Map.Entry<String, String> e : extras.entrySet()) {
+            props.setProperty(e.getKey(), e.getValue());
+        }
         // Force the JTOpen driver to load.
         try {
             Class.forName("com.ibm.as400.access.AS400JDBCDriver");

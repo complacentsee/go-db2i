@@ -1,6 +1,7 @@
 package hostserver
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 
@@ -67,6 +68,19 @@ type DBAttributesOptions struct {
 	// that need rollback support; IsolationCommitNone disables
 	// transactions entirely (suitable for non-journaled tables).
 	IsolationLevel int16
+	// LOBThreshold is the byte count at and below which the server
+	// inlines LOB columns in result data (and accepts inline LOB
+	// shapes on bind) instead of allocating a server-side locator.
+	// Sent as CP 0x3822 in SET_SQL_ATTRIBUTES; mirrors JT400's
+	// JDProperties.LOB_THRESHOLD ("lob threshold" JDBC URL knob).
+	//
+	// 0 = use the wire-default 32768 (the historical hard-coded
+	// value goJTOpen has always sent). Set to a smaller value to
+	// keep large CLOBs out of the row-data buffer; set to a larger
+	// value (up to 15728640, the server's documented cap) to inline
+	// bigger LOBs and skip the RETRIEVE_LOB_DATA round trip for
+	// repetitive small-LOB workloads.
+	LOBThreshold uint32
 }
 
 // DateFormat constants for DBAttributesOptions.DateFormat. The
@@ -150,6 +164,26 @@ func isolationLevelWireValue(level int16) int16 {
 		return 0
 	}
 	return level
+}
+
+// defaultLOBThreshold is the historical hard-coded LOB-field
+// threshold sent by goJTOpen before LOBThreshold became
+// configurable. Matches JT400's "lob threshold" default behaviour
+// for V7R5+ where the property is left unset by the application.
+const defaultLOBThreshold uint32 = 32768
+
+// dbParamLOBThreshold builds the CP 0x3822 (LOBFieldThreshold)
+// parameter for SET_SQL_ATTRIBUTES. Zero falls back to
+// defaultLOBThreshold so existing callers keep their wire shape;
+// callers can pass an explicit value (including very small or very
+// large) to drive the server's inline-LOB threshold.
+func dbParamLOBThreshold(threshold uint32) DBParam {
+	if threshold == 0 {
+		threshold = defaultLOBThreshold
+	}
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, threshold)
+	return DBParam{CodePoint: 0x3822, Data: b}
 }
 
 // CommitmentControlLevel values for DBAttributesOptions.IsolationLevel.
@@ -280,7 +314,7 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 	params = append(params,
 		DBParamShort(0x3812, 0x0001),                                    // PackageAddStmtAllowed
 		DBParamByte(0x3821, 0xF2),                                       // UseExtendedFormatsIndicator
-		DBParam{CodePoint: 0x3822, Data: []byte{0x00, 0x00, 0x80, 0x00}}, // LOBFieldThreshold
+		dbParamLOBThreshold(opts.LOBThreshold),                          // LOBFieldThreshold (CP 0x3822)
 		DBParamShort(0x3811, 0x0001),                                    // AmbiguousSelectOption
 		DBParam{CodePoint: 0x3825, Data: []byte{0xF6, 0x00, 0x00, 0x00}}, // ClientSupportInfo (V7R5+)
 		DBParam{CodePoint: 0x3827, Data: []byte{0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00}}, // DecimalPrecisionIndicators
