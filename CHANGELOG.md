@@ -51,6 +51,19 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Fixed
 
+- LOB reads no longer set the RLE compression bit (0x00040000) in
+  the RETRIEVE_LOB_DATA ORS bitmap. Pre-fix, BLOBs whose content
+  RLE-compressed well (4 KiB of identical bytes, headers padded
+  with 0x00, etc.) returned 0 bytes after Scan because the server
+  shipped an RLE-compressed CP and our parser interpreted the
+  shorter payload as truncation. Latent since the LOB SELECT
+  feature landed; surfaced by the multi-row LOB conformance test
+  inserting a 4 KiB 0xCC fill.
+- LOB CP 0x380F payload now uses the wire byte count instead of
+  the per-LOB-type "actualLen" indicator. For graphic LOBs
+  (DBCLOB), actualLen is reported in characters and the prior
+  code sliced off half the payload. Now matches the JT400
+  `DBLobData.adjustForGraphic` semantics implicitly.
 - CLOB read decode now picks the column's actual CCSID codec
   instead of always using CCSID 37. Without this, columns declared
   CCSID 273 (German EBCDIC, the PUB400 default) round-tripped some
@@ -58,6 +71,22 @@ across IBM i versions; expect the public API surface to settle at
   "|" because the encoder used CCSID 273's mapping while the
   decoder used CCSID 37's. The 17 divergent code-points are now
   symmetric.
+- DBCLOB bind on the wire now reports the *character* count for
+  CP 0x3819 (Requested Size) and CP 0x381A (Start Offset),
+  mirroring JT400's `JDLobLocator.writeData` graphic-LOB
+  convention. Pre-fix, DBCLOB binds overstated the size by 2× and
+  the server allocated a buffer twice as large as needed
+  (sometimes triggering SQL-302 downstream); post-fix, byte-for-
+  byte round-trips on PUB400 V7R5M0.
+- DBCLOB streamed read (`*gojtopen.LOBReader`) halves offset and
+  size at the wire boundary so the per-Read RETRIEVE_LOB_DATA
+  request for graphic LOBs sends character counts. Pre-fix, the
+  reader bailed mid-stream with SQL-401 once the byte offset
+  passed the LOB's character count threshold.
+- DBCLOB read length tracking now doubles `CurrentLength` (which
+  the server reports in characters for graphic LOBs) when stored
+  on `LOBReader.totalLen` so the EOF math doesn't truncate to half
+  the LOB.
 - LOB locator column index off-by-one — the driver passed the Go
   0-based column index to `RETRIEVE_LOB_DATA` (CP `0x3828`) where
   JT400's `JDServerRow.newData` uses 1-based (`i+1`). On V7R5+
@@ -182,8 +211,5 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Limitations / not yet implemented
 
-- DBCLOB string bind (UCS-2 BE on the wire, CCSID 13488). `[]byte`
-  with pre-encoded UCS-2 bytes works; pure-Go string → UTF-16 BE
-  transcoding lands with the next CCSID 13488 codec milestone.
 - TLS sign-on / database (ports 9476 / 9471) (M7).
 - `slog` integration / OpenTelemetry spans (M8).

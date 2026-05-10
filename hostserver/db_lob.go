@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"unicode/utf16"
 )
 
 // RETRIEVE_LOB_DATA function ID. Per JT400's
@@ -135,10 +136,20 @@ func RetrieveLOBData(conn io.ReadWriter, handle uint32, offset, size int64, colu
 		size = 0x7FFFFFFF
 	}
 	tpl := DBRequestTemplate{
-		// ReturnData + ResultData + RLE. SQLCA omitted -- locator
+		// ReturnData + ResultData. SQLCA omitted -- locator
 		// retrieval is straight wire data, no statement-level error
 		// machinery to surface.
-		ORSBitmap:                 ORSReturnData | ORSResultData | 0x00040000,
+		//
+		// RLE compression bit (0x00040000) is intentionally NOT
+		// set: enabling RLE would have the server compress the
+		// LOB content (a 4 KiB run of identical bytes shrinks to
+		// ~6 bytes), and our parser doesn't decompress -- so a
+		// constant-content BLOB read returns 0 bytes after the
+		// CP shape no longer matches what we expect. The
+		// equivalent JT400 path runs without RLE for the LOB
+		// service too. Re-enable + plumb decompression in if a
+		// real workload demonstrates a benefit.
+		ORSBitmap:                 ORSReturnData | ORSResultData,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -191,18 +202,24 @@ func parseLOBReply(rep *DBReply) (*LOBData, error) {
 		switch p.CodePoint {
 		case cpDBLOBData:
 			// Layout: CCSID(2) + actualLen(4) + payload bytes.
+			//
+			// For BLOB / CLOB, actualLen equals the payload byte
+			// count. For graphic LOBs (DBCLOB), actualLen is the
+			// *character* count and len(payload) is twice that;
+			// JT400 mirrors this by calling DBLobData.adjustForGraphic
+			// to double actualLen after retrieve. We sidestep the
+			// graphic/non-graphic ambiguity by using the payload
+			// byte count directly -- the CP-level LL bounds it,
+			// no padding observed on PUB400 V7R5M0 / IBM Cloud
+			// V7R6M0.
 			if len(p.Data) < 6 {
 				return nil, fmt.Errorf("hostserver: LOB data CP too short: %d bytes", len(p.Data))
 			}
 			out.CCSID = be.Uint16(p.Data[0:2])
-			actualLen := int(be.Uint32(p.Data[2:6]))
 			payload := p.Data[6:]
-			if actualLen > len(payload) {
-				return nil, fmt.Errorf("hostserver: LOB data actual-len %d exceeds payload %d", actualLen, len(payload))
-			}
 			// Copy so the caller can hold the bytes after the
 			// underlying reply buffer is recycled.
-			out.Bytes = append([]byte(nil), payload[:actualLen]...)
+			out.Bytes = append([]byte(nil), payload...)
 		case cpDBCurrentLOBLength:
 			// Layout: SL(2) + value (4 or 8 bytes BE).
 			if len(p.Data) < 2 {
@@ -282,14 +299,23 @@ func bindLOBParameters(conn io.ReadWriter, shapes []PreparedParam, values []any,
 // bindOneLOB ships the bytes for a single LOB parameter and
 // rewrites values[i] to the locator handle. Split out so the
 // per-parameter type switch stays readable.
+//
+// DBCLOB note: per JT400's JDLobLocator.writeData, the
+// `requestedSize` CP carries the *character* count for graphic
+// LOBs, not the byte count -- `lengthToUse = graphic_ ? length / 2
+// : length`. We mirror that via lobRequestedSize so DBCLOB binds
+// don't overstate their size (which silently caused IBM i to
+// allocate a buffer twice the needed size and report SQL -302
+// "string truncation" downstream of EXECUTE).
 func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int, nextCorr func() uint32) error {
 	switch v := values[i].(type) {
 	case []byte:
 		// BLOB ships verbatim. CLOB ships verbatim too --
-		// caller already transcoded. The single-frame branch
-		// matches JT400's default path; even a 1 MiB byte slice
-		// goes out as one DSS frame.
-		err := WriteLOBData(conn, p.LOBLocator, 0, uint32(len(v)), v, true, false, nextCorr())
+		// caller already transcoded. DBCLOB bytes must already
+		// be UCS-2 BE / UTF-16 BE; the dispatcher passes
+		// len(data)/2 as requestedSize.
+		req := lobRequestedSize(p.SQLType, len(v))
+		err := WriteLOBData(conn, p.LOBLocator, 0, req, v, true, false, nextCorr())
 		if err != nil {
 			return err
 		}
@@ -303,20 +329,24 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 		// 0x4F in CCSID 273); the read path in driver/rows.go
 		// must decode through the same codec or the round-trip
 		// silently corrupts those characters.
-		switch p.SQLType {
-		case 960, 961:
+		//
+		// DBCLOB string bind encodes the Go runes to UTF-16 BE
+		// bytes; surrogate-pair runes therefore consume 4 bytes
+		// = 2 wire characters, which matches the IBM i CCSID
+		// 1200 / 13488 wire layout.
+		if p.SQLType == 960 || p.SQLType == 961 {
 			return fmt.Errorf("string value for BLOB locator (SQL type %d); pass []byte instead", p.SQLType)
 		}
 		var bytes []byte
-		switch p.CCSID {
-		case ccsidBinary:
+		switch {
+		case p.SQLType == 968 || p.SQLType == 969:
+			bytes = encodeUTF16BE(v)
+		case p.CCSID == ccsidBinary:
 			bytes = []byte(v)
-		case 1208:
+		case p.CCSID == 1208:
 			// UTF-8 column: ship UTF-8 bytes verbatim. Server
 			// stores them as-is.
 			bytes = []byte(v)
-		case 13488:
-			return fmt.Errorf("DBCLOB string bind via CCSID 13488 not yet supported (use []byte with UCS-2 BE bytes)")
 		default:
 			conv := ebcdicForCCSID(p.CCSID)
 			b, err := conv.Encode(v)
@@ -325,7 +355,8 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 			}
 			bytes = b
 		}
-		err := WriteLOBData(conn, p.LOBLocator, 0, uint32(len(bytes)), bytes, true, false, nextCorr())
+		req := lobRequestedSize(p.SQLType, len(bytes))
+		err := WriteLOBData(conn, p.LOBLocator, 0, req, bytes, true, false, nextCorr())
 		if err != nil {
 			return err
 		}
@@ -333,6 +364,13 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 		// Streamed bind: chunk the source into LOBStreamChunkSize
 		// frames with advancing offset. Truncate=true on the last
 		// frame so the server finalises the LOB before EXECUTE.
+		//
+		// Each chunk's requestedSize honours the same
+		// byte-vs-character convention as the single-frame
+		// branches; for DBCLOB the chunk boundary must be
+		// 2-byte aligned (no half-codepoint at the seam) -- which
+		// LOBStreamChunkSize satisfies because it's even, but the
+		// caller's Reader has to return even-byte chunks too.
 		length := v.LOBLength()
 		if length < 0 {
 			return fmt.Errorf("LOBStream Length must be non-negative, got %d", length)
@@ -358,7 +396,11 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 			n, readErr := v.LOBNextChunk(buf[:want])
 			if n > 0 {
 				truncate := sent+int64(n) >= length
-				if err := WriteLOBData(conn, p.LOBLocator, sent, uint32(n), buf[:n], truncate, false, nextCorr()); err != nil {
+				// Per-chunk offset/size for graphic LOBs is
+				// also in characters, not bytes.
+				offCharOrByte := lobOffsetCount(p.SQLType, sent)
+				reqChunk := lobRequestedSize(p.SQLType, n)
+				if err := WriteLOBData(conn, p.LOBLocator, offCharOrByte, reqChunk, buf[:n], truncate, false, nextCorr()); err != nil {
 					return fmt.Errorf("WriteLOBData at offset %d: %w", sent, err)
 				}
 				sent += int64(n)
@@ -378,6 +420,44 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 	}
 	values[i] = p.LOBLocator
 	return nil
+}
+
+// lobRequestedSize returns the value the WRITE_LOB_DATA "requested
+// size" CP (0x3819) should carry for a parameter of the given SQL
+// type when the caller has byteCount bytes of payload. BLOB / CLOB
+// pass through unchanged; DBCLOB (SQL types 968/969) is graphic on
+// the wire and reports the *character* count (byteCount / 2).
+func lobRequestedSize(sqlType uint16, byteCount int) uint32 {
+	if sqlType == 968 || sqlType == 969 {
+		return uint32(byteCount / 2)
+	}
+	return uint32(byteCount)
+}
+
+// lobOffsetCount returns the Start Offset CP value for a graphic
+// (DBCLOB) LOB by halving the byte offset, mirroring lobRequestedSize.
+// Non-graphic LOBs keep the byte offset.
+func lobOffsetCount(sqlType uint16, byteOffset int64) int64 {
+	if sqlType == 968 || sqlType == 969 {
+		return byteOffset / 2
+	}
+	return byteOffset
+}
+
+// encodeUTF16BE encodes a Go string as UTF-16 big-endian bytes,
+// matching IBM i's CCSID 1200 (UTF-16 BE) and 13488 (UCS-2 BE)
+// graphic encodings. Runes outside the BMP turn into surrogate
+// pairs; the caller's wire char-count math should treat each
+// surrogate as one IBM i graphic character (i.e. byteCount / 2,
+// which is what lobRequestedSize already does).
+func encodeUTF16BE(s string) []byte {
+	codes := utf16.Encode([]rune(s))
+	out := make([]byte, 2*len(codes))
+	for i, c := range codes {
+		out[2*i] = byte(c >> 8)
+		out[2*i+1] = byte(c)
+	}
+	return out
 }
 
 // dbParamUint32 builds a 4-byte big-endian uint32 LL/CP/Data block.
