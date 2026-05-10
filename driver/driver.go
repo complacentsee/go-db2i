@@ -50,6 +50,16 @@
 //	             SANs; equivalent to JT400's setUseSSL with cert
 //	             validation off.
 //	tls-server-name  Overrides the SNI / cert-verify hostname.
+//	ccsid        Application-data CCSID. Overrides the connection-
+//	             level "ClientCCSID" negotiated at sign-on (CP 0x3801)
+//	             and the parameter-bind CCSID tag for string values.
+//	             Columns that explicitly tag a CCSID in their schema
+//	             ignore this on the read side -- per-column CCSID
+//	             always wins. Default 0 = auto: 13488 (UCS-2 BE)
+//	             for the SET_SQL_ATTRIBUTES negotiation,
+//	             1208 (UTF-8) for parameter binds on V7R3+ servers
+//	             and CCSID 37 elsewhere. Common explicit values are
+//	             1208 (UTF-8) and 37 (US English EBCDIC).
 //
 // # Connection lifecycle
 //
@@ -205,6 +215,33 @@ type Config struct {
 	// the row. The materialise default keeps existing callers
 	// working unchanged.
 	LOBStream bool
+
+	// CCSID overrides the application-data CCSID negotiated at
+	// SET_SQL_ATTRIBUTES (CP 0x3801, "ClientCCSID"). It tells the
+	// server which CCSID to encode CHAR / VARCHAR / CLOB column data
+	// in when the column itself doesn't tag a CCSID, AND the CCSID
+	// the driver tags on string parameter binds.
+	//
+	// The default 0 means "auto-pick": 13488 (UCS-2 BE) for the
+	// SET_SQL_ATTRIBUTES negotiation (matching JT400's default), and
+	// 1208 (UTF-8) for parameter-bind tagging on V7R3+ servers /
+	// CCSID 37 on older releases (see preferredStringCCSID).
+	//
+	// Common explicit values:
+	//   1208   UTF-8 -- preserves the full Unicode repertoire on
+	//          the wire when both client and server speak UTF-8.
+	//          V7R3+ targets only.
+	//   37     US English EBCDIC -- minimal SBCS subset, every IBM i
+	//          job understands it. Use for legacy installs.
+	//   273    German EBCDIC -- the historical PUB400 default; pin
+	//          this if the server's job CCSID is 273 and you want
+	//          parameter-bind to land on the same table.
+	//
+	// Columns that explicitly tag a CCSID in their definition (e.g.
+	// `VARCHAR(64) CCSID 1208`) ignore this setting on the read side
+	// -- the per-column CCSID always wins. CCSID is for the
+	// "untagged" / connection-default case.
+	CCSID uint16
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -348,6 +385,13 @@ func parseDSN(dsn string) (*Config, error) {
 		default:
 			return nil, fmt.Errorf("invalid lob %q (want materialise|stream)", v)
 		}
+	}
+	if v := q.Get("ccsid"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ccsid %q (want unsigned 16-bit int): %w", v, err)
+		}
+		cfg.CCSID = uint16(n)
 	}
 	return &cfg, nil
 }

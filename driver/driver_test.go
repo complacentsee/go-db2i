@@ -277,3 +277,48 @@ func TestParseDSNLOBMode(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDSNCCSID(t *testing.T) {
+	t.Run("default zero", func(t *testing.T) {
+		cfg, err := parseDSN("gojtopen://u:p@h/")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.CCSID != 0 {
+			t.Errorf("default CCSID = %d, want 0 (auto-pick)", cfg.CCSID)
+		}
+	})
+	for _, tc := range []struct {
+		raw  string
+		want uint16
+	}{
+		{"1208", 1208},
+		{"37", 37},
+		{"273", 273},
+		{"65535", 65535},
+	} {
+		t.Run("ccsid="+tc.raw, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?ccsid=" + tc.raw)
+			if err != nil {
+				t.Fatalf("parseDSN: %v", err)
+			}
+			if cfg.CCSID != tc.want {
+				t.Errorf("CCSID = %d, want %d", cfg.CCSID, tc.want)
+			}
+		})
+	}
+	t.Run("rejects out-of-range", func(t *testing.T) {
+		// 16-bit max is 65535; anything larger must be rejected so a
+		// typo doesn't silently truncate.
+		_, err := parseDSN("gojtopen://u:p@h/?ccsid=99999")
+		if err == nil {
+			t.Errorf("ccsid=99999 should be rejected (overflow uint16)")
+		}
+	})
+	t.Run("rejects non-numeric", func(t *testing.T) {
+		_, err := parseDSN("gojtopen://u:p@h/?ccsid=utf8")
+		if err == nil {
+			t.Errorf("ccsid=utf8 should be rejected (not an integer)")
+		}
+	})
+}

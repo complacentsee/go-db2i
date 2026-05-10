@@ -125,6 +125,39 @@ len(value) <= threshold`, route through the VARCHAR FOR BIT DATA
 path instead. Skips one round trip per small LOB at the cost of
 metadata-driven branching.
 
+## 5. CLOB columns ≤ 32 KB with explicit CCSID return zero rows (medium)
+
+**Symptom.** `SELECT c FROM t` (or any projection that includes the
+CLOB column) against a `CLOB(N) CCSID NNNN` column where `N <= 32K`
+yields zero rows even when `SELECT COUNT(*)` and `SELECT id` confirm
+rows exist. Without an explicit CCSID, or with `CLOB(1M)` and
+larger, the same SELECT works.
+
+**Reproduces.** Discovered against IBM Cloud V7R6M0 LPAR:
+- `CLOB(4K) CCSID 1208` → 0 rows on SELECT
+- `CLOB(32K) CCSID 1208` → 0 rows on SELECT
+- `CLOB(1M) CCSID 1208` → works
+- Same pattern for CCSID 37 and CCSID 273.
+
+**Cause (suspected).** Server returns small CLOB columns inline in
+the result-data stream rather than via a locator handle when the
+declared maximum size fits one wire frame. The driver's result-data
+parser (`hostserver/db_result_data.go`) only handles the locator-
+shaped LOB column descriptor; an inline-CLOB column either drops
+the row or mis-decodes it. Connected to the M7-5 `lob threshold`
+work, which is about the *bind* side of the same heuristic.
+
+**Workaround.** Declare CLOB columns at `1M` or larger when an
+explicit CCSID is required. `TestCCSID1208RoundTrip/CLOB round-trip`
+in the conformance suite uses `CLOB(1M) CCSID 1208` for this
+reason.
+
+**Fix path.** Capture a small-CLOB SELECT trace via `wiredump` and
+compare to the locator-shaped CLOB SELECT bytes. Likely needs the
+result-data column-decoder dispatch to recognise the inline-CLOB
+shape and decode through `decodeLOBChars`. Tracked alongside M7-5
+because the bind-side re-prepare path needs the same trace.
+
 ## 4. RLE decompression on RETRIEVE_LOB_DATA (low)
 
 **Symptom.** LOB reads currently disable the RLE bit

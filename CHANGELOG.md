@@ -51,6 +51,24 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- DSN parameter `?ccsid=N` overrides the connection's
+  application-data CCSID. The value is plumbed into both the
+  `SET_SQL_ATTRIBUTES` ClientCCSID negotiation (CP `0x3801`, the
+  CCSID the server uses when returning untagged CHAR / VARCHAR /
+  CLOB column data) and the per-bind tag the driver stamps on
+  string parameters. Default 0 keeps the auto-pick behaviour
+  (UCS-2 BE for negotiation, UTF-8 / CCSID 37 for binds based on
+  server VRM). Use `?ccsid=1208` to force UTF-8 round-trip on a
+  job where the SQL service's default CCSID would otherwise pick
+  an EBCDIC SBCS table. Live-validated end-to-end against
+  IBM Cloud V7R6M0 with `TestCCSID1208RoundTrip` exercising
+  `VARCHAR(64) CCSID 1208`, `CHAR(64) CCSID 1208`, and
+  `CLOB(1M) CCSID 1208` columns through em-dashes, curly quotes,
+  smart apostrophes, Latin-1 and Greek letters byte-equal.
+  Per-column CCSID still wins on the read side -- explicitly
+  tagged columns ignore the connection-level setting and are
+  decoded via the column's CCSID regardless.
+
 - M7-2 lazy `Rows` iteration validated against IBM Cloud V7R6M0.
   `driver.Rows.Next` now pulls one row at a time from
   `*hostserver.Cursor`, which issues continuation FETCH (`0x180B`)
@@ -73,6 +91,21 @@ across IBM i versions; expect the public API surface to settle at
   offline fixture tests and `cmd/smoketest`.
 
 ### Fixed
+
+- CHAR / VARCHAR result decode now picks the EBCDIC codec via the
+  column's CCSID instead of always using CCSID 37. Pre-fix,
+  columns declared with CCSID 273 (German EBCDIC, the historical
+  PUB400 default) round-tripped some punctuation incorrectly --
+  the 17 code points that diverge between CCSID 37 and CCSID 273
+  (e.g. `!` is 0x5A in 37 but 0x4F in 273) decoded to the wrong
+  Unicode character on a German-job server. The result-data
+  decoder now routes through the same `ebcdicForCCSID` helper the
+  bind path and the LOB-read path already use, so the 37/273
+  symmetry that landed for LOB reads earlier this milestone now
+  also covers CHAR / VARCHAR. CCSID 1208 (UTF-8) and CCSID 65535
+  (FOR BIT DATA) paths are unchanged. Closes M7-3 part 1; the
+  CCSID-aware decode lays the groundwork for `?ccsid=N` (added
+  separately above).
 
 - DBCLOB string bind now picks the encoder by column CCSID instead
   of always emitting UTF-16 BE. Pre-fix, binding a Go string with

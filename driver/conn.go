@@ -59,6 +59,14 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if c.cfg.Library != "" {
 		opts.DefaultSQLLibrary = c.cfg.Library
 	}
+	if c.cfg.CCSID != 0 {
+		// Override the default ClientCCSID (CP 0x3801) so the server
+		// returns untagged CHAR / VARCHAR / CLOB columns in the
+		// caller-requested CCSID. Tagged columns are unaffected --
+		// the server stamps their CCSID on the wire and the decoder
+		// dispatches per column.
+		opts.ClientCCSID = c.cfg.CCSID
+	}
 	if _, err := hostserver.SetSQLAttributes(db, opts); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("gojtopen: set sql attributes: %w", err)
@@ -108,7 +116,16 @@ type Conn struct {
 //   0x00070400  V7R4M0  -- 1208 supported
 //   0x00070300  V7R3M0  -- 1208 supported
 //   < V7R3      -- fall back to CCSID 37
+//
+// Caller can override the auto-pick via DSN ?ccsid=N (cfg.CCSID).
+// When set non-zero, that wins over the VRM-driven default. Useful
+// for installs where the user knows their server speaks a specific
+// SBCS variant (e.g. CCSID 1140 Euro, CCSID 5026 Japan) the auto
+// path doesn't model.
 func (c *Conn) preferredStringCCSID() uint16 {
+	if c.cfg != nil && c.cfg.CCSID != 0 {
+		return c.cfg.CCSID
+	}
 	if c.serverVRM >= 0x00070300 {
 		return 1208
 	}

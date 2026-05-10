@@ -993,6 +993,99 @@ func TestPreparedStmt(t *testing.T) {
 	wg.Wait()
 }
 
+// TestCCSID1208RoundTrip exercises the M7-3 contract that VARCHAR
+// CCSID 1208 (UTF-8) columns round-trip Unicode content byte-equal,
+// including the punctuation that would round-trip *wrong* on a
+// CCSID 37 / 273 column (em-dash, curly quotes, smart apostrophe,
+// Greek letters, etc).
+//
+// The column-CCSID-aware decode path lands the bind/read on CCSID
+// 1208 regardless of the connection's "default for unmarked data"
+// CCSID — so this test is a sanity check that the column path works
+// at all, not just that the connection-level knob does. It is the
+// CHAR/VARCHAR/CLOB live-validated round-trip the M7-3 plan calls
+// for.
+func TestCCSID1208RoundTrip(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "utf8"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, v VARCHAR(64) CCSID 1208)`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	// Mix of characters that trip on the EBCDIC SBCS path: em-dash
+	// (U+2014), curly quotes (U+201C / U+201D), smart apostrophe
+	// (U+2019), Greek π (U+03C0) / Ω (U+03A9), and Latin-1
+	// extended (Café). All BMP runes; CCSID 1208 carries them as
+	// 1-3 byte UTF-8 sequences verbatim.
+	want := "Café — “curly” quote · ‘smart’ · π · Ω"
+
+	if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, v) VALUES (?, ?)`, tbl), 1, want); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	t.Run("VARCHAR round-trip", func(t *testing.T) {
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT v FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != want {
+			t.Errorf("CCSID 1208 VARCHAR mismatch:\n  want = %q\n   got = %q", want, got)
+		}
+	})
+
+	t.Run("CHAR round-trip via CAST", func(t *testing.T) {
+		// CAST to CHAR(64) CCSID 1208: server transcodes the
+		// VARCHAR storage to a CHAR column (right-padded with
+		// spaces). Confirms the CHAR result-decode path picks the
+		// column CCSID, not the connection default.
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(
+			`SELECT CAST(v AS CHAR(64) CCSID 1208) FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan CHAR: %v", err)
+		}
+		// CHAR pads with spaces to the declared length; trim for
+		// the equality check. The interesting bit is byte-level
+		// preservation of the high-codepoint runes, not the
+		// trailing spaces.
+		got = strings.TrimRight(got, " ")
+		if got != want {
+			t.Errorf("CCSID 1208 CHAR mismatch:\n  want = %q\n   got = %q", want, got)
+		}
+	})
+
+	t.Run("CLOB round-trip", func(t *testing.T) {
+		// CLOB declared at 1M to avoid the small-LOB inline-return
+		// path: V7R6M0 returns CLOB columns declared <= 32K as inline
+		// VARCHAR-shaped data when the column carries an explicit
+		// CCSID, and the result-data parser currently drops those
+		// rows. CLOB(1M) forces the server-side locator path that
+		// the LOB-SELECT decoder is wired for. See gap §5 in
+		// docs/lob-known-gaps.md (added in M7-3 alongside this test).
+		clobTbl := schema() + "." + tablePrefix + "utf8clob"
+		db.Exec("DROP TABLE " + clobTbl)
+		if _, err := db.Exec(fmt.Sprintf(
+			`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CLOB(1M) CCSID 1208)`, clobTbl)); err != nil {
+			t.Skipf("CREATE CLOB(1M) CCSID 1208 failed: %v", err)
+		}
+		defer db.Exec("DROP TABLE " + clobTbl)
+		clobWant := strings.Repeat(want+" ", 50)
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, clobTbl), 1, clobWant); err != nil {
+			t.Fatalf("insert CLOB: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, clobTbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan CLOB: %v", err)
+		}
+		if got != clobWant {
+			t.Errorf("CCSID 1208 CLOB byte-level mismatch (lengths got=%d want=%d)", len(got), len(clobWant))
+		}
+	})
+}
+
 // TestRowsLazyMemoryBounded confirms the M7-2 lazy-iteration goal: a
 // large SELECT walked one row at a time keeps Go heap usage bounded
 // regardless of how many rows the cursor produces. Pre-M5 the

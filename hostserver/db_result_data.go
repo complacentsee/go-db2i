@@ -340,7 +340,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		//   65535       FOR BIT DATA: bytes returned as []byte
 		//   1208        UTF-8 passthrough: bytes returned as string
 		//               (no transcode -- server already encoded as UTF-8)
-		//   else        EBCDIC SBCS table (CCSID 37 for now)
+		//   else        EBCDIC SBCS table picked per-CCSID via
+		//               ebcdicForCCSID (CCSID 273 honoured for German
+		//               LPARs; CCSID 37 fallback for everything else).
 		if len(b) < int(col.Length) {
 			return nil, 0, fmt.Errorf("char wants %d bytes, have %d", col.Length, len(b))
 		}
@@ -352,9 +354,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		if col.CCSID == 1208 {
 			return string(b[:col.Length]), int(col.Length), nil
 		}
-		s, err := ebcdic.CCSID37.Decode(b[:col.Length])
+		s, err := ebcdicForCCSID(col.CCSID).Decode(b[:col.Length])
 		if err != nil {
-			return nil, 0, fmt.Errorf("decode char ebcdic: %w", err)
+			return nil, 0, fmt.Errorf("decode char ccsid %d: %w", col.CCSID, err)
 		}
 		return s, int(col.Length), nil
 
@@ -367,7 +369,8 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		// payload codec by CCSID:
 		//   65535  FOR BIT DATA, []byte verbatim
 		//   1208   UTF-8 string, no transcode
-		//   else   EBCDIC SBCS via CCSID 37 table
+		//   else   EBCDIC SBCS via ebcdicForCCSID (CCSID 273 honoured;
+		//          CCSID 37 fallback)
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("varchar header wants 2 bytes, have %d", len(b))
 		}
@@ -386,9 +389,9 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		if col.CCSID == 1208 {
 			return string(b[2 : 2+n]), 2 + n, nil
 		}
-		s, err := ebcdic.CCSID37.Decode(b[2 : 2+n])
+		s, err := ebcdicForCCSID(col.CCSID).Decode(b[2 : 2+n])
 		if err != nil {
-			return nil, 0, fmt.Errorf("decode varchar ebcdic: %w", err)
+			return nil, 0, fmt.Errorf("decode varchar ccsid %d: %w", col.CCSID, err)
 		}
 		return s, 2 + n, nil
 
