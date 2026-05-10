@@ -15,6 +15,7 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -26,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/complacentsee/goJTOpen/driver"
+	gojtopen "github.com/complacentsee/goJTOpen/driver"
 )
 
 // dsn returns the connection string from GOJTOPEN_DSN, skipping the
@@ -116,7 +117,9 @@ func dropTestTables(t *testing.T, db *sql.DB) {
 
 // TestBlobs adapts bradfitz/go-sql-test's testBlobs: insert a 16-byte
 // blob, scan it back as both []byte and string, and verify both
-// shapes round-trip exactly.
+// shapes round-trip exactly. Uses VARCHAR FOR BIT DATA -- the inline
+// path (no locator) -- to keep coverage on the small-binary case.
+// The locator-bind path lives in TestLOBBlob.
 func TestBlobs(t *testing.T) {
 	db := openDB(t)
 	dropTestTables(t, db)
@@ -152,6 +155,155 @@ func TestBlobs(t *testing.T) {
 		}
 		if want := string(blob); got != want {
 			t.Errorf("string: got %q, want %q", got, want)
+		}
+	})
+}
+
+// TestLOBBlob exercises the locator-bind path on a real BLOB column.
+// VARCHAR FOR BIT DATA can be inlined as a 2-byte SL + payload value
+// in CP 0x381F; BLOB columns force the WRITE_LOB_DATA / locator
+// handle dance. Three sub-cases:
+//
+//   - 8 KiB []byte: byte-equal round-trip via the default single-frame
+//     bind (matches JT400's pattern for prepared_blob_insert).
+//   - LOBValue{Bytes: ...}: same payload via the explicit LOBValue
+//     wrapper, confirming the driver-level resolver routes correctly.
+//   - LOBValue{Reader: ..., Length: 80 KiB}: streamed bind that
+//     produces multiple WRITE_LOB_DATA frames at advancing offsets.
+func TestLOBBlob(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "lobblob"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, b BLOB(1M))`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	// 8 KiB byte ramp 0x00..0xFF repeating.
+	small := make([]byte, 8*1024)
+	for i := range small {
+		small[i] = byte(i & 0xFF)
+	}
+
+	t.Run("byte slice", func(t *testing.T) {
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 1, small); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, small) {
+			t.Errorf("BLOB round-trip: %d bytes back, %d bytes sent (head/tail mismatch)", len(got), len(small))
+		}
+	})
+
+	t.Run("LOBValue Bytes", func(t *testing.T) {
+		val := &gojtopen.LOBValue{Bytes: small}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 2, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 2).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, small) {
+			t.Errorf("LOBValue Bytes round-trip mismatch (%d bytes back, %d sent)", len(got), len(small))
+		}
+	})
+
+	t.Run("LOBValue Reader 80KiB", func(t *testing.T) {
+		// 80 KiB > 32 KiB chunk size, so the driver MUST split into
+		// >=3 WRITE_LOB_DATA frames.
+		const total = 80 * 1024
+		want := make([]byte, total)
+		for i := range want {
+			want[i] = byte((i * 7) & 0xFF)
+		}
+		val := &gojtopen.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 3, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 3).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("LOBValue Reader 80KiB round-trip mismatch (%d bytes back, %d sent)", len(got), total)
+		}
+	})
+
+	t.Run("LOBValue Reader 1MiB", func(t *testing.T) {
+		// 1 MiB stress test -- the explicit Done-criteria size.
+		const total = 1024 * 1024
+		want := make([]byte, total)
+		for i := range want {
+			want[i] = byte((i * 13) & 0xFF)
+		}
+		val := &gojtopen.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 4, val); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got []byte
+		if err := db.QueryRow(fmt.Sprintf(`SELECT b FROM %s WHERE id = ?`, tbl), 4).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("LOBValue Reader 1MiB round-trip mismatch (%d bytes back, %d sent)", len(got), total)
+		}
+	})
+}
+
+// TestLOBClob exercises the locator-bind path on a CLOB column. The
+// driver transcodes the Go string to the column's declared CCSID
+// (typically 273 on PUB400) before shipping; the read side decodes
+// back. Confirms the EBCDIC round-trip works for the basic ASCII
+// subset and that long strings cross the chunking boundary cleanly.
+func TestLOBClob(t *testing.T) {
+	db := openDB(t)
+	dropTestTables(t, db)
+
+	tbl := schema() + "." + tablePrefix + "lobclob"
+	if _, err := db.Exec(fmt.Sprintf(
+		`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, c CLOB(1M))`, tbl)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer db.Exec("DROP TABLE " + tbl)
+
+	// ~8 KiB CLOB (single-frame).
+	var sb strings.Builder
+	for sb.Len() < 8*1024 {
+		sb.WriteString("Hello, IBM i! ")
+	}
+	clob := sb.String()
+
+	t.Run("string", func(t *testing.T) {
+		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, tbl), 1, clob); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		var got string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT c FROM %s WHERE id = ?`, tbl), 1).Scan(&got); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if got != clob {
+			diff := -1
+			for i := 0; i < len(got) && i < len(clob); i++ {
+				if got[i] != clob[i] {
+					diff = i
+					break
+				}
+			}
+			head := 64
+			if head > len(got) {
+				head = len(got)
+			}
+			if head > len(clob) {
+				head = len(clob)
+			}
+			t.Errorf("CLOB string round-trip mismatch at byte %d (len got=%d sent=%d)\n  sent[:%d] = %q\n   got[:%d] = %q",
+				diff, len(got), len(clob), head, clob[:head], head, got[:head])
 		}
 	})
 }

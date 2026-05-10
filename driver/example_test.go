@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"time"
 
-	_ "github.com/complacentsee/goJTOpen/driver"
+	gojtopen "github.com/complacentsee/goJTOpen/driver"
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
@@ -133,6 +135,91 @@ func Example_db2Error() {
 		// SQLSTATE 08xxx -- pool will retire the conn
 	default:
 		log.Printf("SQL%d %s %s: %s", dbErr.SQLCode, dbErr.SQLState, dbErr.MessageID, dbErr.Message)
+	}
+}
+
+// Example_blobInsert shows binding a BLOB column via a `?` placeholder.
+// Small payloads can pass as a plain []byte; the driver detects the
+// LOB column from the server-side parameter marker format and routes
+// the bytes through a single WRITE_LOB_DATA frame, then EXECUTE
+// carries the locator handle in the SQLDA value slot.
+func Example_blobInsert() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	payload := []byte{0xCA, 0xFE, 0xBA, 0xBE} // up to a few KB; bigger uses LOBValue
+	if _, err := db.Exec(
+		`INSERT INTO mylib.images (id, content) VALUES (?, ?)`, 42, payload,
+	); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// Example_lobValueStream shows the streamed bind path for large LOBs.
+// The driver reads from the io.Reader in 32 KiB chunks and emits
+// multiple WRITE_LOB_DATA frames at advancing offsets so the entire
+// payload never needs to live in Go memory at once. Length must be
+// known up front because the IBM i host server allocates locator
+// buffers based on the declared size.
+func Example_lobValueStream() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	f, err := os.Open("backup.tar.gz")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	val := &gojtopen.LOBValue{Reader: f, Length: stat.Size()}
+	if _, err := db.Exec(
+		`INSERT INTO mylib.archives (id, blob) VALUES (?, ?)`, 1, val,
+	); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// Example_clobInsert binds a CLOB column. The driver transcodes the
+// Go string to the column's declared CCSID via the per-CCSID codec
+// in package ebcdic (CCSID 273 / German EBCDIC on a German PUB400
+// account, CCSID 37 / US English on a US system, etc.) so EBCDIC
+// code-point quirks ("!" = 0x5A in CCSID 37 but 0x4F in CCSID 273)
+// round-trip cleanly through the matching read decoder.
+func Example_clobInsert() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	doc := "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " +
+		"... entire document up to the column's max ..."
+	if _, err := db.Exec(
+		`INSERT INTO mylib.docs (id, body) VALUES (?, ?)`, 7, doc,
+	); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// Example_lobReader streams a BLOB out of a SELECT one chunk at a
+// time. The DSN option `?lob=stream` flips the default scan-into-
+// []byte behaviour to scan-into-*LOBReader for LOB columns; the
+// reader satisfies io.Reader+io.Closer and pulls 32 KiB chunks per
+// Read call. Pair with Example_lobValueStream for the bind side.
+func Example_lobReader() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB&lob=stream")
+	defer db.Close()
+
+	row := db.QueryRow(`SELECT content FROM mylib.images WHERE id = ?`, 42)
+	var r *gojtopen.LOBReader
+	if err := row.Scan(&r); err != nil {
+		log.Fatal(err)
+	}
+	defer r.Close()
+
+	if _, err := io.Copy(os.Stdout, r); err != nil {
+		log.Fatal(err)
 	}
 }
 

@@ -198,6 +198,32 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		return nil, dbErr
 	}
 
+	// Parse the parameter marker format (CP 0x3813). For LOB columns
+	// it carries the server-allocated locator handles we need for
+	// WRITE_LOB_DATA. For non-LOB columns it gives us the column's
+	// declared SQL type and CCSID, which is informational here --
+	// the bind dispatcher upstream picked Go-type-driven shapes that
+	// the server already accepts.
+	pmf, err := prepRep.findSuperExtendedParameterMarkerFormat()
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse parameter marker format: %w", err)
+	}
+
+	// LOB rewrite: for any parameter the server declared as a LOB
+	// column, ship the bytes via WRITE_LOB_DATA now and rewrite the
+	// shape/value pair so CHANGE_DESCRIPTOR + EXECUTE see the
+	// locator-bind shape (FieldLength=4) and the 4-byte handle.
+	// This mutates paramShapes/paramValues in place; the caller
+	// passed them as []PreparedParam / []any so they own the slice
+	// and we don't leak the rewrite past the call.
+	if err := bindLOBParameters(conn, paramShapes, paramValues, pmf, func() uint32 {
+		c := corr
+		corr++
+		return c
+	}); err != nil {
+		return nil, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
+	}
+
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
 	// round trip for callers that pass through ExecutePreparedSQL
 	// for symmetry but happen to bind zero arguments.

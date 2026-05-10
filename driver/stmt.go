@@ -26,6 +26,22 @@ func (s *Stmt) NumInput() int { return -1 }
 
 func (s *Stmt) Close() error { return nil }
 
+// CheckNamedValue lets database/sql forward our LOB bind type
+// (*LOBValue) through the driver boundary without the default
+// parameter converter rejecting it for not being one of the six
+// driver.Value flavours. Returning nil tells database/sql "leave
+// the value alone, the driver knows what to do with it"; returning
+// driver.ErrSkip tells it to fall back to its default conversion
+// (int -> int64, etc.).
+//
+// Implements database/sql/driver.NamedValueChecker.
+func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
+	if _, ok := nv.Value.(*LOBValue); ok {
+		return nil
+	}
+	return driver.ErrSkip
+}
+
 // ExecContext implements driver.StmtExecContext. Plumbs ctx through
 // to the underlying net.Conn via SetDeadline so a canceled / timed-
 // out request unblocks the in-flight wire read instead of hanging
@@ -180,6 +196,13 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			// FieldLength must include the 2-byte length prefix.
 			// CCSID 65535 routes the encoder through the binary
 			// passthrough branch (no EBCDIC conversion).
+			//
+			// Note: when this value targets a BLOB column the
+			// hostserver layer detects that during PREPARE_DESCRIBE
+			// reply parsing and overrides the shape to the LOB
+			// locator path; the user's []byte then ships via
+			// WRITE_LOB_DATA instead of inline. See bindLOBParameters
+			// in hostserver/db_lob.go.
 			shapes[i] = hostserver.PreparedParam{
 				SQLType:     449,
 				FieldLength: uint32(len(v)) + 2,
@@ -187,6 +210,29 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 				CCSID:       65535,
 			}
 			values[i] = v
+		case *LOBValue:
+			// Explicit LOB bind. Bytes go through the same []byte
+			// path inside bindLOBParameters; Reader-driven values
+			// go through the hostserver.LOBStream interface that
+			// *LOBValue satisfies.
+			//
+			// The placeholder VARCHAR shape here is just a
+			// best-effort starting point that gets overwritten by
+			// bindLOBParameters once the server's parameter marker
+			// format is parsed. We size the placeholder at 4 bytes
+			// (the locator handle width) so the descriptor's
+			// row-size column total stays accurate even before
+			// the override runs.
+			rv, err := resolveLOBValue(v)
+			if err != nil {
+				return nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
+			}
+			shapes[i] = hostserver.PreparedParam{
+				SQLType:     961, // BLOB locator NN; bindLOBParameters fixes up SQLType + CCSID
+				FieldLength: 4,
+				CCSID:       65535,
+			}
+			values[i] = rv
 		case string:
 			// FieldLength sizes the field as 2-byte SL + payload
 			// length. UTF-8 strings can encode 1-4 bytes per rune;
