@@ -314,9 +314,7 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 		// caller already transcoded. DBCLOB bytes must already
 		// be UCS-2 BE / UTF-16 BE; the dispatcher passes
 		// len(data)/2 as requestedSize.
-		req := lobRequestedSize(p.SQLType, len(v))
-		err := WriteLOBData(conn, p.LOBLocator, 0, req, v, true, false, nextCorr())
-		if err != nil {
+		if err := writeLOBBytesChunked(conn, p, v, LOBBlockSize, nextCorr); err != nil {
 			return err
 		}
 	case string:
@@ -355,9 +353,7 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 			}
 			bytes = b
 		}
-		req := lobRequestedSize(p.SQLType, len(bytes))
-		err := WriteLOBData(conn, p.LOBLocator, 0, req, bytes, true, false, nextCorr())
-		if err != nil {
+		if err := writeLOBBytesChunked(conn, p, bytes, LOBBlockSize, nextCorr); err != nil {
 			return err
 		}
 	case LOBStream:
@@ -419,6 +415,49 @@ func bindOneLOB(conn io.ReadWriter, p ParameterMarkerField, values []any, i int,
 		return fmt.Errorf("LOB bind value must be []byte, string, or LOBStream; got %T", v)
 	}
 	values[i] = p.LOBLocator
+	return nil
+}
+
+// writeLOBBytesChunked uploads `data` for `p.LOBLocator` as a
+// sequence of WRITE_LOB_DATA frames sized at chunkSize (or smaller
+// for the trailing fragment), with truncate=true only on the last
+// frame. See LOBBlockSize for the rationale and measured impact;
+// short version: single-frame multi-megabyte WRITE_LOB_DATA exposes
+// a server-side performance cliff that JT400 sidesteps by chunking
+// via SQLLocatorBase.readInputStream + LOB_BLOCK_SIZE, so we do too.
+//
+// For graphic LOBs (DBCLOB, SQL types 968/969) the per-chunk
+// requestedSize and startOffset are reported in *characters* via
+// lobRequestedSize / lobOffsetCount, mirroring the LOBStream branch.
+// The DBCLOB chunk boundary must be 2-byte aligned (no half
+// codepoint at the seam); LOBBlockSize is even, and string CLOBs are
+// pre-encoded as UTF-16 BE which always produces even-byte input.
+func writeLOBBytesChunked(conn io.ReadWriter, p ParameterMarkerField, data []byte, chunkSize int, nextCorr func() uint32) error {
+	if chunkSize <= 0 {
+		chunkSize = LOBBlockSize
+	}
+	// Empty LOB: emit one zero-length frame with truncate=true so
+	// the server materialises an empty value. Without this, EXECUTE
+	// would carry the locator handle but no content. Matches
+	// JT400's setBytes(2, new byte[0]) behaviour and the LOBStream
+	// length==0 branch above.
+	if len(data) == 0 {
+		return WriteLOBData(conn, p.LOBLocator, 0, 0, nil, true, false, nextCorr())
+	}
+	for off := 0; off < len(data); {
+		end := off + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		chunk := data[off:end]
+		isLast := end == len(data)
+		offCharOrByte := lobOffsetCount(p.SQLType, int64(off))
+		reqChunk := lobRequestedSize(p.SQLType, len(chunk))
+		if err := WriteLOBData(conn, p.LOBLocator, offCharOrByte, reqChunk, chunk, isLast, false, nextCorr()); err != nil {
+			return fmt.Errorf("WriteLOBData at offset %d: %w", off, err)
+		}
+		off = end
+	}
 	return nil
 }
 
@@ -489,6 +528,26 @@ type LOBStream interface {
 // a LOBStream. 32 KB matches the read-side DefaultLOBChunkSize and
 // is well below the wire-format int32 cap.
 const LOBStreamChunkSize = 32 * 1024
+
+// LOBBlockSize is the per-frame byte size used when chunking a
+// `[]byte` or `string` LOB bind. It mirrors JT400's
+// AS400JDBCPreparedStatement.LOB_BLOCK_SIZE = 1_000_000, with the
+// JT400 source comment "@pdc Match Native JDBC Driver" -- so this is
+// also the block size IBM's own native JDBC driver uses.
+//
+// Background. Single-frame WRITE_LOB_DATA frames carrying many
+// megabytes are exposed to a server-side performance cliff on
+// IBM i V7R6: a 64 MiB single-frame BLOB+CLOB INSERT measured
+// 195s on a quiet 1-CPU LPAR (~0.33 KB/ms, two orders of magnitude
+// below GbE wire speed), and 128 MiB hit our previous 10-minute
+// context timeout. Chunking the upload at 1 MB frames -- matching
+// JT400's stream-bind path -- avoids the worst of that cliff
+// (64 MiB BLOB+CLOB drops to ~115s) without measurably hurting small
+// LOBs. It does NOT fully linearise large-LOB throughput though; the
+// IBM i host server still exhibits super-linear scaling above ~16
+// MiB regardless of chunk strategy, so 128 MiB+ writes remain slow.
+// Tracking the residual server-side cost is a separate line of work.
+const LOBBlockSize = 1_000_000
 
 // IsLOBSQLType reports whether the IBM i SQL type code refers to a
 // LOB locator that needs the WRITE_LOB_DATA / RETRIEVE_LOB_DATA path
