@@ -51,6 +51,24 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M7-7 (partial) ships the RLE-1 decompressor as the foundation
+  for compressed `RETRIEVE_LOB_DATA` replies. New
+  `hostserver.decompressRLE1` is a Go port of JT400's
+  `JDUtilities.decompress` (`0x1B value count(4)` runs +
+  `0x1B 0x1B` escaped literals), covered offline by 8 byte-level
+  tests including the 1 MiB constant-content case that motivated
+  the original gap. `parseLOBReply` now reads the CP `0x380F`
+  `actualLen` header and routes per-CP RLE payloads through the
+  decompressor when `len(payload) != actualLen`; graphic-LOB
+  length doubling (CCSID 13488 / 1200) is handled. The
+  request-side RLE bit (`0x00040000`) stays OFF until the
+  whole-datastream RLE wrapper (CP `0x3832`) lands -- V7R6
+  servers compress the entire reply via that CP rather than
+  per-CP, so `ParseDBReply` needs a CP `0x3832` unwrap pass
+  before the bit can re-enable safely. `docs/lob-known-gaps.md`
+  §4 documents the residual work; current LOB reads continue to
+  use the uncompressed path with no behaviour change.
+
 - M7-6 captures JT400's wire pattern for batched LOB-column INSERTs.
   New fixture `testdata/jtopen-fixtures/fixtures/prepared_blob_batch.trace`
   (case `prepared_blob_batch` in `Cases.java`) records

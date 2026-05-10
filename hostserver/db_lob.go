@@ -138,19 +138,20 @@ func RetrieveLOBData(conn io.ReadWriter, handle uint32, offset, size int64, colu
 		size = 0x7FFFFFFF
 	}
 	tpl := DBRequestTemplate{
-		// ReturnData + ResultData. SQLCA omitted -- locator
-		// retrieval is straight wire data, no statement-level error
-		// machinery to surface.
+		// ReturnData + ResultData. The RLE-on-reply bit
+		// (0x00040000 = ORS_BITMAP_REPLY_RLE_COMPRESSION per JT400)
+		// is intentionally NOT set: enabling it on V7R6 caused the
+		// server to wrap the entire reply in CP 0x3832 (the
+		// whole-datastream RLE wrapper, distinct from per-CP RLE),
+		// which our parseDBReply doesn't unwrap. The decompressor
+		// (decompressRLE1) and parseLOBReply's per-CP RLE handling
+		// landed in M7-7 as the foundation for whole-datastream
+		// RLE; turning the bit back on requires the CP 0x3832
+		// reader to land first. See docs/lob-known-gaps.md §4 for
+		// the residual work.
 		//
-		// RLE compression bit (0x00040000) is intentionally NOT
-		// set: enabling RLE would have the server compress the
-		// LOB content (a 4 KiB run of identical bytes shrinks to
-		// ~6 bytes), and our parser doesn't decompress -- so a
-		// constant-content BLOB read returns 0 bytes after the
-		// CP shape no longer matches what we expect. The
-		// equivalent JT400 path runs without RLE for the LOB
-		// service too. Re-enable + plumb decompression in if a
-		// real workload demonstrates a benefit.
+		// SQLCA omitted -- locator retrieval is straight wire data,
+		// no statement-level error machinery to surface.
 		ORSBitmap:                 ORSReturnData | ORSResultData,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
@@ -205,23 +206,69 @@ func parseLOBReply(rep *DBReply) (*LOBData, error) {
 		case cpDBLOBData:
 			// Layout: CCSID(2) + actualLen(4) + payload bytes.
 			//
-			// For BLOB / CLOB, actualLen equals the payload byte
-			// count. For graphic LOBs (DBCLOB), actualLen is the
-			// *character* count and len(payload) is twice that;
-			// JT400 mirrors this by calling DBLobData.adjustForGraphic
-			// to double actualLen after retrieve. We sidestep the
-			// graphic/non-graphic ambiguity by using the payload
-			// byte count directly -- the CP-level LL bounds it,
-			// no padding observed on PUB400 V7R5M0 / IBM Cloud
-			// V7R6M0.
+			// actualLen is the *uncompressed* byte count.  When the
+			// server applies RLE-1 compression to the payload (which
+			// it may or may not do -- a request-side RLE bit asks
+			// for it but the server skips compression on
+			// incompressible data) the on-wire payload is shorter
+			// than actualLen.  We trigger decompression iff
+			// `actualLen != len(payload)`, which is reliable because
+			// RLE-1 with mismatched lengths can never coincide with
+			// raw data of the same length (raw payload by definition
+			// has actualLen == len(payload)).
+			//
+			// For BLOB / CLOB, actualLen equals the uncompressed
+			// payload byte count.  For graphic LOBs (DBCLOB),
+			// actualLen is reported in *characters* and the wire
+			// uncompressed payload is twice that; JT400 mirrors
+			// this by calling DBLobData.adjustForGraphic to double
+			// actualLen after retrieve.  We sidestep the
+			// graphic/non-graphic ambiguity by using the wire byte
+			// count for the equality check (graphic payloads are
+			// even-length and len(payload) == 2*actualLen, so the
+			// "compressed" trigger is simply `len(payload) <
+			// actualLen` rather than `!= actualLen`).
 			if len(p.Data) < 6 {
 				return nil, fmt.Errorf("hostserver: LOB data CP too short: %d bytes", len(p.Data))
 			}
 			out.CCSID = be.Uint16(p.Data[0:2])
+			actualLen := int(be.Uint32(p.Data[2:6]))
 			payload := p.Data[6:]
-			// Copy so the caller can hold the bytes after the
-			// underlying reply buffer is recycled.
-			out.Bytes = append([]byte(nil), payload...)
+			// Compute the byte count we'd expect for an uncompressed
+			// payload. For BLOB / CLOB the actualLen field is bytes;
+			// for graphic LOBs (CCSID 13488 UCS-2 BE or 1200 UTF-16
+			// BE) it is the character count and the uncompressed
+			// payload is twice as many bytes.
+			expectedRaw := actualLen
+			if out.CCSID == 13488 || out.CCSID == 1200 {
+				expectedRaw = actualLen * 2
+			}
+			switch {
+			case len(payload) == expectedRaw:
+				// Raw passthrough. Copy so the caller can hold the
+				// bytes after the underlying reply buffer is
+				// recycled.
+				out.Bytes = append([]byte(nil), payload...)
+			case len(payload) < expectedRaw:
+				// RLE-1 compressed: decompress to expectedRaw bytes.
+				// The server skips compression on incompressible
+				// data, so the only way the wire payload is shorter
+				// than the declared size is RLE.
+				decompressed, err := decompressRLE1(payload, expectedRaw)
+				if err != nil {
+					return nil, fmt.Errorf("hostserver: decompress LOB payload (actualLen=%d ccsid=%d wire=%d expected=%d): %w",
+						actualLen, out.CCSID, len(payload), expectedRaw, err)
+				}
+				out.Bytes = decompressed
+			default:
+				// len(payload) > expectedRaw: server delivered more
+				// bytes than the actualLen suggests. Treat as raw
+				// passthrough; this matches JT400's tolerance
+				// (DBLobData uses the parsed length field as
+				// authoritative for decompression and otherwise
+				// trusts the wire bytes).
+				out.Bytes = append([]byte(nil), payload...)
+			}
 		case cpDBCurrentLOBLength:
 			// Layout: SL(2) + value (4 or 8 bytes BE).
 			if len(p.Data) < 2 {
@@ -599,6 +646,85 @@ func encodeUCS2BEStrict(s string) ([]byte, error) {
 		out[2*i+1] = byte(c)
 	}
 	return out, nil
+}
+
+// rleEscapeByte is the single-byte sentinel JT400's RLE-1 encoder
+// uses to introduce both runs and escaped literals. See
+// JTOpen/src/main/java/com/ibm/as400/access/JDUtilities.java
+// (`private static final byte escape = (byte) 0x1B`). The wire
+// format on the reply side is:
+//
+//	literal byte         -> emit byte, advance 1
+//	0x1B 0x1B            -> emit one literal 0x1B, advance 2
+//	0x1B value count(4)  -> emit `value` repeated count times,
+//	                        advance 6
+//
+// Count is a 4-byte big-endian int32 (matches JT400's
+// BinaryConverter.byteArrayToInt). Servers skip RLE on
+// incompressible data; parseLOBReply only invokes this helper when
+// the on-wire payload is shorter than the declared `actualLen`.
+const rleEscapeByte = 0x1B
+
+// decompressRLE1 expands an RLE-1 encoded byte stream into a
+// pre-allocated buffer of `expectedLen` bytes. Mirrors
+// JDUtilities.decompress in JT400 byte-for-byte. Returns an error if
+// the input is malformed (escape byte at end without a payload, or
+// run length that overflows the destination).
+//
+// `expectedLen` is the uncompressed byte count parseLOBReply derived
+// from the CP header (with the graphic-LOB doubling already
+// applied). The helper allocates the output buffer at this size and
+// returns it sliced to the actual decompressed length so a
+// short-but-not-error return surfaces visibly.
+func decompressRLE1(src []byte, expectedLen int) ([]byte, error) {
+	if expectedLen < 0 {
+		return nil, fmt.Errorf("hostserver: decompressRLE1: negative expectedLen %d", expectedLen)
+	}
+	out := make([]byte, expectedLen)
+	j := 0
+	for i := 0; i < len(src); {
+		if src[i] != rleEscapeByte {
+			if j >= len(out) {
+				return nil, fmt.Errorf("hostserver: decompressRLE1: output overflow (literal at src[%d], dst index %d, expected %d bytes)", i, j, expectedLen)
+			}
+			out[j] = src[i]
+			i++
+			j++
+			continue
+		}
+		// Escape sequence -- need at least one trailing byte.
+		if i+1 >= len(src) {
+			return nil, fmt.Errorf("hostserver: decompressRLE1: truncated escape at src[%d] (need >= 2 bytes)", i)
+		}
+		if src[i+1] == rleEscapeByte {
+			// Escaped literal 0x1B.
+			if j >= len(out) {
+				return nil, fmt.Errorf("hostserver: decompressRLE1: output overflow (escaped 0x1B at src[%d], dst index %d, expected %d)", i, j, expectedLen)
+			}
+			out[j] = rleEscapeByte
+			i += 2
+			j++
+			continue
+		}
+		// Run: 0x1B value count_BE_int32.
+		if i+6 > len(src) {
+			return nil, fmt.Errorf("hostserver: decompressRLE1: truncated run header at src[%d] (need 6 bytes, have %d)", i, len(src)-i)
+		}
+		value := src[i+1]
+		count := int(int32(binary.BigEndian.Uint32(src[i+2 : i+6])))
+		if count < 0 {
+			return nil, fmt.Errorf("hostserver: decompressRLE1: negative run length %d at src[%d]", count, i)
+		}
+		if j+count > len(out) {
+			return nil, fmt.Errorf("hostserver: decompressRLE1: run overflow (run of %d at src[%d], dst index %d, expected %d)", count, i, j, expectedLen)
+		}
+		for k := 0; k < count; k++ {
+			out[j+k] = value
+		}
+		j += count
+		i += 6
+	}
+	return out[:j], nil
 }
 
 // dbParamUint32 builds a 4-byte big-endian uint32 LL/CP/Data block.
