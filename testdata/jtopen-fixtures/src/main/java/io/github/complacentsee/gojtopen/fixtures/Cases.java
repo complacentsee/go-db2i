@@ -78,6 +78,14 @@ final class Cases {
         cases.add(new PreparedString());
         cases.add(new PreparedDecimal());
 
+        // LOB bind via parameter markers — exercises locator allocation,
+        // WRITE_LOB_DATA, and the EXECUTE SQLDA carrying the 4-byte
+        // locator handle in the LOB slot. Two sizes: one below the
+        // single-frame WRITE_LOB_DATA limit, one above it (forces
+        // chunked upload).
+        cases.add(new PreparedBlobInsert(schema));
+        cases.add(new PreparedBlobInsertLarge(schema));
+
         // Block fetch — needs a real table.
         cases.add(new MultiRowFetch(schema));
 
@@ -170,6 +178,112 @@ final class Cases {
                 try (ResultSet rs = ps.executeQuery()) {
                     golden.recordResultSet(rs);
                 }
+            }
+        }
+    }
+
+    /**
+     * Shared lifecycle for LOB-bind cases. The table has one INTEGER
+     * primary-key column plus a BLOB and CLOB column sized large
+     * enough for both the small (~8 KB) and large (≥64 KB) fixture
+     * cases. setup() drops any prior incarnation and recreates so
+     * each run produces a deterministic trace from a clean table.
+     */
+    private static abstract class WithLobTable extends Case {
+        // 8-char SQL/system name; no truncation issue.
+        private static final String TABLE_SHORT = "GOJT_LOB";
+
+        protected final String schema;
+        protected final String table;
+
+        WithLobTable(String name, String schema) {
+            super(name);
+            this.schema = schema;
+            this.table = schema + "." + TABLE_SHORT;
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+                st.execute("CREATE TABLE " + table + " ("
+                        + "ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "B BLOB(1M), "
+                        + "C CLOB(1M))");
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try { st.execute("DROP TABLE " + table); } catch (SQLException ignored) { }
+            }
+        }
+    }
+
+    private static final class PreparedBlobInsert extends WithLobTable {
+        PreparedBlobInsert(String schema) { super("prepared_blob_insert", schema); }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            // 8 KB BLOB: deterministic byte ramp so byte-equality is
+            // easy to assert from the SELECT-back side.
+            byte[] blob = new byte[8 * 1024];
+            for (int i = 0; i < blob.length; i++) {
+                blob[i] = (byte) (i & 0xFF);
+            }
+            // ~8 KB CLOB so we cover the EBCDIC/CCSID transcoding path
+            // without crossing the chunk boundary the large case
+            // exercises.
+            StringBuilder sb = new StringBuilder(8 * 1024);
+            String unit = "Hello, IBM i! ";
+            while (sb.length() < 8 * 1024) sb.append(unit);
+            String clob = sb.toString();
+
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, B, C) VALUES (?, ?, ?)")) {
+                ps.setInt(1, 1);
+                ps.setBytes(2, blob);
+                ps.setString(3, clob);
+                int n = ps.executeUpdate();
+                golden.recordUpdateCount(n);
+            }
+            // Round-trip read: confirms the row landed and pins the
+            // SELECT-side bytes for the golden.
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT B, C FROM " + table + " WHERE ID = 1");
+                 ResultSet rs = ps.executeQuery()) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    private static final class PreparedBlobInsertLarge extends WithLobTable {
+        PreparedBlobInsertLarge(String schema) { super("prepared_blob_insert_large", schema); }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            // 64 KB BLOB: above JT400's single-frame WRITE_LOB_DATA
+            // limit (~32 KB), so the trace must show multiple
+            // WRITE_LOB_DATA frames at advancing offsets — that's the
+            // chunking encoding we need to mirror in the Go encoder.
+            byte[] blob = new byte[64 * 1024];
+            for (int i = 0; i < blob.length; i++) {
+                blob[i] = (byte) ((i * 31) & 0xFF);
+            }
+            // CLOB stays small here so the BLOB chunking is the only
+            // long write in the trace; CLOB chunking can be a follow-up
+            // case if the encoder needs separate validation.
+            String clob = "small clob";
+
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, B, C) VALUES (?, ?, ?)")) {
+                ps.setInt(1, 2);
+                ps.setBytes(2, blob);
+                ps.setString(3, clob);
+                int n = ps.executeUpdate();
+                golden.recordUpdateCount(n);
+            }
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT B, C FROM " + table + " WHERE ID = 2");
+                 ResultSet rs = ps.executeQuery()) {
+                golden.recordResultSet(rs);
             }
         }
     }
