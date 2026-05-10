@@ -66,10 +66,12 @@ across IBM i versions; expect the public API surface to settle at
   and an `encodeUCS2BEStrict` opt-in helper are also available for
   callers who would rather surface an error than silently
   substitute (no DSN flag wires this in yet — follow-up).
-  Offline-tested via `TestEncodeUCS2BE_*`; live test
-  (`TestLOBDBClobCCSID13488`) gated on
-  `GOJTOPEN_TEST_CCSID13488_TABLE` because PUB400 V7R5M0 does not
-  expose a CCSID-13488 target. Closes `docs/lob-known-gaps.md` §1.
+  Offline-tested via `TestEncodeUCS2BE_*`; live-validated against
+  the IBM Cloud Power VS V7R6M0 LPAR with
+  `GOJTOPEN_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`
+  (BMP round-trip + non-BMP substitute both PASS). PUB400 V7R5M0
+  does not expose a CCSID-13488 target so the test skips there.
+  Closes `docs/lob-known-gaps.md` §1.
 - LOB reads no longer set the RLE compression bit (0x00040000) in
   the RETRIEVE_LOB_DATA ORS bitmap. Pre-fix, BLOBs whose content
   RLE-compressed well (4 KiB of identical bytes, headers padded

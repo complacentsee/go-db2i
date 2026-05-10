@@ -16,8 +16,10 @@ should read carefully before depending on the affected paths.
 
 **Status.** Closed by the M7-1 commit
 (`hostserver: CCSID-aware DBCLOB encode for column CCSID 13488`).
-Offline tests pass; live validation is opt-in (see "Live test
-escape hatch" below).
+Offline tests pass; live validation against the IBM Cloud Power VS
+V7R6M0 LPAR confirms both the BMP round-trip and the non-BMP
+substitute behaviour against a real `DBCLOB(64K) CCSID 13488`
+column.
 
 **Symptom (pre-fix).** A surrogate-pair rune (any codepoint outside
 the BMP, e.g. `𝄞 = U+1D11E`) bound to a CCSID-13488 DBCLOB column
@@ -57,11 +59,12 @@ covered by offline tests in `hostserver/db_lob_ucs2_test.go`
 `test/conformance/conformance_test.go` exercises the substitute
 path against a real CCSID-13488 column when the
 `GOJTOPEN_TEST_CCSID13488_TABLE` env var is set to a
-fully-qualified table name. PUB400 V7R5M0 does not readily expose
-a CCSID-13488 target, so the test skips on free-tier targets;
-sites with DBCS-capable NLSS can wire it in by setting the env
-var. The substitute behaviour itself is byte-pinned by the
-offline tests.
+fully-qualified table name. The test recreates the table on entry
+(schema is fixed: `id INTEGER` + `dc DBCLOB(64K) CCSID 13488`);
+PUB400 V7R5M0 does not readily expose a target with the right
+NLSS, so the test skips on free-tier targets. The IBM Cloud Power
+VS V7R6M0 LPAR accepts the CREATE; live PASS recorded
+2026-05-10 with `GOJTOPEN_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`.
 
 ## 2. Multi-row batch INSERT via CP 0x381F `RowCount > 1` (medium)
 
