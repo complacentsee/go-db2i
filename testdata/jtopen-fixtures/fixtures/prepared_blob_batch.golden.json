@@ -1,0 +1,44 @@
+{
+  "case" : "prepared_blob_batch",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "ID",
+      "label" : "ID",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "B",
+      "label" : "B",
+      "typeName" : "BLOB",
+      "sqlType" : 2004,
+      "displaySize" : 1048576,
+      "precision" : 1048576,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "C",
+      "label" : "C",
+      "typeName" : "CLOB",
+      "sqlType" : 2005,
+      "displaySize" : 1048576,
+      "precision" : 1048576,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ 1, "1112131415161718191a1b1c1d1e1f20", "row=1 clob" ], [ 2, "22232425262728292a2b2c2d2e2f3031", "row=2 clob" ], [ 3, "333435363738393a3b3c3d3e3f404142", "row=3 clob" ], [ 4, "4445464748494a4b4c4d4e4f50515253", "row=4 clob" ], [ 5, "55565758595a5b5c5d5e5f6061626364", "row=5 clob" ] ]
+  } ],
+  "updateCount" : 5
+}

@@ -294,12 +294,35 @@ RPB; there is no explicit FREE_LOB on the bind side.
   divides byte-count by 2 to derive the character count for CP `0x3819`
   (the data is already UTF-16 BE). DBCLOB binds are a follow-up.
 
-- **Multi-row batched INSERT.** CP `0x381F`'s row-count header
-  supports `RowCount > 1`, but binding multiple LOB rows would need
-  the server to re-allocate handles per row. Out of scope here —
-  the locked-down handles in CP `0x3813` are per-prepared-statement,
-  not per-row, so single-row execution is the only pattern this
-  document covers.
+- **Multi-row batched INSERT — settled.** CP `0x381F`'s row-count
+  header supports `RowCount > 1`, but **JT400 itself never uses
+  it for LOB-column batches.** Trace
+  `prepared_blob_batch.trace` captures
+  `ps.addBatch()` × 5 followed by `ps.executeBatch()` against
+  `INSERT INTO ... (ID, B, C) VALUES (?, ?, ?)` and shows N
+  separate `EXECUTE_IMMEDIATE` (`0x1805`) frames — one per row —
+  rather than a single multi-row `EXECUTE` with `RowCount=5`.
+  Per-row JT400 emits, in order:
+
+  ```
+  WRITE_LOB_DATA (0x1817)        upload BLOB N bytes
+  WRITE_LOB_DATA (0x1817)        upload CLOB N bytes
+  RETRIEVE_LOB_DATA (0x1816)     server roundtrip, see below
+  EXECUTE_IMMEDIATE (0x1805)     row N inserted
+  ```
+
+  The mid-batch `RETRIEVE_LOB_DATA` looks unrelated to actually
+  retrieving content (it is sent during INSERT, not SELECT) — JT400
+  appears to use it as a server roundtrip that re-allocates the
+  per-marker locator handles before the next EXECUTE. Confirmed by
+  the trace: handles in subsequent `WRITE_LOB_DATA` frames are
+  refreshed each iteration. This is the missing piece that enables
+  N independent rows on a single PREPARE / one RPB slot.
+
+  goJTOpen's existing per-`Exec` round trip is therefore wire-
+  equivalent to JT400's `executeBatch` for LOB-column INSERTs —
+  there is no special multi-row CP `0x381F` path to mirror.
+  `docs/lob-known-gaps.md` §2 closes with this finding.
 
 ## Plan deltas
 

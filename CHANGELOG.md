@@ -51,6 +51,24 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M7-6 captures JT400's wire pattern for batched LOB-column INSERTs.
+  New fixture `testdata/jtopen-fixtures/fixtures/prepared_blob_batch.trace`
+  (case `prepared_blob_batch` in `Cases.java`) records
+  `ps.addBatch()` × 5 + `ps.executeBatch()` against
+  `INSERT INTO t (ID, B, C) VALUES (?, ?, ?)`. Finding settles
+  the long-standing question (gap §2) that the
+  M7 plan flagged: **JT400 emits N single-row EXECUTE_IMMEDIATE
+  frames, not a single multi-row EXECUTE with CP 0x381F
+  RowCount=5.** Per row the wire shows a fixed pattern of
+  `WRITE_LOB_DATA` × K (one per LOB marker) + `RETRIEVE_LOB_DATA`
+  (re-allocates the per-marker locator handles) + `EXECUTE_IMMEDIATE`.
+  goJTOpen's existing per-`Exec` round trip is therefore wire-
+  equivalent to JT400's `executeBatch` for LOB columns; no
+  multi-row code path to mirror. Doc-only resolution closes
+  `docs/lob-known-gaps.md` §2; full walkthrough lives in
+  `docs/lob-bind-wire-protocol.md` "Multi-row batched INSERT —
+  settled".
+
 - DSN parameter `?ccsid=N` overrides the connection's
   application-data CCSID. The value is plumbed into both the
   `SET_SQL_ATTRIBUTES` ClientCCSID negotiation (CP `0x3801`, the

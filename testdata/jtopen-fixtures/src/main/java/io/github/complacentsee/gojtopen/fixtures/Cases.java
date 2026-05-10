@@ -85,6 +85,7 @@ final class Cases {
         // chunked upload).
         cases.add(new PreparedBlobInsert(schema));
         cases.add(new PreparedBlobInsertLarge(schema));
+        cases.add(new PreparedBlobBatch(schema));
 
         // Block fetch — needs a real table.
         cases.add(new MultiRowFetch(schema));
@@ -282,6 +283,45 @@ final class Cases {
             }
             try (PreparedStatement ps = conn.prepareStatement(
                     "SELECT B, C FROM " + table + " WHERE ID = 2");
+                 ResultSet rs = ps.executeQuery()) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    // PreparedBlobBatch captures JT400's wire pattern for batched
+    // LOB-column INSERTs: addBatch() five times then executeBatch().
+    // The open question (docs/lob-known-gaps.md §2) is whether JT400
+    // emits one multi-row EXECUTE with CP 0x381F RowCount=5 or
+    // five single-row EXECUTEs in sequence. The trace settles it.
+    private static final class PreparedBlobBatch extends WithLobTable {
+        PreparedBlobBatch(String schema) { super("prepared_blob_batch", schema); }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, B, C) VALUES (?, ?, ?)")) {
+                for (int row = 1; row <= 5; row++) {
+                    // Each row gets a small distinct BLOB and CLOB so
+                    // a multi-row EXECUTE (if that's what JT400 emits)
+                    // can be distinguished from N single-row EXECUTEs
+                    // by the wire bytes.
+                    byte[] blob = new byte[16];
+                    for (int i = 0; i < blob.length; i++) blob[i] = (byte) ((row * 17 + i) & 0xFF);
+                    String clob = "row=" + row + " clob";
+                    ps.setInt(1, row);
+                    ps.setBytes(2, blob);
+                    ps.setString(3, clob);
+                    ps.addBatch();
+                }
+                int[] counts = ps.executeBatch();
+                int total = 0;
+                for (int c : counts) total += (c >= 0 ? c : 1); // SUCCESS_NO_INFO -> count 1
+                golden.recordUpdateCount(total);
+            }
+            // Confirm the rows are queryable so the trace also captures
+            // the SELECT-back path used by goJTOpen tests.
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT ID, B, C FROM " + table + " ORDER BY ID");
                  ResultSet rs = ps.executeQuery()) {
                 golden.recordResultSet(rs);
             }

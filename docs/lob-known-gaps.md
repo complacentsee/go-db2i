@@ -66,36 +66,41 @@ NLSS, so the test skips on free-tier targets. The IBM Cloud Power
 VS V7R6M0 LPAR accepts the CREATE; live PASS recorded
 2026-05-10 with `GOJTOPEN_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`.
 
-## 2. Multi-row batch INSERT via CP 0x381F `RowCount > 1` (medium)
+## 2. Multi-row batch INSERT via CP 0x381F `RowCount > 1` (CLOSED, M7-6)
 
-**Symptom.** The driver does not currently expose a batched
-LOB-INSERT path that would set CP 0x381F's `RowCount` field to
-N > 1 in a single EXECUTE.
+**Status.** Closed by the M7-6 trace capture. JT400 does **not**
+use CP 0x381F's `RowCount > 1` for LOB-column batched INSERTs;
+its `executeBatch()` emits N separate `EXECUTE_IMMEDIATE`
+(`0x1805`) frames, one per row. The captured fixture is
+`testdata/jtopen-fixtures/fixtures/prepared_blob_batch.trace`
+(`ps.addBatch()` × 5 + `ps.executeBatch()` against
+`INSERT INTO t (ID, B, C) VALUES (?, ?, ?)`).
 
-**What works today.** Multi-tuple `INSERT INTO t (id, b) VALUES
-(?, ?), (?, ?), (?, ?)` works because the server allocates an
-independent locator handle per `?` marker — confirmed live by
-`TestLOBMultiRow`. So a caller wanting to insert N rows in one
-round trip can use N×K parameter markers in a single statement.
+**Trace findings.** Per row, JT400 emits:
 
-**Why CP 0x381F batching probably doesn't work.** Per the wire-
-protocol findings (`docs/lob-bind-wire-protocol.md`), locator
-handles in CP 0x3813 (parameter marker format) are allocated per
-*marker position*, not per row. A multi-row CP 0x381F bind would
-have only one locator per LOB column to write to across all N
-rows; previous WRITE_LOB_DATA frames would be overwritten by the
-last one. We have not confirmed this on the wire — there might
-be a handle-cycling protocol — but neither JT400 nor goJTOpen
-currently exercise it.
+```
+WRITE_LOB_DATA (0x1817)        upload BLOB column bytes
+WRITE_LOB_DATA (0x1817)        upload CLOB column bytes
+RETRIEVE_LOB_DATA (0x1816)     server roundtrip — re-allocates
+                               per-marker locator handles
+EXECUTE_IMMEDIATE (0x1805)     insert this row
+```
 
-**Workaround.** Multi-tuple VALUES (above) for a single Exec.
-For N independent INSERTs, `db.Prepare` + N `Stmt.Exec` calls
-gives N round trips but reuses the same prepared statement.
+The mid-batch `RETRIEVE_LOB_DATA` is the trick that makes batched
+LOB binds work on a single PREPARE: it refreshes the locator
+handles between rows so each row's `WRITE_LOB_DATA` writes to a
+fresh handle. Without it the second row's writes would overwrite
+the first row's content (locators are per-marker, not per-row).
 
-**Fix path.** Trace JT400's batchExecute() with LOB columns to
-see what it actually emits — likely N single-row EXECUTEs rather
-than one multi-row one. Document the canonical pattern in
-`docs/lob-bind-wire-protocol.md`.
+**Implications for goJTOpen.** Today's per-`Exec` flow is
+wire-equivalent to `JT400.executeBatch` for LOB-column INSERTs —
+there is no special CP `0x381F` multi-row path to mirror. Callers
+wanting N-row LOB batches use `db.Prepare` + N `Stmt.Exec` calls,
+or multi-tuple `INSERT VALUES (?, ?), (?, ?), ...` (covered by
+`TestLOBMultiRow`).
+
+**Wire-protocol ref.** `docs/lob-bind-wire-protocol.md` "Multi-row
+batched INSERT — settled" has the full byte-level walkthrough.
 
 ## 3. JT400 `lob threshold` inline-small-LOB optimisation (low)
 
