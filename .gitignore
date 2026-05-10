@@ -25,3 +25,10 @@ Thumbs.db
 # Local env files
 .env
 .env.local
+
+# Live credentials / private keys -- never commit
+AUTH.md
+LOB-ISSUE.md
+initial_rsa.prv
+*.pem
+*.key
