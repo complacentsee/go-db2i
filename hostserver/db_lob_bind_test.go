@@ -311,6 +311,131 @@ func TestBindLOBStreamChunking(t *testing.T) {
 	}
 }
 
+// TestBindLOBBytesChunking pins the chunked WRITE_LOB_DATA shape for
+// []byte BLOB binds. Single-frame uploads of multi-megabyte LOBs are
+// catastrophically slow against IBM i V7R6 (a 64 MiB BLOB INSERT
+// spent ~3 minutes server-side in our testing); we mirror JT400's
+// 1 MB chunking to keep the server inside its fast path. This test
+// asserts:
+//
+//   - a 2.5 MiB []byte produces 3 WRITE_LOB_DATA frames at LOBBlockSize=1MB
+//   - StartOffset advances strictly per frame in byte units
+//   - LOBTruncation = 0xF1 ("don't truncate") on every non-last frame
+//     and 0xF0 ("truncate") on the last
+//   - sum of RequestedSize equals total payload bytes
+func TestBindLOBBytesChunking(t *testing.T) {
+	const total = LOBBlockSize*2 + 500_000 // 3 frames: 1MB, 1MB, 500KB
+	data := make([]byte, total)
+	for i := range data {
+		data[i] = byte(i)
+	}
+
+	var conn fakeReadWriter
+	corr := uint32(200)
+	for i := 0; i < 4; i++ {
+		conn.replies = append(conn.replies, makeOKReply(corr+uint32(i)))
+	}
+	corrFn := func() uint32 {
+		c := corr
+		corr++
+		return c
+	}
+	pmf := []ParameterMarkerField{
+		{SQLType: 961, FieldLength: 4, CCSID: 0xFFFF, LOBLocator: 0xCAFEBABE},
+	}
+	shapes := []PreparedParam{{SQLType: 449, FieldLength: 4 + 2, Precision: 4, CCSID: 0xFFFF}}
+	values := []any{data}
+	if err := bindLOBParameters(&conn, shapes, values, pmf, corrFn); err != nil {
+		t.Fatalf("bindLOBParameters: %v", err)
+	}
+
+	frames := splitDSSFrames(t, conn.written.Bytes())
+	var writes []frameView
+	for _, f := range frames {
+		if f.reqRepID == ReqDBSQLWriteLOBData {
+			writes = append(writes, f)
+		}
+	}
+	if len(writes) != 3 {
+		t.Fatalf("WRITE_LOB_DATA frame count = %d, want 3 (1MB+1MB+500KB)", len(writes))
+	}
+	var sumSize uint32
+	prevOff := int64(-1)
+	for i, w := range writes {
+		cps, err := parseCPs(w.payload)
+		if err != nil {
+			t.Fatalf("frame %d parse CPs: %v", i, err)
+		}
+		off, _ := cpUint32(cps, cpDBStartOffset)
+		size, _ := cpUint32(cps, cpDBRequestedSize)
+		trunc, _ := cpByte(cps, cpDBLOBTruncation)
+		if int64(off) <= prevOff {
+			t.Errorf("frame %d offset %d not strictly greater than previous %d", i, off, prevOff)
+		}
+		prevOff = int64(off)
+		sumSize += size
+		isLast := i == len(writes)-1
+		wantTrunc := byte(0xF1)
+		if isLast {
+			wantTrunc = 0xF0
+		}
+		if trunc != wantTrunc {
+			t.Errorf("frame %d truncate = 0x%02X, want 0x%02X (isLast=%v)", i, trunc, wantTrunc, isLast)
+		}
+	}
+	if sumSize != total {
+		t.Errorf("sum of WRITE_LOB_DATA RequestedSize = %d, want %d", sumSize, total)
+	}
+	if got, ok := values[0].(uint32); !ok || got != 0xCAFEBABE {
+		t.Errorf("values[0] post-bind = %#v, want uint32(0xCAFEBABE)", values[0])
+	}
+}
+
+// TestBindLOBBytesChunkingEmpty confirms the zero-length BLOB bind
+// still emits exactly one WRITE_LOB_DATA frame with truncate=true,
+// matching JT400's `setBytes(2, new byte[0])` behaviour. Without this
+// frame the server would carry the locator handle through EXECUTE
+// with no content uploaded, leaving stale data from a prior batch
+// row in the column.
+func TestBindLOBBytesChunkingEmpty(t *testing.T) {
+	var conn fakeReadWriter
+	conn.replies = append(conn.replies, makeOKReply(300))
+	corr := uint32(300)
+	corrFn := func() uint32 {
+		c := corr
+		corr++
+		return c
+	}
+	pmf := []ParameterMarkerField{
+		{SQLType: 961, FieldLength: 4, CCSID: 0xFFFF, LOBLocator: 0x11223344},
+	}
+	shapes := []PreparedParam{{SQLType: 449, FieldLength: 4 + 2, Precision: 4, CCSID: 0xFFFF}}
+	values := []any{[]byte{}}
+	if err := bindLOBParameters(&conn, shapes, values, pmf, corrFn); err != nil {
+		t.Fatalf("bindLOBParameters: %v", err)
+	}
+	frames := splitDSSFrames(t, conn.written.Bytes())
+	var writes []frameView
+	for _, f := range frames {
+		if f.reqRepID == ReqDBSQLWriteLOBData {
+			writes = append(writes, f)
+		}
+	}
+	if len(writes) != 1 {
+		t.Fatalf("empty LOB bind: WRITE_LOB_DATA frame count = %d, want 1", len(writes))
+	}
+	cps, err := parseCPs(writes[0].payload)
+	if err != nil {
+		t.Fatalf("parse CPs: %v", err)
+	}
+	if size, _ := cpUint32(cps, cpDBRequestedSize); size != 0 {
+		t.Errorf("empty LOB RequestedSize = %d, want 0", size)
+	}
+	if trunc, _ := cpByte(cps, cpDBLOBTruncation); trunc != 0xF0 {
+		t.Errorf("empty LOB truncate = 0x%02X, want 0xF0 (truncate)", trunc)
+	}
+}
+
 // ---- helpers ----
 
 // fakeReadWriter implements io.ReadWriter for tests that need to
