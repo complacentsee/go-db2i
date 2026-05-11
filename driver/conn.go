@@ -351,17 +351,154 @@ func (c *Conn) nextCorr() uint32 {
 // the OpenSelectStatic / OpenSelectPrepared call sites stay zero-
 // allocation for the common path.
 func (c *Conn) selectOptions() []hostserver.SelectOption {
+	return c.selectOptionsFor("", false)
+}
+
+// selectOptionsFor is the per-statement variant of selectOptions.
+// It applies the cfg.PackageCriteria filter before deciding whether
+// to emit the extended-dynamic CP 0x3804 marker for THIS sql --
+// statements that don't pass the criteria (e.g. a non-parameterised
+// SELECT under criteria=default) get a plain PREPARE_DESCRIBE on
+// the wire and stay out of the *PGM. Mirrors JT400's
+// JDSQLStatement.canHaveExtendedDynamic logic.
+//
+// When called with sql="" / hasParams=false the criteria filter is
+// bypassed -- selectOptions() takes this shortcut for the common
+// case where the caller hasn't yet routed through Stmt.Prepare /
+// Stmt.Exec and just wants the conn-level flags.
+func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectOption {
 	var opts []hostserver.SelectOption
 	if c.cfg != nil && c.cfg.ExtendedMetadata {
 		opts = append(opts, hostserver.WithExtendedMetadata(true))
 	}
-	if c.pkg != nil {
+	if c.pkg != nil && c.packageEligibleFor(sql, hasParams) {
 		// Extended-dynamic adds the empty CP 0x3804 marker to
 		// each PREPARE_DESCRIBE so the server files the statement
 		// into the connection's package context.
 		opts = append(opts, hostserver.WithExtendedDynamic(true))
 	}
 	return opts
+}
+
+// packageEligibleFor implements the per-SQL eligibility test the
+// Config.PackageCriteria knob selects between. Mirrors JT400's
+// JDSQLStatement.canHaveExtendedDynamic boundary (the same SQL
+// shape that JT400 treats as "package-eligible"):
+//
+//	"default":
+//	  - statement has >=1 parameter marker AND is not a CURRENT OF
+//	    cursor expression AND is not a DECLARE PROCEDURE / DECLARE
+//	    CURSOR statement
+//	"select":
+//	  - default rules, PLUS unparameterised SELECT statements
+//
+// Empty sql (the selectOptions() shortcut) returns true so callers
+// that don't have SQL context yet still see the package flag.
+func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
+	if c.cfg == nil || c.pkg == nil {
+		return false
+	}
+	if sql == "" {
+		return true
+	}
+	// Trim leading whitespace to find the verb.
+	verb := firstSQLVerb(sql)
+	// JT400 always refuses to cache "DECLARE" and "CURRENT OF" --
+	// they're not standalone, just lexical decoration on something
+	// the server is already preparing differently.
+	if eqIgnoreCaseDriver(verb, "DECLARE") {
+		return false
+	}
+	if containsCaseInsensitive(sql, "CURRENT OF") {
+		return false
+	}
+	switch c.cfg.PackageCriteria {
+	case "select":
+		// criteria=select caches the same as default PLUS
+		// unparameterised SELECT / VALUES / WITH.
+		if hasParams {
+			return true
+		}
+		switch {
+		case eqIgnoreCaseDriver(verb, "SELECT"),
+			eqIgnoreCaseDriver(verb, "VALUES"),
+			eqIgnoreCaseDriver(verb, "WITH"):
+			return true
+		}
+		return false
+	default: // "default"
+		return hasParams
+	}
+}
+
+// firstSQLVerb returns the first whitespace-delimited token of sql
+// (after leading spaces / tabs / newlines), without allocating. The
+// returned slice aliases sql.
+func firstSQLVerb(sql string) string {
+	i := 0
+	for i < len(sql) {
+		c := sql[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			break
+		}
+		i++
+	}
+	j := i
+	for j < len(sql) {
+		c := sql[j]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '(' {
+			break
+		}
+		j++
+	}
+	return sql[i:j]
+}
+
+func eqIgnoreCaseDriver(s, want string) bool {
+	if len(s) != len(want) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		a := s[i]
+		b := want[i]
+		if a >= 'a' && a <= 'z' {
+			a -= 32
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
+}
+
+func containsCaseInsensitive(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			a := haystack[i+j]
+			b := needle[j]
+			if a >= 'a' && a <= 'z' {
+				a -= 32
+			}
+			if b >= 'a' && b <= 'z' {
+				b -= 32
+			}
+			if a != b {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Conn) nextCorrFunc() func() uint32 {

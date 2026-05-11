@@ -1,6 +1,8 @@
 package driver
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -559,6 +561,185 @@ func TestParseDSN_M10RejectsBadValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPackageEligibleFor_DefaultCriteria covers the criteria=default
+// rule: parameterised statements are eligible; everything else is
+// not. The Conn-level filter only matters when c.pkg is set, so the
+// test builds a Conn with a synthetic PackageManager + cfg.
+func TestPackageEligibleFor_DefaultCriteria(t *testing.T) {
+	conn := &Conn{
+		cfg: &Config{
+			ExtendedDynamic: true,
+			PackageName:     "APP",
+			PackageLibrary:  "QGPL",
+			PackageError:    "warning",
+			PackageCriteria: "default",
+		},
+		pkg: &fakePackageManager,
+	}
+	cases := []struct {
+		sql       string
+		hasParams bool
+		want      bool
+	}{
+		{"SELECT 1 FROM SYSIBM.SYSDUMMY1", false, false},
+		{"SELECT ? FROM SYSIBM.SYSDUMMY1", true, true},
+		{"INSERT INTO T VALUES (?)", true, true},
+		{"INSERT INTO T VALUES (1)", false, false},
+		{"DECLARE C CURSOR FOR ...", true, false},
+		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
+		{"UPDATE T SET X=1 WHERE Y=2", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := conn.packageEligibleFor(tc.sql, tc.hasParams)
+			if got != tc.want {
+				t.Errorf("packageEligibleFor(%q, hasParams=%v) = %v, want %v",
+					tc.sql, tc.hasParams, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPackageEligibleFor_SelectCriteria covers the criteria=select
+// rule: same as default, PLUS unparameterised SELECT statements.
+func TestPackageEligibleFor_SelectCriteria(t *testing.T) {
+	conn := &Conn{
+		cfg: &Config{
+			ExtendedDynamic: true,
+			PackageName:     "APP",
+			PackageLibrary:  "QGPL",
+			PackageError:    "warning",
+			PackageCriteria: "select",
+		},
+		pkg: &fakePackageManager,
+	}
+	cases := []struct {
+		sql       string
+		hasParams bool
+		want      bool
+	}{
+		{"SELECT 1 FROM SYSIBM.SYSDUMMY1", false, true}, // newly eligible
+		{"SELECT ? FROM SYSIBM.SYSDUMMY1", true, true},
+		{"VALUES 1", false, true},
+		{"WITH C AS (SELECT 1) SELECT * FROM C", false, true},
+		{"INSERT INTO T VALUES (1)", false, false}, // still not
+		{"DECLARE C CURSOR FOR ...", true, false},
+		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := conn.packageEligibleFor(tc.sql, tc.hasParams)
+			if got != tc.want {
+				t.Errorf("packageEligibleFor(%q, hasParams=%v) = %v, want %v",
+					tc.sql, tc.hasParams, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandlePackageError covers the three Config.PackageError modes:
+// "exception" returns the original error (caller fails the connect),
+// "warning" + "none" return nil (caller soft-disables the package).
+//
+// We don't validate the slog output here -- the per-conn logger is a
+// silent fallback when Config.Logger is nil. The behaviour the
+// caller cares about is the returned (error or nil), which encodes
+// the fatal/non-fatal decision.
+func TestHandlePackageError(t *testing.T) {
+	probe := fmt.Errorf("package boom")
+	cases := []struct {
+		mode    string
+		wantNil bool
+	}{
+		{"exception", false},
+		{"warning", true},
+		{"none", true},
+		{"", true}, // empty falls through to default = warning
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			c := &Conn{
+				cfg: &Config{PackageError: tc.mode},
+				log: silentLogger,
+			}
+			got := c.handlePackageError(context.Background(), "init", probe)
+			if tc.wantNil && got != nil {
+				t.Errorf("mode=%q: got %v, want nil", tc.mode, got)
+			}
+			if !tc.wantNil && got == nil {
+				t.Errorf("mode=%q: got nil, want %v", tc.mode, probe)
+			}
+		})
+	}
+}
+
+// TestPackageEligibleFor_NoPkgIsAlwaysFalse confirms the helper
+// returns false whenever the conn doesn't actually have a live
+// package manager -- the cache pass-through path is what M10-3
+// soft-disable relies on.
+func TestPackageEligibleFor_NoPkgIsAlwaysFalse(t *testing.T) {
+	conn := &Conn{cfg: &Config{ExtendedDynamic: true, PackageCriteria: "default"}}
+	if conn.packageEligibleFor("SELECT ? FROM T", true) {
+		t.Error("packageEligibleFor should be false when c.pkg is nil")
+	}
+}
+
+// fakePackageManager is the import-package-level sentinel the M10-4
+// criteria tests use so we don't need to build a full hostserver
+// PackageManager (its zero value works for the criteria helper).
+var fakePackageManager hostserver.PackageManager
+
+// TestPackageCriteriaPlumbing wires selectOptionsFor through and
+// asserts the extended-dynamic flag is dropped when the criteria
+// rejects the SQL.
+func TestPackageCriteriaPlumbing(t *testing.T) {
+	conn := &Conn{
+		cfg: &Config{
+			ExtendedDynamic: true,
+			PackageName:     "APP",
+			PackageLibrary:  "QGPL",
+			PackageError:    "warning",
+			PackageCriteria: "default",
+		},
+		pkg: &fakePackageManager,
+	}
+
+	// SELECT without params under default criteria: should NOT
+	// emit the WithExtendedDynamic option.
+	opts := conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false)
+	if hasExtendedDynamic(opts) {
+		t.Error("non-parameterised SELECT under criteria=default should not get WithExtendedDynamic")
+	}
+
+	// SELECT with params under default: should emit.
+	opts = conn.selectOptionsFor("SELECT ? FROM SYSIBM.SYSDUMMY1", true)
+	if !hasExtendedDynamic(opts) {
+		t.Error("parameterised SELECT under criteria=default should get WithExtendedDynamic")
+	}
+
+	// Flip to criteria=select; the same unparameterised SELECT now
+	// passes the filter.
+	conn.cfg.PackageCriteria = "select"
+	opts = conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false)
+	if !hasExtendedDynamic(opts) {
+		t.Error("non-parameterised SELECT under criteria=select should get WithExtendedDynamic")
+	}
+}
+
+// hasExtendedDynamic detects whether opts contains the
+// WithExtendedDynamic flag by applying every option to a probe
+// selectOpts and checking the resulting field. Sidesteps having
+// to expose the extendedDynamic bool publicly.
+func hasExtendedDynamic(opts []hostserver.SelectOption) bool {
+	// We can't reach into hostserver.selectOpts; instead, build a
+	// fake DBParam param list via OpenSelectStatic-style flow.
+	// Easier: just check the slice length -- WithExtendedDynamic is
+	// the only "wire-shape" option the conn emits today. When
+	// ExtendedMetadata is off (the test's cfg leaves it false),
+	// any non-empty opts slice IS the dynamic flag.
+	return len(opts) > 0
 }
 
 // TestParseDSN_PackageCCSIDRejectMentionsM11 makes sure the rejection

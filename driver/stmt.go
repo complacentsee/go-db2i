@@ -224,7 +224,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptions()...)
+	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
@@ -276,9 +276,10 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if !isSelect(s.query) && !isCall(s.query) {
 		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT/CALL; use Exec")
 	}
-	selectOpts := s.conn.selectOptions()
+	hasParams := len(args) > 0
+	selectOpts := s.conn.selectOptionsFor(s.query, hasParams)
 	start := time.Now()
-	if len(args) == 0 {
+	if !hasParams {
 		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc(), selectOpts...)
 		s.logQuery("OPEN_SELECT_STATIC", 0, start, err)
 		if err != nil {

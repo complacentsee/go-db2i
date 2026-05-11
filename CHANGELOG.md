@@ -146,20 +146,39 @@ across IBM i versions; expect the public API surface to settle at
   shows the resolved 10-char name (`GOTEST/GOJTPK9899`) lives
   on disk for cross-driver share with JT400.
 
+### Added (M10-4 — error handling + package-criteria filter)
+
+- `driver.Conn.packageEligibleFor(sql, hasParams)`: per-SQL filter
+  that mirrors JT400's `JDSQLStatement.canHaveExtendedDynamic`:
+  - `criteria=default` (default) — parameterised statements only;
+    `CURRENT OF <cursor>` and `DECLARE …` are always excluded.
+  - `criteria=select` — default rules PLUS non-parameterised
+    SELECT / VALUES / WITH.
+- `driver.Conn.selectOptionsFor(sql, hasParams)`: per-statement
+  variant of `selectOptions()` that drops the
+  `WithExtendedDynamic` flag when the criteria filter rejects the
+  SQL. Wired into `Stmt.Query` and `Stmt.Exec` so non-eligible
+  statements go through the plain PREPARE wire shape and stay
+  out of the *PGM.
+- `driver.Conn.handlePackageError` (introduced in M10-3) gets
+  three table-driven tests covering the `warning` / `exception` /
+  `none` modes (plus the empty-string default = warning path).
+- `driver_test.go` adds `TestPackageEligibleFor_DefaultCriteria` /
+  `_SelectCriteria` / `_NoPkgIsAlwaysFalse` /
+  `TestPackageCriteriaPlumbing` / `TestHandlePackageError` —
+  table-driven coverage for every documented branch.
+
 ### Notes
 
 - `prepared_package_overflow` is deferred — server-side package
   threshold (~1024 entries) makes the trace prohibitively large
-  for the cache-hit suite. Will land before M10-4 closes.
+  for the cache-hit suite. Will land before M10 closes.
 - Client-side cache-hit fast path (Stmt.Prepare lookup +
-  ExecutePreparedCached bypass) is deferred to a follow-up. The
-  wire shape that ENABLES it is in place (extended-dynamic
-  populates the server *PGM, RETURN_PACKAGE downloads its
-  contents); the missing piece is the CP 0x380B per-statement
-  decoder, which is byte-shape work tracked alongside the M10-4
-  error-handling polish.
-- M10-4 (error-handling + package-criteria filter) lives in
-  `plans/m10-package-caching.md`.
+  ExecutePreparedCached bypass) is deferred to a post-M10
+  follow-up. The wire shape that ENABLES it is in place
+  (extended-dynamic populates the server *PGM, RETURN_PACKAGE
+  downloads its contents); the missing piece is the CP 0x380B
+  per-statement decoder.
 
 ## [0.6.0] - 2026-05-11
 
