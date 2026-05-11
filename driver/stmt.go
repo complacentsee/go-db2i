@@ -189,7 +189,19 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	}
 	start := time.Now()
 	logger := s.conn.log
-	if len(args) == 0 {
+	// CALL always goes through CREATE_RPB + PREPARE_DESCRIBE +
+	// EXECUTE on the wire (matching JT400's CallableStatement flow,
+	// captured in prepared_call_in_only.trace) even when there are
+	// no driver-side args -- the SQL text may still carry literal
+	// arguments inside the CALL parens, and the server expects
+	// statement-type TYPE_CALL=3 on PREPARE for correct dispatch.
+	// ExecuteImmediate's single-frame path collapses PREPARE +
+	// EXECUTE and the server doesn't populate SQLERRD(2) for
+	// procs invoked through it, which would break M9-3's multi-
+	// result-set count when the caller routes a multi-set CALL
+	// through Exec by mistake.
+	useImmediate := len(args) == 0 && !isCall(s.query)
+	if useImmediate {
 		res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
 		s.logExec(logger, "EXECUTE_IMMEDIATE", 0, start, res, err)
 		if err != nil {
@@ -234,14 +246,21 @@ func (s *Stmt) logExec(logger *slog.Logger, op string, paramCount int, start tim
 	logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: exec", attrs...)
 }
 
-// Query runs a SELECT (or VALUES / WITH). With no args it opens a
-// streaming cursor via OpenSelectStatic; with args it opens via
-// OpenSelectPrepared. The cursor pulls subsequent batches lazily as
-// the caller's Rows.Next iterates -- a million-row SELECT pays one
-// 32 KB-buffer FETCH round-trip per batch instead of one per row.
+// Query runs a SELECT (or VALUES / WITH / CALL). With no args it
+// opens a streaming cursor via OpenSelectStatic; with args it opens
+// via OpenSelectPrepared. The cursor pulls subsequent batches lazily
+// as the caller's Rows.Next iterates -- a million-row SELECT pays
+// one 32 KB-buffer FETCH round-trip per batch instead of one per row.
+//
+// CALL routing: stored procedures that DECLARE cursors WITH RETURN
+// surface their result sets through Query + Rows.Next; the
+// PREPARE+OPEN+FETCH dance is identical to a SELECT once the server
+// has dispatched on the CALL statement type (M9-1). Procedures that
+// return multiple result sets advance through Rows.NextResultSet
+// (M9-3 -- pending).
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
-	if !isSelect(s.query) {
-		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT; use Exec")
+	if !isSelect(s.query) && !isCall(s.query) {
+		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT/CALL; use Exec")
 	}
 	selectOpts := s.conn.selectOptions()
 	start := time.Now()
@@ -434,6 +453,36 @@ func isSelect(sql string) bool {
 		}
 		if len(head) >= 4 && strings.EqualFold(head[:4], "WITH") {
 			return true
+		}
+		return false
+	}
+	return false
+}
+
+// isCall returns true iff the SQL begins with CALL. Stored procedures
+// invoke through this verb in standard SQL; the database/sql idiom is
+// to route them through Exec when no result set is expected (M9-1 /
+// M9-2 OUT-only) or Query when result sets matter (M9-3). The driver
+// permits both routes by recognising CALL alongside isSelect's
+// read-only verbs in Query, and by NOT rejecting it in Exec.
+//
+// JDBC escape syntax {call proc(...)} is deferred to M10+ -- JT400
+// strips the braces in JDSQLToken before PREPARE, but goJTOpen
+// expects callers to pass the literal CALL statement.
+func isCall(sql string) bool {
+	for i, r := range sql {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		head := sql[i:]
+		if len(head) >= 4 && strings.EqualFold(head[:4], "CALL") {
+			// Guard against verbs that *contain* CALL but aren't
+			// it (none in standard SQL, but cheap to be careful).
+			if len(head) == 4 {
+				return true
+			}
+			next := head[4]
+			return next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '('
 		}
 		return false
 	}

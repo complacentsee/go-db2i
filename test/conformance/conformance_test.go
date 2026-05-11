@@ -1713,3 +1713,162 @@ func TestBooleanRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// ----- M9 stored-procedure tests -----
+
+// procLibrary is the dedicated library hosting all M9 fixture procs
+// (P_INS / P_LOOKUP / P_INVENTORY / P_ROUNDTRIP) plus their supporting
+// tables. Tied to the test schema bootstrap in setUpStoredProcs --
+// hardcoded here to keep the conformance suite self-contained (no env
+// override) since the M9 fixtures captured against the same name and
+// the offline replay tests reference it verbatim.
+const procLibrary = "GOSPROCS"
+
+// setUpStoredProcs creates the GOSPROCS library, supporting tables,
+// and the four stored procedures the M9 tests exercise. Idempotent:
+// safe to call multiple times across test runs. CREATE OR REPLACE
+// rebuilds the procedure bodies on each run; the supporting tables
+// are dropped + recreated so the seed data is deterministic.
+//
+// Matches the WithStoredProcs setup() in the Java fixture harness
+// (testdata/jtopen-fixtures/src/.../Cases.java) so the offline
+// fixture replays and the live tests reference the same schema.
+func setUpStoredProcs(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	// CREATE SCHEMA -- ignore SQLSTATE 42710 (already exists). DB2
+	// for i has no CREATE SCHEMA IF NOT EXISTS.
+	if _, err := db.Exec("CREATE SCHEMA " + procLibrary); err != nil {
+		if !strings.Contains(err.Error(), "42710") &&
+			!strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("CREATE SCHEMA %s: %v", procLibrary, err)
+		}
+	}
+
+	for _, tbl := range []string{"INS_AUDIT", "WIDGETS", "INVENTORY"} {
+		// DDL: object name is a SQL identifier; cannot be a bind
+		// parameter. Constant + hardcoded loop value, no injection
+		// surface here.
+		_, _ = db.Exec("DROP TABLE " + procLibrary + "." + tbl)
+	}
+	mustExec := func(sqlText string) {
+		t.Helper()
+		if _, err := db.Exec(sqlText); err != nil {
+			t.Fatalf("%s: %v", sqlText, err)
+		}
+	}
+	mustExecArgs := func(sqlText string, args ...interface{}) {
+		t.Helper()
+		if _, err := db.Exec(sqlText, args...); err != nil {
+			t.Fatalf("%s: %v", sqlText, err)
+		}
+	}
+	// DDL: column types / defaults / procedure bodies aren't bindable;
+	// these statements are all interpolated identifiers + hardcoded
+	// constants.
+	mustExec("CREATE TABLE " + procLibrary + ".INS_AUDIT (" +
+		"CODE VARCHAR(10), QTY INTEGER, " +
+		"INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+	mustExec("CREATE TABLE " + procLibrary + ".WIDGETS (" +
+		"CODE VARCHAR(10) NOT NULL PRIMARY KEY, " +
+		"NAME VARCHAR(64), QTY INTEGER)")
+	mustExec("CREATE TABLE " + procLibrary + ".INVENTORY (" +
+		"CODE VARCHAR(10), QTY INTEGER, LOCATION VARCHAR(20))")
+
+	// Seed data: VALUES *are* parameterisable, so route through the
+	// driver's prepared-statement bind path. This both protects
+	// against accidental SQL injection if these constants ever
+	// pick up external input, and exercises ExecutePreparedSQL on
+	// a known-good shape (VARCHAR + INTEGER) as a side effect.
+	mustExecArgs("INSERT INTO "+procLibrary+".WIDGETS VALUES (?, ?, ?)",
+		"WIDGET", "Acme Widget", 100)
+	mustExecArgs("INSERT INTO "+procLibrary+".WIDGETS VALUES (?, ?, ?)",
+		"GADGET", "Acme Gadget", 5)
+	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+		"LOW1", 2, "A1")
+	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+		"LOW2", 3, "A2")
+	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+		"HIGH1", 50, "B1")
+	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+		"HIGH2", 100, "B2")
+
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_INS " +
+		"(IN P_CODE VARCHAR(10), IN P_QTY INTEGER) " +
+		"LANGUAGE SQL " +
+		"BEGIN " +
+		"INSERT INTO " + procLibrary + ".INS_AUDIT (CODE, QTY) " +
+		"VALUES (P_CODE, P_QTY); " +
+		"END")
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_LOOKUP " +
+		"(IN P_CODE VARCHAR(10), OUT P_NAME VARCHAR(64), OUT P_QTY INTEGER) " +
+		"LANGUAGE SQL " +
+		"BEGIN " +
+		"SELECT NAME, QTY INTO P_NAME, P_QTY " +
+		"FROM " + procLibrary + ".WIDGETS WHERE CODE = P_CODE; " +
+		"END")
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_INVENTORY " +
+		"(IN P_MIN_QTY INTEGER) " +
+		"DYNAMIC RESULT SETS 2 " +
+		"LANGUAGE SQL " +
+		"BEGIN " +
+		"DECLARE C1 CURSOR WITH RETURN FOR " +
+		"SELECT CODE, QTY FROM " + procLibrary + ".INVENTORY " +
+		"WHERE QTY < P_MIN_QTY ORDER BY CODE; " +
+		"DECLARE C2 CURSOR WITH RETURN FOR " +
+		"SELECT CODE, QTY FROM " + procLibrary + ".INVENTORY " +
+		"WHERE QTY >= P_MIN_QTY ORDER BY CODE; " +
+		"OPEN C1; " +
+		"OPEN C2; " +
+		"END")
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_ROUNDTRIP " +
+		"(INOUT P_COUNTER INTEGER) " +
+		"LANGUAGE SQL " +
+		"BEGIN " +
+		"SET P_COUNTER = P_COUNTER + 1; " +
+		"END")
+}
+
+// TestStoredProcedureINOnly is M9-1's live-evidence test: invoke
+// GOSPROCS.P_INS via db.Exec with parameter markers and confirm the
+// proc body's INSERT landed a matching row in INS_AUDIT. Exercises
+// the goJTOpen CALL routing (db.Exec + isCall) + statement-type
+// TYPE_CALL=3 + ExecutePreparedSQL flow end-to-end against the LPAR.
+func TestStoredProcedureINOnly(t *testing.T) {
+	db := openDB(t)
+	setUpStoredProcs(t, db)
+
+	// Pick a CODE that doesn't already exist in INS_AUDIT to make the
+	// post-call SELECT unambiguous if this test races against any
+	// other run leaving leftover rows behind.
+	const code = "M9_INONLY"
+	const qty = 7
+
+	// Clear any prior debris -- INS_AUDIT is keyed on CODE+QTY+TS for
+	// our purposes here, no PK to enforce uniqueness.
+	if _, err := db.Exec("DELETE FROM " + procLibrary + ".INS_AUDIT WHERE CODE = ?", code); err != nil {
+		t.Fatalf("clear INS_AUDIT: %v", err)
+	}
+
+	// The actual CALL. No OUT params; statement-type TYPE_CALL=3
+	// drives the server-side dispatch.
+	if _, err := db.Exec("CALL "+procLibrary+".P_INS(?, ?)", code, qty); err != nil {
+		t.Fatalf("CALL P_INS: %v", err)
+	}
+
+	// Verify the proc's INSERT landed.
+	var got int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM "+procLibrary+".INS_AUDIT WHERE CODE = ? AND QTY = ?",
+		code, qty).Scan(&got); err != nil {
+		t.Fatalf("SELECT COUNT(*): %v", err)
+	}
+	if got != 1 {
+		t.Errorf("INS_AUDIT row count for %q/%d = %d, want 1", code, qty, got)
+	}
+
+	// Cleanup so re-runs start clean.
+	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+		t.Logf("cleanup: %v", err)
+	}
+}

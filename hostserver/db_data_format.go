@@ -75,10 +75,18 @@ func (p ParameterMarkerField) IsLOB() bool { return IsLOBSQLType(p.SQLType) }
 // findSuperExtendedParameterMarkerFormat returns the parsed list
 // of input-parameter shapes from a PREPARE_DESCRIBE reply, scanning
 // for CP 0x3813. Returns (nil, nil) if the reply doesn't contain
-// the CP -- e.g. a SQL statement with no `?` markers.
+// the CP, or carries it with a zero-byte payload -- both signal "no
+// parameter markers" in JT400's wire format (the latter is what the
+// server sends back for a marker-less CALL like
+// `CALL P_INS('A', 10)`; observed in
+// prepared_call_in_only.trace, recv #12 trailing bytes
+// `00 00 00 06 38 13`).
 func (r *DBReply) findSuperExtendedParameterMarkerFormat() ([]ParameterMarkerField, error) {
 	for _, p := range r.Params {
 		if p.CodePoint == 0x3813 {
+			if len(p.Data) == 0 {
+				return nil, nil
+			}
 			return parseSuperExtendedParameterMarkerFormat(p.Data)
 		}
 	}

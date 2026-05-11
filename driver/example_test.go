@@ -107,6 +107,32 @@ func Example_lastInsertId() {
 	fmt.Println(id)
 }
 
+// Example_call demonstrates calling a stored procedure with IN-only
+// parameters. goJTOpen routes any SQL starting with "CALL " through
+// the same CREATE_RPB + PREPARE_DESCRIBE + EXECUTE flow JT400 uses
+// for CallableStatement, with statement type 3 (TYPE_CALL) on both
+// PREPARE and EXECUTE. M9-1 covers IN-only; OUT / INOUT via sql.Out
+// lands in M9-2, multi-result-set procs via rows.NextResultSet() in
+// M9-3.
+//
+// For procs that take no parameters or carry literal arguments
+// inline (e.g. `CALL P_BUMP('A', 10)`), db.Exec still works -- the
+// driver detects the CALL verb and routes through ExecutePreparedSQL
+// rather than ExecuteImmediate so the server sees TYPE_CALL on
+// PREPARE. This is required for correct SQLERRD(2) population when
+// the proc returns dynamic result sets.
+func Example_call() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	// IN-only stored procedure: arguments flow through driver.Value
+	// the same as any other prepared statement.
+	_, err := db.Exec(`CALL mylib.bump_counter(?, ?)`, "WIDGET", 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 // Example_db2Error shows the typed-error dispatch pattern. Every
 // server-side SQL error comes through as *hostserver.Db2Error so
 // callers can switch on SQLSTATE / SQLCODE without regexing the

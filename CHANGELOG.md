@@ -12,6 +12,51 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M9-1 CALL routing for stored procedures with IN-only parameters.
+  `db.Exec("CALL <schema>.<proc>(?, ?)", in1, in2)` now flows through
+  the same CREATE_RPB + PREPARE_DESCRIBE + EXECUTE sequence JT400
+  emits for `CallableStatement`, with statement-type byte 3
+  (TYPE_CALL per JT400's `JDSQLStatement` taxonomy) on both PREPARE
+  and EXECUTE so the server populates `SQLERRD(2)` correctly for
+  dynamic-result-set procs (a prerequisite the M9-3 Rows.NextResultSet
+  path depends on). Internal additions:
+    - `driver.isCall(query string) bool` mirrors `isSelect`; `Stmt.Exec`
+      bypasses the no-args ExecuteImmediate shortcut for CALL so the
+      server sees PREPARE first even when literal arguments are
+      embedded in the SQL text. `Stmt.Query` accepts CALL alongside
+      SELECT/VALUES/WITH; full multi-result-set drain via
+      `Rows.NextResultSet` is M9-3 work, but Query routing is wired
+      up now so the M9-1 driver surface is consistent.
+    - `hostserver.statementTypeForSQL` recognises CALL → 3 (TYPE_CALL).
+      The pre-existing INSERT/UPDATE/DELETE → 3/4/5 mapping is kept
+      intact (JT400 collapses these to TYPE_OTHER=1; both are accepted
+      by IBM i V7R6 in practice, evidenced by the M1-M8 live runs --
+      a wire-format cleanup for a future release).
+    - `hostserver.DBReply.findSuperExtendedParameterMarkerFormat` now
+      treats a zero-byte `0x3813` CP as "no parameter markers" (the
+      shape the server returns for a marker-less CALL like
+      `CALL P_INS('A', 10)`; captured in
+      `prepared_call_in_only.trace` recv #12).
+  Offline coverage: new `hostserver/db_call_test.go` ::
+  `TestCallInOnlyFixtureWireShape` replays the captured trace's
+  second connection (post-VRM-detect), confirms JT400 sent the
+  4-frame CREATE_RPB / PREPARE_DESCRIBE / EXECUTE / RPB_DELETE
+  sequence (no EXECUTE_IMMEDIATE, no CHANGE_DESCRIPTOR), asserts
+  statement-type CP 0x3812 carries value 3 on both PREPARE and
+  EXECUTE, then drives `ExecutePreparedSQL` against a fakeConn
+  serving the captured replies and asserts goJTOpen emits the
+  same 4-frame shape with statement-type 3.
+  Live evidence: new `TestStoredProcedureINOnly` conformance test
+  bootstraps the GOSPROCS schema (idempotent via CREATE OR REPLACE
+  + DROP+CREATE for tables; the conformance suite is now
+  self-bootstrapping for the M9 procs), runs
+  `db.Exec("CALL GOSPROCS.P_INS(?, ?)", "M9_INONLY", 7)`, confirms
+  the proc body's `INSERT` landed exactly one row in
+  `GOSPROCS.INS_AUDIT`. Plaintext run against IBM Cloud V7R6M0
+  green (2.6 s including schema bootstrap).
+  New `Example_call` in `driver/example_test.go` documents the
+  typical pattern.
+
 - M9-0 Foundation for stored-procedure support. Five new fixtures
   under `testdata/jtopen-fixtures/fixtures/prepared_call_*.{trace,golden.json}`
   captured against IBM Cloud V7R6M0 via JT400 21.0.4 through the

@@ -312,9 +312,21 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 }
 
 // statementTypeForSQL picks the SQL statement-type code (CP 0x3812
-// short) based on the leading keyword. JT400's mapping per
-// JDStatement.STMT_TYPE_*; the values here cover the cases the
-// driver actually emits today.
+// short) based on the leading keyword. The values match JT400's
+// JDSQLStatement TYPE_* taxonomy where it matters for the server's
+// dispatch:
+//
+//	TYPE_UNDETERMINED = 0    -- unknown / empty
+//	TYPE_OTHER        = 1    -- generic DML/DDL (JT400's catch-all)
+//	TYPE_SELECT       = 2    -- read-only verbs
+//	TYPE_CALL         = 3    -- procedure invocation
+//
+// goJTOpen historically diverged from JT400 for INSERT/UPDATE/DELETE
+// (returning 3/4/5 rather than TYPE_OTHER=1), and the server has
+// accepted those values across the M1-M8 live runs, so we leave the
+// pre-existing mapping intact and only add the CALL row which the
+// server *does* rely on -- it routes CALLs differently for the
+// SQLERRD(2) result-set-count semantics M9-3 consumes.
 func statementTypeForSQL(sql string) int16 {
 	// Strip leading whitespace to find the verb.
 	start := 0
@@ -337,10 +349,16 @@ func statementTypeForSQL(sql string) int16 {
 		return 5
 	case eqIgnoreCase(verb, "SELECT"), eqIgnoreCase(verb, "VALUES"), eqIgnoreCase(verb, "WITH"):
 		return 2
+	case eqIgnoreCase(verb, "CALL"):
+		// JT400 TYPE_CALL. Required for the server to populate
+		// SQLERRD(2) with the dynamic-result-set count on PREPARE
+		// of a procedure that DECLAREs cursors WITH RETURN.
+		return 3
 	default:
-		// CALL / SET / CREATE / DROP / ALTER / GRANT / REVOKE /
-		// MERGE / etc. all map to "other" in JT400's taxonomy;
-		// 0 lets the server figure it out.
+		// SET / CREATE / DROP / ALTER / GRANT / REVOKE / MERGE /
+		// etc. all map to TYPE_OTHER=1 in JT400; we send 0
+		// (TYPE_UNDETERMINED) and let the server figure it out --
+		// this is the live-validated behaviour from M1-M8.
 		return 0
 	}
 }

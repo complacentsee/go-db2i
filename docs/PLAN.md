@@ -723,7 +723,17 @@ the user's plans/ directory.
   call them end-to-end against the LPAR — that's the live
   evidence the plan asks for.
 
-- **M9-1 CALL with IN-only parameters** — pending.
+- **M9-1 CALL with IN-only parameters** ✅ 2026-05-11 — `driver.isCall`
+  parser + statement-type TYPE_CALL=3 on CP 0x3812 + zero-length
+  `0x3813` PMF tolerance + Exec routing through ExecutePreparedSQL
+  (no shortcut to ExecuteImmediate for CALL). Offline replay
+  (`hostserver/db_call_test.go`) pins the four-frame wire shape
+  CREATE_RPB / PREPARE_DESCRIBE / EXECUTE / RPB_DELETE against
+  JT400's `prepared_call_in_only.trace`; live evidence
+  (`TestStoredProcedureINOnly`) bootstraps the GOSPROCS schema
+  and confirms `db.Exec("CALL GOSPROCS.P_INS(?, ?)", "M9_INONLY", 7)`
+  lands a row in the proc-body's INSERT target. Plaintext live
+  green (2.6 s).
 - **M9-2 OUT and INOUT via `sql.Out`** — pending.
 - **M9-3 Multi-result-set via `Rows.NextResultSet`** — pending.
 
