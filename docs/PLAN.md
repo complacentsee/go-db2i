@@ -667,7 +667,18 @@ Track A (foundations):
   a side-by-side migration recipe (jt400 URL -> gojtopen DSN +
   programmatic Config code) and gotchas (naming default, extended
   dynamic, socket timeout, lob threshold).
-- **M8-6 Performance tuning notes** ⏳
+- **M8-6 Performance tuning notes** ✅ 2026-05-11 —
+  `docs/performance.md`. Covers connection-pool sizing on a 1-CPU
+  LPAR (~8,800 ops/sec peak at concurrency=50, cited from AUTH.md),
+  `?lob=stream` vs materialise tradeoffs (TestRowsLazyMemoryBounded
+  bound), `?lob-threshold` trade-offs, `?ccsid=1208` vs default
+  auto-pick, CCSID-aware codec caching (no per-call decoder
+  construction), RLE compression measurements (~854× on
+  constant-content 1 MiB BLOB, per the rlemeasure tool numbers),
+  TLS handshake overhead (one-time first-dial cost, no steady-state
+  measurable delta vs plaintext per TestTLSConnectivity). Includes
+  guidance on the M8-3 slog and M8-4 OTel overhead under
+  high-throughput workloads.
 
 **Total remaining: ~14-22 weeks.** The original 17-25 week M0-M8
 estimate net of M0/M1 gives us roughly the same window.

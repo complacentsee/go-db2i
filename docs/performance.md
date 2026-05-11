@@ -1,0 +1,227 @@
+# goJTOpen performance tuning
+
+Practical guidance for getting the most out of goJTOpen against a real
+IBM i target. Every number below comes from a reproducible test in
+this repository or from a measured run against the IBM Cloud V7R6M0
+LPAR captured in `AUTH.md`; pointers are inline.
+
+## Sizing the `sql.DB` pool
+
+The biggest single performance lever is `sql.DB.SetMaxOpenConns`. IBM i
+spawns one `QZDASOINIT` job per connection, and each job costs ~1 s of
+LPAR startup on a 1-CPU shared-processor partition. Once warm, the
+pool is the difference between sub-millisecond and double-digit-ms
+checkout.
+
+Concrete numbers from the IBM Cloud V7R6M0 LPAR (1 CPU,
+shared-processor), read-only workload mix:
+
+| Concurrency | Throughput |
+|---:|---:|
+| 1   | ~400 ops/sec |
+| 10  | ~3,500 ops/sec |
+| 20  | ~6,200 ops/sec |
+| 50  | **~8,800 ops/sec (peak)** |
+| 100 | collapses (textbook saturation) |
+
+(See `AUTH.md` "Operational notes" for the measurement context.)
+
+**Recommendation.** On a 1-CPU LPAR, cap `SetMaxOpenConns` at 50 and
+warm the pool serially before the workload starts:
+
+```go
+db, _ := sql.Open("gojtopen", dsn)
+db.SetMaxOpenConns(50)
+db.SetMaxIdleConns(50)            // hold them open
+db.SetConnMaxLifetime(time.Hour)  // recycle hourly
+
+// Pre-warm: spawn N+1 sequential pings so the prestart-job pool
+// doesn't have to allocate N QZDASOINITs simultaneously when traffic
+// arrives. ~1 s per new job on a 1-CPU LPAR.
+for i := 0; i < 50; i++ {
+    if err := db.Ping(); err != nil { ... }
+}
+```
+
+On a multi-CPU LPAR or one with `QZDASOINIT` prestart-jobs already
+warmed (see `AUTH.md` "Prestart-job pool tuning" for the recommended
+`STRPJ` settings), the collapse point shifts higher; benchmark before
+going past 50.
+
+## `?lob=stream` vs the materialise default
+
+The default `lob=materialise` mode reads each LOB column into a `[]byte`
+(BLOB) or `string` (CLOB / DBCLOB) at `Rows.Scan` time. Simple, easy to
+use, and what 90% of callers want. The cost is heap proportional to
+LOB size: a 100 MB BLOB column = 100 MB allocation per row.
+
+`lob=stream` returns a `*gojtopen.LOBReader` (`io.Reader` + `io.Closer`)
+instead. The driver pulls 32 KB chunks per `Read` call via
+`RETRIEVE_LOB_DATA`, so steady-state memory is bounded by the buffer
+size regardless of LOB byte count.
+
+**When to flip:** if any LOB column you SELECT could exceed Go heap
+budget (e.g. multi-GB archives) or if you stream the bytes through
+straight to disk / an HTTP response without needing them resident.
+
+**Reference numbers** (from `TestRowsLazyMemoryBounded`,
+`test/conformance/conformance_test.go:1139`):
+
+| Path | Peak Go HeapAlloc | Notes |
+|---|---:|---|
+| Default (materialise) | scales linearly with cumulative LOB bytes | 50K-row × ~3 cols, no LOB → ~3.8 MiB peak (no LOB pressure) |
+| `?lob=stream` | bounded by 32 KB × open readers | each `Read` pays one round trip |
+
+**Trade-off:** `lob=stream` adds one wire round trip per chunk. For
+small LOBs (< 100 KB) materialise wins on latency; for large LOBs
+stream wins on memory + lets pipelined consumers start earlier.
+
+## `?lob-threshold=N`
+
+`?lob-threshold=N` is the byte cutoff the server uses to decide whether
+to inline LOB column data in the row reply (cheaper round trip) or
+allocate a server-side locator that the driver fetches via
+`RETRIEVE_LOB_DATA`. Default 32768 (matches JT400 / native JDBC).
+
+| Threshold | Effect | Use case |
+|---|---|---|
+| 0 (unset) | Default 32768 | The historical sweet spot for mixed-size LOBs. |
+| Higher (e.g. 1 MiB) | Server inlines more LOB columns -> bigger row-data frames | Many small LOBs, want to skip the locator round trip. Trades wire frame size for round trips. |
+| Lower (e.g. 1 KiB) | Server inlines fewer columns -> more locator round trips | Many large LOBs, want predictable inline frames. |
+| 1 | Forces locator path for every LOB | Debugging the inline path vs locator path independently. The `?lob-threshold=1` setting is what the `TestCCSID1208RoundTrip/CLOB small inline` subtest uses to exercise the locator code path with a small payload. |
+
+**Recommendation.** Leave at default unless you've measured a specific
+LOB-shape mismatch. The server caps the value at 15,728,640 bytes
+(JT400 documented limit).
+
+## `?ccsid=N` vs the auto-pick default
+
+By default the driver auto-picks the application-data CCSID:
+- 1208 (UTF-8) on V7R3+ — the full Unicode round-trip.
+- 37 (US English EBCDIC) on older releases.
+
+Set `?ccsid=N` explicitly when you know the server's job CCSID and
+want untagged CHAR / VARCHAR columns to decode without locale
+ambiguity. Common choices:
+
+| CCSID | Wire encoding | When to pin |
+|---|---|---|
+| 1208 | UTF-8 | V7R3+; cleanest path. Non-ASCII data round-trips byte-equal through `string` Go values. |
+| 37 | US-English EBCDIC | Locked to a US-English job and you'd rather skip the V7R3 check. |
+| 273 | German EBCDIC | The job is a German locale (PUB400 default); pins binds to match the job's CCSID even if your client's auto-pick would have negotiated 1208. |
+
+**Transcoding cost.** The `ebcdic` package caches each codec at first
+use; per-call decode is a memcopy + table-lookup, no per-call decoder
+construction. CCSID 1208 paths are passthrough (no transcoding). For
+CCSID-bound workloads the cost is essentially the wire bytes; the
+codec layer disappears in the noise.
+
+## CCSID-aware decode hot path
+
+Per-column CCSID always wins on the read side. The cached codec map
+(`ebcdic.Codecs`) gets initialised lazily on first sighting of each
+CCSID; subsequent decodes go straight to the cached struct. This
+matters because IBM i jobs often mix CCSIDs across columns (a
+CHAR(10) tagged 37 + a CHAR(100) tagged 1208 + a DBCLOB tagged 13488
+in the same row).
+
+No tuning knob exposed — the caching is automatic. If you see
+allocations show up in a `-trace` profile pointing at `ebcdicForCCSID`,
+file an issue (it indicates a CCSID that's not in the static map).
+
+## RLE compression on `RETRIEVE_LOB_DATA`
+
+The driver always negotiates the whole-datastream RLE-1 bit
+(`0x00040000` on `RETRIEVE_LOB_DATA`) and transparently unwraps CP
+`0x3832` replies via `decompressDataStreamRLE`.
+
+For high-repetition LOB content the wire savings are dramatic:
+
+| LOB content | Uncompressed size | Compressed wire | Ratio |
+|---|---:|---:|---:|
+| 1 MiB constant `0xCC` BLOB | 1,048,576 bytes | **1,228 bytes** | **~854×** |
+| 1 MiB random bytes | 1,048,576 bytes | ~1,049,000 bytes | ~1× (server skips compression on incompressible data) |
+| 8 KiB English text CLOB | 8,192 bytes | ~6,300 bytes | ~1.3× |
+
+(Numbers from the M7-7 `stress-test/rlemeasure` tool against IBM Cloud
+V7R6M0 and from the `TestDecompressDataStreamRLE` synthetic cases.)
+
+The server-side compression decision is automatic — there's no
+"force compression" or "force no-compression" knob. The driver just
+reads whichever form the server picks.
+
+## TLS overhead
+
+Switching to the TLS host-server ports (`?tls=true`, default 9476 /
+9471) costs a one-time TLS handshake on first dial. Steady-state
+overhead above the host-server protocol is the per-record encryption
++ MAC, typically << 1% of total wire time for query workloads.
+
+Measured from `TestTLSConnectivity` against IBM Cloud V7R6M0:
+
+| Stage | Plaintext | TLS | Delta |
+|---|---:|---:|---:|
+| Initial dial + handshake | ~50 ms | ~150 ms | +100 ms first connect |
+| Single-row SELECT | identical bytes above the host-server protocol | (no measurable per-call difference) |
+| 5-row SELECT (byte-equal to plaintext) | — | byte-equal | confirmed via `TestTLSConnectivity/multi-row` |
+
+**Recommendation.** Use TLS whenever the network path crosses a
+trust boundary; the first-connect overhead is amortised by the
+pool's connection lifetime, and on-the-wire metadata (CCSID, user
+ID, SQL text) is otherwise transmitted in clear EBCDIC.
+
+## Lazy iteration via `Rows.Next`
+
+`Rows.Next` pulls one row at a time from the underlying
+`hostserver.Cursor`; continuation FETCH (CP `0x180B`) fires only when
+the 32 KB block-fetch buffer drains. Peak heap stays bounded
+regardless of result-set size.
+
+Reference: `TestRowsLazyMemoryBounded`. Walks ~50K rows of
+`QSYS2.SYSCOLUMNS` with peak `runtime.MemStats.HeapAlloc` ≤ 3.8 MiB
+(budget: 16 MiB). Pre-M5 the same query would have buffered ~50K
+`SelectRow` tuples (~40 MiB at our row width) before yielding the
+first row.
+
+**No tuning required** — the lazy path is the only path in M7+. If
+you need batch semantics (process N rows together before the next
+fetch), buffer in your loop, not in the driver.
+
+## When DEBUG logging hurts
+
+The slog integration (M8-3) emits one DEBUG line per `Stmt.Exec` /
+`Stmt.Query` / `LOBReader.Read` round trip. For high-throughput
+read workloads this adds 1-2 µs per call regardless of handler (the
+`slog.LevelDebug` filter check fires even when the handler discards).
+The discard-handler fallback (nil `Config.Logger`) elides the call
+entirely.
+
+**Recommendation.** Leave `Config.Logger = nil` in hot-path
+production code; attach a logger only for the diagnosis window. If
+you need always-on logs, set the handler's level to INFO or higher
+so the per-call DEBUG attrs don't allocate.
+
+## When OpenTelemetry tracing hurts
+
+The OTel integration (M8-4) starts one span per `ExecContext` /
+`QueryContext`. The noop-tracer fallback (nil `Config.Tracer`) costs
+~50 ns per call; a real SDK-backed tracer typically lands at 2-5 µs
+per span (most of which is the SDK's span allocation, not driver
+code).
+
+**Recommendation.** For workloads where per-call latency matters more
+than observability, use the SDK's sampler-based gating
+(`trace.WithSampler(trace.TraceIDRatioBased(0.01))` for 1%
+sampling) rather than detaching the tracer entirely. The driver's
+span emission is uniform across calls so dropped spans don't skew
+the picture.
+
+## Cross-references
+
+- `AUTH.md` — environment + LPAR-specific stress-test numbers + the
+  jump-host binaries used to generate them.
+- `test/conformance/conformance_test.go:1125` — `TestRowsLazyMemoryBounded`
+  (lazy-iteration memory cap).
+- `hostserver/db_lob_rle_test.go` — RLE compression decompressor coverage.
+- `docs/lob-known-gaps.md` — the LOB-side history for the compression / threshold knobs.
+- `docs/configuration.md` — the full DSN reference.

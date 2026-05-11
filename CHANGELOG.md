@@ -12,6 +12,19 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-6 Performance tuning notes at
+  [`docs/performance.md`](docs/performance.md). Practical guidance
+  on the eight tuning levers that actually move the needle: sql.DB
+  pool sizing (1-CPU LPAR ramp + collapse-point measurement),
+  `?lob=stream` vs materialise, `?lob-threshold` tradeoffs, `?ccsid`
+  selection, CCSID-aware codec caching (zero per-call allocation),
+  RLE compression ratios on `RETRIEVE_LOB_DATA`, TLS overhead (one-
+  time handshake cost), `Rows.Next` lazy iteration peak-heap
+  guarantee. Includes notes on M8-3 slog + M8-4 OTel per-call
+  overhead in high-throughput workloads. Every number cited is
+  either backed by a reproducible test in this repo or measured
+  against IBM Cloud V7R6M0 with the source captured in `AUTH.md`.
+
 - M8-5 JTOpen DSN migration guide at
   [`docs/migrating-from-jt400.md`](docs/migrating-from-jt400.md).
   Side-by-side table covers every JT400 JDBC URL property (~70
