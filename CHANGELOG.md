@@ -8,7 +8,19 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
-## [Unreleased]
+## [0.5.0] - 2026-05-11
+
+First tagged release. M1-M8 complete + live-validated against IBM
+Cloud V7R6M0 over both plaintext (8471/8476) and TLS (9471/9476)
+host-server pairs. The public API (`driver.Config`,
+`driver.Connector`, `driver.LOBValue`, `driver.LOBReader`,
+`hostserver.Db2Error`, the `ebcdic` codec interfaces) is the
+intended 1.0 surface plus the M8 slog + OTel additions; all
+remaining 0.x releases will iterate on the same shape unless a
+specific wire-protocol gap (DES password levels 0/1, M5/M6
+diffrunner) drives a breaking call.
+
+
 
 ### Added
 

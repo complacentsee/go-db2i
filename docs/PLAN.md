@@ -680,8 +680,10 @@ Track A (foundations):
   guidance on the M8-3 slog and M8-4 OTel overhead under
   high-throughput workloads.
 
-**Total remaining: ~14-22 weeks.** The original 17-25 week M0-M8
-estimate net of M0/M1 gives us roughly the same window.
+**M8 complete 2026-05-11.** All six items shipped + live-validated.
+Public API additions (slog + OTel) are purely additive; tagged
+v0.5.0 once the final conformance pass on both plaintext and TLS
+DSNs landed.
 
 ## Working rhythm
 
