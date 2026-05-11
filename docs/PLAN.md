@@ -779,6 +779,60 @@ remains byte-equivalent through OPEN_DESCRIBE_FETCH; CALLs now take
 the JT400 CallableStatement wire pattern. Tag v0.6.0 once the
 cross-cutting docs / README updates land.
 
+### M10 — Extended-dynamic SQL package caching (complete 2026-05-11)
+
+Same working rhythm as M9. Each item is one commit directly to
+`origin/main`, one CHANGELOG entry, live-validated against IBM
+Cloud V7R6M0. Plan doc + cross-cutting interop rule live at
+`plans/m10-package-caching.md` and
+`memory/project_gojtopen_m10_jt400_interop.md`. Highlights:
+
+- **M10-0** ✅ — Three fixtures (`prepared_package_first_use`,
+  `prepared_package_cache_hit`, `prepared_package_cache_download`)
+  captured against IBM Cloud V7R6M0 with the M10 fixture harness
+  extensions. A fourth (`prepared_package_overflow`) is deferred
+  to a follow-up because the server-side threshold (~1024 entries)
+  makes the trace prohibitively large.
+- **M10-1** ✅ — `hostserver/db_package.go` scaffolding: function
+  codes, CP constants, `PackageOptions` / `PackageManager` /
+  `PackageStatement` types, `SuffixFromOptions` +
+  `BuildPackageName` pure functions byte-equal to JT400's
+  `JDPackageManager.java:442-522`, plus CREATE_PACKAGE +
+  RETURN_PACKAGE param builders with byte-equality wire tests.
+- **M10-2** ✅ — Seven new `Config` fields plus nine DSN keys with
+  strict per-key validation. Defaults match JT400's
+  `JDProperties.java` baseline.
+- **M10-2.5** ✅ — Fuzz seeds for the new DSN surface
+  (`driver/FuzzParseDSN`), the suffix derivation
+  (`hostserver/FuzzSuffixFromOptions`), and the composer
+  (`hostserver/FuzzBuildPackageName`). 5s runs on 4 workers
+  pass clean.
+- **M10-3** ✅ — Connect-time `SendCreatePackage`, optional
+  `SendReturnPackage` round-trip when `package-cache=true`, and
+  `WithExtendedDynamic(true)` SelectOption appending the empty
+  CP 0x3804 marker to each PREPARE_DESCRIBE. Live-validated:
+  `QSYS2.SYSPACKAGE` shows the resolved 10-char wire name on
+  disk after a Go-driver connect (`GOTEST/GOJTPK9899`), proving
+  cross-driver share with JT400.
+- **M10-4** ✅ — `Conn.packageEligibleFor` implements the JT400
+  `JDSQLStatement.canHaveExtendedDynamic` boundary: criteria
+  `default` (parameterised only, no `CURRENT OF` / `DECLARE`) and
+  `select` (default plus unparameterised SELECT/VALUES/WITH).
+  `Conn.handlePackageError` folds `Config.PackageError` into the
+  fatal/non-fatal decision for connect-time package failures.
+
+**M10 complete 2026-05-11.** All five items shipped + live-validated;
+conformance suite green (162 s on the 1-CPU LPAR). Public API
+additions are purely additive vs v0.6.0 — no breaking changes. Tag
+v0.7.0 once the cross-cutting README updates land.
+
+Deferred to post-M10 follow-up: CP 0x380B per-statement decoder
+and the corresponding client-side cache-hit fast path
+(`Stmt.Prepare` lookup + `ExecutePreparedCached` bypass). The wire
+shape that ENABLES it is in place (extended-dynamic populates the
+server *PGM, RETURN_PACKAGE downloads its contents); the missing
+piece is the per-entry decode.
+
 ## Working rhythm
 
 The pattern that worked for M1 should keep working:

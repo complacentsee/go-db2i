@@ -73,6 +73,17 @@ implemented end-to-end:
 - OpenTelemetry spans (`Config.Tracer`) following the May 2025
   semantic-conventions refresh, with `*Db2Error` attributes for
   alerting routing
+- Extended-dynamic SQL package caching (`?extended-dynamic=true&package=APP`)
+  — the driver issues `CREATE_PACKAGE` on connect, adds CP 0x3804
+  to each `PREPARE_DESCRIBE`, and re-uses the server's `*PGM`
+  cache across reconnects. The 10-char wire name is byte-equal to
+  JT400 for the same session options, so a Go client and a Java
+  client targeting the same LPAR share one `*PGM`. See
+  [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
+  for the 9-key DSN surface (`extended-dynamic`, `package`,
+  `package-library`, `package-cache`, `package-error`,
+  `package-criteria`, `package-ccsid`, plus migration-friendly
+  `package-add` / `package-clear`).
 
 Out of scope (use the JTOpen Java jar for these):
 
@@ -81,9 +92,9 @@ Out of scope (use the JTOpen Java jar for these):
   `SystemValue`, print spool, FTP, BiDi reordering, proxy server.
 - JDBC extras that aren't in the database/sql contract: scrollable
   cursors (forward-only across the board), client reroute /
-  seamless failover, extended-dynamic-package caching, JDBC escape
-  syntax `{call ...}`, named-parameter binding via
-  `sql.Named("p", ...)` for procs (positional only).
+  seamless failover, JDBC escape syntax `{call ...}`,
+  named-parameter binding via `sql.Named("p", ...)` for procs
+  (positional only).
 
 ## Install
 

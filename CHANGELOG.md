@@ -8,7 +8,49 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
-## [Unreleased]
+## [0.7.0] - 2026-05-11
+
+Third tagged release. M10 extended-dynamic-package caching shipped on
+top of the v0.6.0 base. All five M10 sub-items (fixtures, wire
+encoder, DSN surface, connect-time wiring, criteria filter) are
+live-validated against IBM Cloud V7R6M0 on plaintext (8471); the
+full conformance suite is green (~162 s on the 1-CPU LPAR). The
+M0-M9 surface is unchanged.
+
+Added public API is purely additive vs v0.6.0 -- no breaking changes:
+
+- `Config.ExtendedDynamic`, `Config.PackageName`,
+  `Config.PackageLibrary`, `Config.PackageCache`,
+  `Config.PackageError`, `Config.PackageCriteria`,
+  `Config.PackageCCSID` fields with JT400-matching defaults
+- DSN query keys: `extended-dynamic`, `package`,
+  `package-library`, `package-cache`, `package-error`,
+  `package-criteria`, `package-ccsid`, `package-add`
+  (accept-ignore), `package-clear` (accept-warn-log)
+- `hostserver.PackageOptions`, `hostserver.PackageManager`,
+  `hostserver.PackageStatement` types
+- `hostserver.SuffixFromOptions`, `hostserver.BuildPackageName`
+  pure functions (byte-equal to JT400 for the same session options)
+- `hostserver.BuildCreatePackageParams`,
+  `hostserver.BuildReturnPackageParams`,
+  `hostserver.SendCreatePackage`, `hostserver.SendReturnPackage`
+  wire builders + senders
+- `hostserver.WithExtendedDynamic` SelectOption
+- New constants: `hostserver.ReqDBSQLCreatePackage` (0x180F),
+  `hostserver.ReqDBSQLReturnPackage` (0x1815),
+  `hostserver.ReqDBSQLDeletePackage` (0x1811),
+  `hostserver.ReqDBSQLClearPackage` (0x1810)
+
+Three new fixture cases in `testdata/jtopen-fixtures/`:
+`prepared_package_first_use`, `prepared_package_cache_hit`,
+`prepared_package_cache_download`. A fourth fixture
+(`prepared_package_overflow`) is deferred to a follow-up because
+the server-side threshold makes the trace prohibitively large.
+
+The client-side cache-hit fast path (Stmt.Prepare lookup +
+ExecutePreparedCached bypass) is deferred to a post-M10 follow-up.
+The wire shape that ENABLES it is in place; the missing piece is
+the CP 0x380B per-statement decoder.
 
 ### Added (M10-0 — package-cache fixtures)
 
