@@ -1,21 +1,24 @@
-goJTOpen
-Copyright 2026 The goJTOpen Authors
+go-db2i
+Copyright 2026 The go-db2i Authors
 
-This product includes software developed by The goJTOpen Authors
-(https://github.com/complacentsee/goJTOpen) and is licensed under the
+This product includes software developed by The go-db2i Authors
+(https://github.com/complacentsee/go-db2i) and is licensed under the
 Apache License, Version 2.0.
+
+Originally released as goJTOpen; renamed to go-db2i in v0.7.0
+(2026-05-11).
 
 ------------------------------------------------------------------------
 
 Protocol reference
 
-The goJTOpen wire-format implementation was written using the
+The go-db2i wire-format implementation was written using the
 open-source IBM Toolbox for Java (JTOpen) as a reference for the IBM i
 host-server datastream protocol. JTOpen is © International Business
 Machines Corporation and others, and is licensed under the IBM Public
 License v1.0 (https://opensource.org/license/ibm-pl-1-0).
 
-goJTOpen is a clean-room reimplementation in Go. No JTOpen source
+go-db2i is a clean-room reimplementation in Go. No JTOpen source
 code is included in this repository or copied at build time. The
 Java fixture-capture harness under testdata/jtopen-fixtures/ depends
 on JTOpen at runtime via Maven Central to record wire traces; the
