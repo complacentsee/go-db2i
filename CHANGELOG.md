@@ -12,7 +12,9 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [0.7.2] - 2026-05-11
 
-Fifth tagged release. Pure documentation + observability + tests on
+Fifth tagged release. Full conformance suite green at 168 s on
+IBM Cloud V7R6M0 (cache-hit tests that require filing skip via
+DB2I_TEST_FILING env-var gate; rest pass). Pure documentation + observability + tests on
 top of v0.7.1 — no public API additions. The cache-hit fast path
 from v0.7.1 is now documented end-to-end, has three godoc examples,
 and ships with a conformance test matrix that covers the JDBC type
