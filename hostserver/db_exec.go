@@ -124,7 +124,8 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 // Caller is responsible for ensuring the SQL text starts with INSERT,
 // UPDATE, or DELETE -- the function does not validate the verb,
 // since callers (the driver) already classify with isSelect().
-func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*ExecResult, error) {
+func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32, opts ...SelectOption) (*ExecResult, error) {
+	o := resolveSelectOpts(opts)
 	if len(paramShapes) != len(paramValues) {
 		return nil, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
 	}
@@ -180,11 +181,15 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, []DBParam{
+		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
 			DBParamByte(cpDBPrepareOption, 0x00),
-		})
+		}
+		if o.extendedDynamic {
+			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {
 			return nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
 		}

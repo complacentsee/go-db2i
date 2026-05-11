@@ -101,13 +101,65 @@ across IBM i versions; expect the public API surface to settle at
   keys plus their pinned rejection cases. Short fuzz runs
   (5s, single core) on all three fuzz targets pass clean.
 
+### Added (M10-3 — connect-time package wiring)
+
+- `hostserver.SendCreatePackage`: issues CREATE_PACKAGE (0x180F)
+  on a database connection and consumes the matching reply.
+  Idempotent on the server side — a re-create of an existing
+  *PGM returns success.
+- `hostserver.SendReturnPackage`: issues RETURN_PACKAGE (0x1815)
+  and returns the raw CP 0x380B body bytes. The detailed
+  per-statement decoder is deferred so the M10-3 wire round-trip
+  ships standalone; the cache-hit fast path lights up once the
+  parser lands.
+- `hostserver.WithExtendedDynamic(true)` SelectOption: appends an
+  empty CP 0x3804 marker to PREPARE_DESCRIBE requests. The
+  marker tells the server to file the prepared statement into
+  the package context the connection established at connect time.
+  Wired into all three PREPARE_DESCRIBE call sites
+  (`db_prepared.go`, `db_select.go`, `db_exec.go`).
+- `driver.Conn.initPackage`: connect-time setup that derives the
+  10-char wire name from `cfg.PackageName` + `packageOptions()`,
+  CREATE_PACKAGEs the resolved name in `cfg.PackageLibrary`, and
+  (if `cfg.PackageCache`) RETURN_PACKAGEs to download cached
+  statement entries. Folds errors through `Config.PackageError`
+  to decide between fatal-fail and slog-warn-and-soft-disable.
+- `driver.Conn.packageOptions`: builds the `PackageOptions` from
+  the current `Config` so the on-wire suffix is byte-equal to
+  what JT400 would compute from the same DSN.
+- `driver.Conn.selectOptions` now also returns
+  `WithExtendedDynamic(true)` when the connection has a live
+  package manager, so every PREPARE the conn issues files into
+  the *PGM.
+- DSN parser: `package=<name>` accepts up to 10 chars
+  (matching JT400's `JDProperties.validate` charset+max); the
+  encoder later truncates to 6 chars before the 4-char options
+  suffix is appended, preserving byte-equality.
+
+### Live evidence (M10-3)
+
+- Conformance suite green against IBM Cloud V7R6M0
+  (`162 s, 0 failures`) with and without the new flags.
+- Smoke test (3 iter SELECT under `extended-dynamic=true`,
+  optional `package-cache=true`) verifies CREATE_PACKAGE +
+  RETURN_PACKAGE round-trip with the LPAR; `QSYS2.SYSPACKAGE`
+  shows the resolved 10-char name (`GOTEST/GOJTPK9899`) lives
+  on disk for cross-driver share with JT400.
+
 ### Notes
 
 - `prepared_package_overflow` is deferred — server-side package
   threshold (~1024 entries) makes the trace prohibitively large
   for the cache-hit suite. Will land before M10-4 closes.
-- M10-3+ work (client cache + cache-hit fast path, error
-  handling) lives in `plans/m10-package-caching.md`.
+- Client-side cache-hit fast path (Stmt.Prepare lookup +
+  ExecutePreparedCached bypass) is deferred to a follow-up. The
+  wire shape that ENABLES it is in place (extended-dynamic
+  populates the server *PGM, RETURN_PACKAGE downloads its
+  contents); the missing piece is the CP 0x380B per-statement
+  decoder, which is byte-shape work tracked alongside the M10-4
+  error-handling polish.
+- M10-4 (error-handling + package-criteria filter) lives in
+  `plans/m10-package-caching.md`.
 
 ## [0.6.0] - 2026-05-11
 

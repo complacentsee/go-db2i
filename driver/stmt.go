@@ -224,7 +224,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
+	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptions()...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)

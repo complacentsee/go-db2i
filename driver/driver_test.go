@@ -539,7 +539,7 @@ func TestParseDSN_PackageClearAccepted(t *testing.T) {
 func TestParseDSN_M10RejectsBadValues(t *testing.T) {
 	cases := map[string]string{
 		"bogus extended-dynamic":  "gojtopen://u:p@h/?extended-dynamic=maybe",
-		"package name too long":   "gojtopen://u:p@h/?extended-dynamic=true&package=TOOLONGNAME",
+		"package name >10 chars":  "gojtopen://u:p@h/?extended-dynamic=true&package=ELEVENCHARS",
 		"package bad char dot":    "gojtopen://u:p@h/?extended-dynamic=true&package=A.B",
 		"package bad char slash":  "gojtopen://u:p@h/?extended-dynamic=true&package=A/B",
 		"package empty":           "gojtopen://u:p@h/?extended-dynamic=true&package=",

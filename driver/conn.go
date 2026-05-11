@@ -109,14 +109,151 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		tracer:    resolveTracer(c.cfg.Tracer),
 	}
 	conn.log = log.With(slog.Uint64("server_vrm", uint64(serverVRM)))
+
+	// Extended-dynamic + package-cache wiring (M10-3). Has to run
+	// AFTER NDBAddLibraryList because the package lives in a
+	// library the session might just have added to its list; the
+	// CREATE_PACKAGE call wouldn't resolve it otherwise.
+	if c.cfg.ExtendedDynamic && c.cfg.PackageName != "" {
+		if err := conn.initPackage(ctx); err != nil {
+			// Package-error mode decides whether init failure is
+			// fatal. The handler emits its own slog line and may
+			// return nil to soft-fail with the package disabled.
+			if fatal := conn.handlePackageError(ctx, "init", err); fatal != nil {
+				db.Close()
+				return nil, fmt.Errorf("gojtopen: init package: %w", fatal)
+			}
+			// Non-fatal: clear pkg so PREPARE_DESCRIBE goes
+			// through the plain path.
+			conn.pkg = nil
+		}
+	}
+
 	conn.log.LogAttrs(ctx, slog.LevelInfo, "gojtopen: connected",
 		slog.String("user", c.cfg.User),
 		slog.Int("db_port", c.cfg.DBPort),
 		slog.Int("signon_port", c.cfg.SignonPort),
 		slog.Bool("tls", c.cfg.TLS),
 		slog.String("library", c.cfg.Library),
+		slog.Bool("extended_dynamic", c.cfg.ExtendedDynamic && conn.pkg != nil),
 	)
 	return conn, nil
+}
+
+// initPackage runs the per-connection package setup when
+// Config.ExtendedDynamic is true. Mirrors JT400's connect-time
+// JDPackageManager flow:
+//
+//  1. Derive the 10-char on-wire package name from cfg.PackageName +
+//     active session options.
+//  2. CREATE_PACKAGE the resolved name in cfg.PackageLibrary. The
+//     server is idempotent: a re-create of an existing *PGM
+//     returns success.
+//  3. If cfg.PackageCache, RETURN_PACKAGE to download the cached
+//     statement list. The raw bytes are captured for follow-up
+//     parsing; the cache-hit fast path itself lands in a follow-up
+//     to M10-3.
+//
+// Returns an error on hard failure; the caller folds it through
+// Config.PackageError to decide whether to fail the connect or
+// soft-disable the package for this connection.
+func (c *Conn) initPackage(ctx context.Context) error {
+	opts := c.packageOptions()
+	wireName := hostserver.BuildPackageName(c.cfg.PackageName, opts)
+	ccsid := uint16(37) // CCSID 37 is what JT400 uses on the wire for
+	// the package-name/library var-strings (the JOB CCSID); the
+	// `package-ccsid` DSN knob is for the per-statement SQL text
+	// stored inside the *PGM, not these envelope fields.
+
+	mgr := &hostserver.PackageManager{
+		Name:    wireName,
+		Library: c.cfg.PackageLibrary,
+		CCSID:   uint16(c.cfg.PackageCCSID),
+	}
+	if err := hostserver.SendCreatePackage(c.conn, wireName, c.cfg.PackageLibrary, ccsid, c.nextCorrFunc()); err != nil {
+		return fmt.Errorf("create-package %s/%s: %w", c.cfg.PackageLibrary, wireName, err)
+	}
+
+	if c.cfg.PackageCache {
+		body, err := hostserver.SendReturnPackage(c.conn, wireName, c.cfg.PackageLibrary, ccsid, c.nextCorrFunc())
+		if err != nil {
+			return fmt.Errorf("return-package %s/%s: %w", c.cfg.PackageLibrary, wireName, err)
+		}
+		// CP 0x380B detailed parser is deferred. We log the byte
+		// count so operators can see RETURN_PACKAGE worked even
+		// before the cache-hit fast path lights up.
+		c.log.LogAttrs(ctx, slog.LevelDebug, "gojtopen: RETURN_PACKAGE",
+			slog.String("package", wireName),
+			slog.String("library", c.cfg.PackageLibrary),
+			slog.Int("info_bytes", len(body)),
+		)
+	}
+
+	c.pkg = mgr
+	return nil
+}
+
+// packageOptions snapshots the session options the package-name
+// suffix derivation reads. Today the driver only exposes
+// DateFormat and Naming-style fields indirectly through other
+// Config keys; the remaining option ints stay zero. The result is
+// byte-equal to the suffix JT400 computes from the same DSN -- the
+// load-bearing rule lives in
+// project_gojtopen_m10_jt400_interop.md.
+func (c *Conn) packageOptions() hostserver.PackageOptions {
+	opts := hostserver.PackageOptions{
+		// Naming defaults to 0 (sql); goJTOpen's hostserver layer
+		// uses period-qualified SQL identifiers, which is JT400's
+		// "naming=sql" enum value. There is no separate Config
+		// knob for system naming today.
+		Naming: 0,
+	}
+	switch c.cfg.DateFormat {
+	case hostserver.DateFormatJOB:
+		// JT400 default index for date-format is 1 (mdy) when no
+		// session date-format is in force. We mirror that here so
+		// goJTOpen's GOJTPK9899 derivation matches JT400's wire
+		// output (asserted by hostserver.TestSuffixFromOptions_FixtureMatch).
+		opts.DateFormat = 1
+	case hostserver.DateFormatISO:
+		opts.DateFormat = 5
+	case hostserver.DateFormatUSA:
+		opts.DateFormat = 4
+	case hostserver.DateFormatEUR:
+		opts.DateFormat = 6
+	case hostserver.DateFormatJIS:
+		opts.DateFormat = 7
+	case hostserver.DateFormatMDY:
+		opts.DateFormat = 1
+	case hostserver.DateFormatDMY:
+		opts.DateFormat = 2
+	case hostserver.DateFormatYMD:
+		opts.DateFormat = 3
+	}
+	return opts
+}
+
+// handlePackageError applies the Config.PackageError mode to a
+// package-related error. Returns nil for "warning" and "none"
+// modes (after slog-warn for the former), and the original err for
+// "exception" mode. Caller uses the return value to decide whether
+// to fail the connect or soft-disable the package.
+func (c *Conn) handlePackageError(ctx context.Context, op string, err error) error {
+	switch c.cfg.PackageError {
+	case "exception":
+		c.log.LogAttrs(ctx, slog.LevelError, "gojtopen: package "+op+" failed",
+			slog.String("err", err.Error()),
+		)
+		return err
+	case "none":
+		// Silent drop; package soft-disabled.
+		return nil
+	default: // "warning"
+		c.log.LogAttrs(ctx, slog.LevelWarn, "gojtopen: package "+op+" failed; continuing without package",
+			slog.String("err", err.Error()),
+		)
+		return nil
+	}
 }
 
 // Conn implements driver.Conn (and the Context-aware extensions).
@@ -142,6 +279,15 @@ type Conn struct {
 	// tracer is the resolved OTel trace.Tracer. Always non-nil
 	// (no-op fallback when Config.Tracer is nil).
 	tracer trace.Tracer
+
+	// pkg is the per-connection SQL package manager. Non-nil iff
+	// cfg.ExtendedDynamic && cfg.PackageName != "". When set:
+	//  - PREPARE_DESCRIBE requests emit the CP 0x3804 marker so the
+	//    server files the prepared statement into the *PGM.
+	//  - The connect path issued CREATE_PACKAGE for the resolved
+	//    10-char wire name (and RETURN_PACKAGE if cfg.PackageCache
+	//    is true).
+	pkg *hostserver.PackageManager
 }
 
 // Logger returns the per-connection slog.Logger. Always non-nil --
@@ -205,10 +351,17 @@ func (c *Conn) nextCorr() uint32 {
 // the OpenSelectStatic / OpenSelectPrepared call sites stay zero-
 // allocation for the common path.
 func (c *Conn) selectOptions() []hostserver.SelectOption {
-	if c.cfg == nil || !c.cfg.ExtendedMetadata {
-		return nil
+	var opts []hostserver.SelectOption
+	if c.cfg != nil && c.cfg.ExtendedMetadata {
+		opts = append(opts, hostserver.WithExtendedMetadata(true))
 	}
-	return []hostserver.SelectOption{hostserver.WithExtendedMetadata(true)}
+	if c.pkg != nil {
+		// Extended-dynamic adds the empty CP 0x3804 marker to
+		// each PREPARE_DESCRIBE so the server files the statement
+		// into the connection's package context.
+		opts = append(opts, hostserver.WithExtendedDynamic(true))
+	}
+	return opts
 }
 
 func (c *Conn) nextCorrFunc() func() uint32 {

@@ -534,6 +534,16 @@ type selectOpts struct {
 	// fields onto the SelectColumn slice once the data format CP
 	// has been parsed.
 	extendedMetadata bool
+
+	// extendedDynamic, when true, appends an empty CP 0x3804
+	// (cpPackageName) marker to PREPARE_DESCRIBE requests. The
+	// marker tells the server to add the prepared statement to
+	// the package the connection registered via CREATE_PACKAGE
+	// at connect time. Without the marker the prepare runs in
+	// normal (non-package) mode; the wire bytes are unchanged
+	// from the M0..M9 baseline. Mirrors JT400's
+	// "extended dynamic=true" JDBC URL knob.
+	extendedDynamic bool
 }
 
 // WithExtendedMetadata asks the server to ship per-column schema,
@@ -546,6 +556,21 @@ type selectOpts struct {
 // `Rows.ColumnTypeSchemaName` / `Rows.ColumnTypeTableName`.
 func WithExtendedMetadata(b bool) SelectOption {
 	return func(o *selectOpts) { o.extendedMetadata = b }
+}
+
+// WithExtendedDynamic asks the server to file every PREPAREd
+// statement into the SQL package the connection registered at
+// connect time. The on-wire change is an empty CP 0x3804 marker on
+// PREPARE_DESCRIBE; the server-side effect is that repeated PREPAREs
+// of the same SQL (across this and other connections targeting the
+// same *PGM) re-use the cached parse plan instead of re-parsing.
+// Mirrors JT400's "extended dynamic=true" JDBC URL knob.
+//
+// The caller is responsible for issuing CREATE_PACKAGE on connect
+// (see hostserver.SendCreatePackage); this option only adds the
+// per-PREPARE marker.
+func WithExtendedDynamic(b bool) SelectOption {
+	return func(o *selectOpts) { o.extendedDynamic = b }
 }
 
 func resolveSelectOpts(opts []SelectOption) selectOpts {
@@ -660,6 +685,13 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			// request's ORS bit asks for it. Per JT400's
 			// DBSQLRequestDS.setExtendedColumnDescriptorOption.
 			params = append(params, DBParamByte(0x3829, 0xF1))
+		}
+		if opts.extendedDynamic {
+			// Empty CP 0x3804 marker: file this SELECT into the
+			// session's SQL package (the *PGM CREATE_PACKAGE set up
+			// at connect). Matches JT400's wire shape captured in
+			// fixtures/prepared_package_first_use.trace.
+			params = append(params, DBParam{CodePoint: cpPackageName})
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, params)
 		if err != nil {

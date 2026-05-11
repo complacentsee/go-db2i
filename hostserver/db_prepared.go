@@ -492,6 +492,14 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 			// DBSQLRequestDS.setExtendedColumnDescriptorOption.
 			prepParams = append(prepParams, DBParamByte(0x3829, 0xF1))
 		}
+		if opts.extendedDynamic {
+			// Empty CP 0x3804 marker: server adds the prepared
+			// statement to the package context this connection
+			// established via CREATE_PACKAGE. Matches JT400's
+			// PREPARE_DESCRIBE wire shape captured in
+			// fixtures/prepared_package_first_use.trace.
+			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
+		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {
 			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)

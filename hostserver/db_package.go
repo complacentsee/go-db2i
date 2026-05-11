@@ -2,6 +2,7 @@ package hostserver
 
 import (
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -286,6 +287,107 @@ func BuildReturnPackageParams(name, library string, ccsid uint16) ([]DBParam, er
 		// receiving the reply).
 		{CodePoint: cpPackageReturnOption, Data: []byte{0x00, 0x00, 0x00, 0x00}},
 	}, nil
+}
+
+// SendCreatePackage issues a CREATE_PACKAGE (0x180F) request on
+// conn and reads the matching reply. JT400 sends this on connect
+// when extended-dynamic is on and the named *PGM doesn't yet exist
+// on the server. The server is idempotent: if the *PGM already
+// exists, it returns success without changes.
+//
+// nextCorr is the connection's correlation-ID counter. The reply
+// is consumed (and any error decoded) inside this call.
+func SendCreatePackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) error {
+	params, err := BuildCreatePackageParams(name, library, ccsid)
+	if err != nil {
+		return fmt.Errorf("hostserver: build CREATE_PACKAGE: %w", err)
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLCreatePackage, DBRequestTemplate{
+		// JT400 sets ORS bitmap to 0x80040000 -- ReturnSQLCA only
+		// (we need SQLCA to detect "package already exists" and
+		// other lifecycle outcomes). Matches fixture frame #5.
+		ORSBitmap: 0x80040000,
+	}, params)
+	if err != nil {
+		return fmt.Errorf("hostserver: build CREATE_PACKAGE: %w", err)
+	}
+	hdr.CorrelationID = nextCorr()
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return fmt.Errorf("hostserver: send CREATE_PACKAGE: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, hdr.CorrelationID, 4)
+	if err != nil {
+		return fmt.Errorf("hostserver: read CREATE_PACKAGE reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return fmt.Errorf("hostserver: CREATE_PACKAGE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return fmt.Errorf("hostserver: parse CREATE_PACKAGE reply: %w", err)
+	}
+	if dbErr := makeDb2Error(rep, "CREATE_PACKAGE"); dbErr != nil {
+		// Common-case "package already exists" comes back as
+		// SQL +20000 / SQLSTATE 01ZZZ in the SQLCA -- a warning,
+		// not an error, and the server has already prepared the
+		// existing *PGM for the rest of this connection. We let
+		// the caller decide what to do with the surface error;
+		// the driver's package-error config handler folds warning
+		// cases into an slog.Warn.
+		return dbErr
+	}
+	return nil
+}
+
+// SendReturnPackage issues a RETURN_PACKAGE (0x1815) request on
+// conn and reads the matching reply. JT400 sends this on connect
+// when package-cache=true; the reply carries CP 0x380B with the
+// server-cached statement entries. The body of the reply is
+// returned verbatim for the caller (or a follow-up parser) to
+// decode -- the M10-3 deliverable ships the wire round-trip; the
+// per-statement parse is wired in a follow-up.
+func SendReturnPackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) ([]byte, error) {
+	params, err := BuildReturnPackageParams(name, library, ccsid)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: build RETURN_PACKAGE: %w", err)
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLReturnPackage, DBRequestTemplate{
+		ORSBitmap: 0x80140000, // ORSReturnSQLCA | ORSPackageInfo
+	}, params)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: build RETURN_PACKAGE: %w", err)
+	}
+	hdr.CorrelationID = nextCorr()
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return nil, fmt.Errorf("hostserver: send RETURN_PACKAGE: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, hdr.CorrelationID, 4)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read RETURN_PACKAGE reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: RETURN_PACKAGE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse RETURN_PACKAGE reply: %w", err)
+	}
+	if dbErr := makeDb2Error(rep, "RETURN_PACKAGE"); dbErr != nil {
+		return nil, dbErr
+	}
+	// Pull the cpPackageReplyInfo (0x380B) payload out of the parsed
+	// reply, if present. JT400 ships it as one CP with the entire
+	// package-info structure inside. The detailed parse is deferred
+	// to M10-followup; M10-3 demonstrates the wire round-trip is
+	// happy.
+	for _, p := range rep.Params {
+		if p.CodePoint == cpPackageReplyInfo {
+			out := make([]byte, len(p.Data))
+			copy(out, p.Data)
+			return out, nil
+		}
+	}
+	return nil, nil
 }
 
 // ebcdicVarStringBytes converts s to EBCDIC bytes for the given

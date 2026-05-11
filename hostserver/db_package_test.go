@@ -301,6 +301,93 @@ func pickWireParamSection(payload []byte) []byte {
 	return payload[20:]
 }
 
+// TestSelectStaticSQL_ExtendedDynamicAddsMarker confirms the
+// SelectStaticSQL path appends an empty CP 0x3804 marker to its
+// PREPARE_DESCRIBE frame when WithExtendedDynamic(true) is supplied
+// -- and does NOT add it under the default options. The fake conn
+// replays select_dummy.trace replies (the request payload doesn't
+// affect what comes back), so we can drive the prepare path and
+// then inspect what got written.
+func TestSelectStaticSQL_ExtendedDynamicAddsMarker(t *testing.T) {
+	all := allReceivedsFromFixture(t, "select_dummy.trace")
+	var sqlReceiveds [][]byte
+	for _, b := range all {
+		if len(b) >= 8 && b[6] == 0xE0 && b[7] == 0x04 {
+			sqlReceiveds = append(sqlReceiveds, b)
+		}
+	}
+	if len(sqlReceiveds) < 6 {
+		t.Fatalf("need >= 6 SQL receiveds, got %d", len(sqlReceiveds))
+	}
+
+	cases := []struct {
+		name           string
+		opts           []SelectOption
+		wantHasMarker  bool
+	}{
+		{"default off", nil, false},
+		{"dynamic on", []SelectOption{WithExtendedDynamic(true)}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newFakeConn(sqlReceiveds[3], sqlReceiveds[4], sqlReceiveds[5])
+			cursor, err := OpenSelectStatic(conn,
+				"SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1",
+				closureFromInt(3), tc.opts...,
+			)
+			if err != nil {
+				t.Fatalf("OpenSelectStatic: %v", err)
+			}
+			_, _ = cursor.drainAll()
+
+			// Walk the sent frames; the second one is PREPARE_DESCRIBE.
+			r := bytes.NewReader(conn.written.Bytes())
+			var prepareBytes []byte
+			for i := 0; i < 4; i++ {
+				hdr, payload, err := ReadFrame(r)
+				if err != nil {
+					t.Fatalf("re-parse sent frame %d: %v", i, err)
+				}
+				if hdr.ReqRepID == ReqDBSQLPrepareDescribe {
+					prepareBytes = payload
+					break
+				}
+			}
+			if prepareBytes == nil {
+				t.Fatal("no PREPARE_DESCRIBE frame found in sent stream")
+			}
+			hasMarker := containsEmptyCP(prepareBytes, cpPackageName)
+			if hasMarker != tc.wantHasMarker {
+				t.Errorf("PREPARE_DESCRIBE has empty CP 0x%04X = %v, want %v",
+					cpPackageName, hasMarker, tc.wantHasMarker)
+			}
+		})
+	}
+}
+
+// containsEmptyCP walks a request payload (everything after the DSS
+// header) looking for an LL/CP entry with LL=6 and the given CP --
+// i.e. an empty marker parameter.
+func containsEmptyCP(payload []byte, wantCP uint16) bool {
+	if len(payload) < 20 {
+		return false
+	}
+	off := 20 // skip template
+	for off+6 <= len(payload) {
+		ll := uint32(payload[off])<<24 | uint32(payload[off+1])<<16 | uint32(payload[off+2])<<8 | uint32(payload[off+3])
+		if ll < 6 || int(ll) > len(payload)-off {
+			return false
+		}
+		cp := uint16(payload[off+4])<<8 | uint16(payload[off+5])
+		if ll == 6 && cp == wantCP {
+			return true
+		}
+		off += int(ll)
+	}
+	return false
+}
+
 // sanity-check the BE encoder helper layout against the existing
 // param-list builder so a refactor of DBParam wire shape elsewhere
 // can't silently break our package CPs.
