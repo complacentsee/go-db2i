@@ -175,17 +175,15 @@ func (c *Conn) initPackage(ctx context.Context) error {
 	}
 
 	if c.cfg.PackageCache {
-		body, err := hostserver.SendReturnPackage(c.conn, wireName, c.cfg.PackageLibrary, ccsid, c.nextCorrFunc())
+		cached, err := hostserver.SendReturnPackage(c.conn, wireName, c.cfg.PackageLibrary, ccsid, c.nextCorrFunc())
 		if err != nil {
 			return fmt.Errorf("return-package %s/%s: %w", c.cfg.PackageLibrary, wireName, err)
 		}
-		// CP 0x380B detailed parser is deferred. We log the byte
-		// count so operators can see RETURN_PACKAGE worked even
-		// before the cache-hit fast path lights up.
+		mgr.Cached = cached
 		c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: RETURN_PACKAGE",
 			slog.String("package", wireName),
 			slog.String("library", c.cfg.PackageLibrary),
-			slog.Int("info_bytes", len(body)),
+			slog.Int("cached_statements", len(cached)),
 		)
 	}
 

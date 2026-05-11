@@ -8,6 +8,21 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
+## [Unreleased]
+
+### Added
+
+- **v0.7.1-A**: CP 0x380B (package info) per-statement decoder.
+  `hostserver.ParsePackageInfo` walks JT400's 42-byte header + N x
+  64-byte entry stride + per-entry SQLDA-format regions and produces
+  `PackageStatement` values carrying the server-assigned 18-byte
+  statement name, the original SQL text (UCS-2 BE), the data-format
+  `SelectColumn` shapes, and the parameter-marker `ParameterMarkerField`
+  shapes. Wired into `SendReturnPackage` and `driver.Conn.initPackage`
+  so the connect-time RETURN_PACKAGE round-trip populates
+  `c.pkg.Cached` with parsed entries instead of raw bytes. Foundation
+  for the v0.7.1-B/C client-side cache-hit fast path.
+
 ## [0.7.0] - 2026-05-11
 
 Third tagged release. **Renamed from goJTOpen to go-db2i.** M10

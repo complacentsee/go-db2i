@@ -3,6 +3,7 @@ package hostserver
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -387,6 +388,195 @@ func containsEmptyCP(payload []byte, wantCP uint16) bool {
 	}
 	return false
 }
+
+// TestParsePackageInfo_FixtureMatch replays the two CP 0x380B reply
+// bodies captured in prepared_package_cache_download.trace and
+// asserts the decoder reproduces every field the JT400 wire-side
+// stored. Both captures hold the same one-statement payload (the
+// SELECT CURRENT_TIMESTAMP / CAST(? AS INTEGER) statement the
+// harness pre-seeds before the second connect downloads it).
+//
+// This is the load-bearing regression net for the SQLDA-format
+// parser: any divergence in field offsets here breaks the client-
+// side cache-hit fast path silently (statement name mismatch ->
+// server treats as unknown -> falls back to PREPARE_DESCRIBE +
+// extra round-trip per call).
+func TestParsePackageInfo_FixtureMatch(t *testing.T) {
+	bodies := packageInfoBodiesFromFixture(t, "prepared_package_cache_download.trace")
+	if len(bodies) == 0 {
+		t.Fatalf("no CP 0x380B bodies captured in fixture")
+	}
+	for i, body := range bodies {
+		t.Run(fmt.Sprintf("body_%d", i), func(t *testing.T) {
+			stmts, err := ParsePackageInfo(body)
+			if err != nil {
+				t.Fatalf("ParsePackageInfo: %v", err)
+			}
+			if len(stmts) != 1 {
+				t.Fatalf("got %d statements, want 1", len(stmts))
+			}
+			ps := stmts[0]
+			// Server-assigned name, captured EBCDIC bytes:
+			//   d8e9c1c6f4f8f1f8f1f5c5f8f0f2c5f0f0f1
+			//      Q  Z  A  F  4  8  1  8  1  5  E  8  0  2  E  0  0  1
+			wantNameBytes := []byte{
+				0xd8, 0xe9, 0xc1, 0xc6, 0xf4, 0xf8, 0xf1, 0xf8, 0xf1,
+				0xf5, 0xc5, 0xf8, 0xf0, 0xf2, 0xc5, 0xf0, 0xf0, 0xf1,
+			}
+			if !bytes.Equal(ps.NameBytes, wantNameBytes) {
+				t.Errorf("NameBytes = %x, want %x", ps.NameBytes, wantNameBytes)
+			}
+			if ps.Name != "QZAF481815E802E001" {
+				t.Errorf("Name = %q, want %q", ps.Name, "QZAF481815E802E001")
+			}
+			// Statement type 2 = SELECT, matches the seeded
+			// SELECT CURRENT_TIMESTAMP statement.
+			if ps.StatementType != 2 {
+				t.Errorf("StatementType = %d, want 2 (SELECT)", ps.StatementType)
+			}
+			wantSQL := "SELECT CURRENT_TIMESTAMP, CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1"
+			if ps.SQLText != wantSQL {
+				t.Errorf("SQLText = %q, want %q", ps.SQLText, wantSQL)
+			}
+
+			// Two result columns: TIMESTAMP NN (392) and INTEGER
+			// nullable (497, from CAST(? AS INTEGER) which carries
+			// the input parameter's nullability).
+			if got, want := len(ps.DataFormat), 2; got != want {
+				t.Fatalf("DataFormat len = %d, want %d", got, want)
+			}
+			if got, want := ps.DataFormat[0].SQLType, uint16(SQLTypeTimestampNN); got != want {
+				t.Errorf("DataFormat[0].SQLType = %d, want %d (TIMESTAMP NN)", got, want)
+			}
+			if got, want := ps.DataFormat[1].SQLType, uint16(497); got != want {
+				t.Errorf("DataFormat[1].SQLType = %d, want %d (INTEGER nullable)", got, want)
+			}
+			if got, want := ps.DataFormat[1].Length, uint32(4); got != want {
+				t.Errorf("DataFormat[1].Length = %d, want %d", got, want)
+			}
+
+			// One parameter marker (the single '?' in the SQL).
+			if got, want := len(ps.ParameterMarkerFormat), 1; got != want {
+				t.Fatalf("ParameterMarkerFormat len = %d, want %d", got, want)
+			}
+			pm := ps.ParameterMarkerFormat[0]
+			if pm.SQLType != 497 {
+				t.Errorf("PMF[0].SQLType = %d, want 497 (INTEGER nullable)", pm.SQLType)
+			}
+			if pm.FieldLength != 4 {
+				t.Errorf("PMF[0].FieldLength = %d, want 4", pm.FieldLength)
+			}
+			// The SQLDA direction byte at offset +32 of the field
+			// record is 0x00 in our fixtures (the server hasn't tagged
+			// the marker as I/O/B); JT400's switch default returns
+			// 0xF0 (input).
+			if pm.ParamType != 0xF0 {
+				t.Errorf("PMF[0].ParamType = 0x%02X, want 0xF0 (input)", pm.ParamType)
+			}
+
+			if len(ps.RawDataFormat) == 0 {
+				t.Errorf("RawDataFormat should retain SQLDA bytes for cache-hit replay")
+			}
+			if len(ps.RawParameterMarkerFormat) == 0 {
+				t.Errorf("RawParameterMarkerFormat should retain SQLDA bytes for cache-hit replay")
+			}
+		})
+	}
+}
+
+// TestParsePackageInfo_EmptyPackage covers the brand-new *PGM case:
+// the package header is intact but statement_count = 0. JT400 ships
+// a CP 0x380B with just the 42-byte header in that case, and we
+// must return (nil, nil) -- not error.
+func TestParsePackageInfo_EmptyPackage(t *testing.T) {
+	body := make([]byte, packageEntryHeaderLen)
+	binary.BigEndian.PutUint32(body[0:4], uint32(packageEntryHeaderLen))
+	binary.BigEndian.PutUint16(body[packageHeaderCCSIDOffset:packageHeaderCCSIDOffset+2], 13488)
+	for i := 6; i < 24; i++ {
+		body[i] = 0x40 // EBCDIC blanks for default collection
+	}
+	// statement count stays 0.
+	stmts, err := ParsePackageInfo(body)
+	if err != nil {
+		t.Fatalf("ParsePackageInfo(empty): %v", err)
+	}
+	if stmts != nil {
+		t.Errorf("expected nil for empty package, got %d statements", len(stmts))
+	}
+}
+
+// TestParsePackageInfo_Truncated catches a body that claims more
+// entries than the byte budget can house. A malformed CP 0x380B
+// from the server (or a corrupt fixture) should surface as a typed
+// error rather than panic on a slice bound check.
+func TestParsePackageInfo_Truncated(t *testing.T) {
+	body := make([]byte, packageEntryHeaderLen)
+	// count = 5 but no entry bytes follow.
+	binary.BigEndian.PutUint16(body[24:26], 5)
+	binary.BigEndian.PutUint32(body[0:4], uint32(packageEntryHeaderLen))
+	_, err := ParsePackageInfo(body)
+	if err == nil {
+		t.Fatalf("expected truncation error for count=5/no entries")
+	}
+}
+
+// TestPackageSQLDADirectionByteMapping exercises the I/O/B EBCDIC
+// switch DBSQLDADataFormat documents. The default (any other byte)
+// must fall through to input.
+func TestPackageSQLDADirectionByteMapping(t *testing.T) {
+	cases := []struct {
+		in   byte
+		want byte
+	}{
+		{0xC9, 0xF0}, // 'I' input
+		{0xD6, 0xF1}, // 'O' output
+		{0xC2, 0xF2}, // 'B' inout
+		{0x00, 0xF0}, // unset -> input
+		{0xFF, 0xF0}, // garbage -> input (matches JT400 default arm)
+	}
+	for _, c := range cases {
+		if got := sqldaParamDirection(c.in); got != c.want {
+			t.Errorf("sqldaParamDirection(0x%02X) = 0x%02X, want 0x%02X", c.in, got, c.want)
+		}
+	}
+}
+
+// packageInfoBodiesFromFixture extracts every CP 0x380B body from
+// every RETURN_PACKAGE reply (ReqRepID 0x2800) inside the named
+// fixture. Used by ParsePackageInfo tests so a single fixture file
+// can drive multiple regressions (the trace captures two connects,
+// so two bodies land here).
+func packageInfoBodiesFromFixture(t *testing.T, name string) [][]byte {
+	t.Helper()
+	all := allReceivedsFromFixture(t, name)
+	var bodies [][]byte
+	for _, b := range all {
+		if len(b) < 8 || b[6] != 0xE0 || b[7] != 0x04 {
+			continue
+		}
+		_, payload, err := ReadFrame(bytesReader(b))
+		if err != nil {
+			continue
+		}
+		rep, err := ParseDBReply(payload)
+		if err != nil {
+			continue
+		}
+		for _, p := range rep.Params {
+			if p.CodePoint == cpPackageReplyInfo {
+				body := make([]byte, len(p.Data))
+				copy(body, p.Data)
+				bodies = append(bodies, body)
+			}
+		}
+	}
+	return bodies
+}
+
+// bytesReader wraps b in a bytes.Reader. Kept here so the
+// fixture-loading helper above doesn't need its own bytes import
+// (the file already pulls "bytes" for the LL/CP assertions).
+func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
 // sanity-check the BE encoder helper layout against the existing
 // param-list builder so a refactor of DBParam wire shape elsewhere

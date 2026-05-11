@@ -1,9 +1,13 @@
 package hostserver
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"strings"
+	"unicode/utf16"
+
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // Extended-dynamic package operations on the database host server.
@@ -199,28 +203,55 @@ func BuildPackageName(base string, opts PackageOptions) string {
 // and the data + parameter-marker descriptors the server already
 // produced.
 type PackageStatement struct {
-	// Name is the 18-char server-assigned statement name inside the
-	// package (e.g. "QZAF4818 5E802E001"). Used in place of the
-	// driver's per-connection "STMT0001" rotation on cache-hit
-	// EXECUTEs.
+	// Name is the 18-char server-assigned statement name decoded
+	// from EBCDIC (e.g. "QZAF481815E802E001"). Useful for logs and
+	// QSYS2.SYSPACKAGE.STATEMENT_NAME cross-checks. The on-wire
+	// EXECUTE uses NameBytes (verbatim EBCDIC).
 	Name string
 
-	// SQLText is the SQL string JT400 prepared. Used as the lookup
-	// key for `PackageManager.Lookup`. Stored in the same form JT400
-	// sends on the wire -- UCS-2 BE bytes -- so comparison is
-	// byte-equal to the cached payload without re-encoding.
+	// NameBytes is the raw 18-byte EBCDIC statement name as it sat
+	// inside the CP 0x380B payload. Sent verbatim in CP 0x3806 on
+	// cache-hit EXECUTEs so the server-side byte equality holds
+	// even if the name contains characters that would normalise
+	// across CCSIDs.
+	NameBytes []byte
+
+	// StatementType is JT400's statement-type code stored inside
+	// the package (2 = SELECT, 3 = INSERT, 4 = UPDATE, 5 = DELETE
+	// in our wire usage). Useful for an early "is this cacheable
+	// from this caller's verb" cross-check.
+	StatementType uint16
+
+	// NeedsDefaultCollection is the byte at entry+0; nonzero means
+	// the server will look up unqualified names against the package
+	// header's default-collection field. Mirrors JT400's
+	// DBReplyPackageInfo.getStatementNeedsDefaultCollection.
+	NeedsDefaultCollection byte
+
+	// SQLText is the SQL string JT400 prepared, decoded from the
+	// package header's CCSID (UCS-2 BE in our V7R6 fixtures).
+	// Used as the lookup key for `PackageManager.Lookup`.
 	SQLText string
 
 	// DataFormat is the per-column result-set descriptor the server
-	// returned at original PREPARE time. Replayed verbatim on the
-	// cache-hit EXECUTE so the result-row parser knows the column
-	// types without another DESCRIBE.
+	// returned at original PREPARE time, decoded from the SQLDA
+	// region inside the entry. Empty for non-SELECT statements.
 	DataFormat []SelectColumn
 
 	// ParameterMarkerFormat is the per-marker input descriptor the
-	// server returned at original PREPARE time. Replayed verbatim
-	// when binding cache-hit EXECUTE inputs.
+	// server returned at original PREPARE time, decoded from the
+	// pm-format SQLDA region. Empty for marker-less statements.
 	ParameterMarkerFormat []ParameterMarkerField
+
+	// RawDataFormat is the raw bytes of the data-format SQLDA
+	// region (or nil if length was 0/6, the "no format" sentinels).
+	// Retained so a future EXECUTE/OPEN-by-name path can re-send
+	// them on the wire byte-equal to what the server stored.
+	RawDataFormat []byte
+
+	// RawParameterMarkerFormat is the raw bytes of the
+	// parameter-marker-format SQLDA region (or nil if absent).
+	RawParameterMarkerFormat []byte
 }
 
 // PackageManager holds the per-connection package state. M10-1
@@ -342,11 +373,11 @@ func SendCreatePackage(conn io.ReadWriter, name, library string, ccsid uint16, n
 // SendReturnPackage issues a RETURN_PACKAGE (0x1815) request on
 // conn and reads the matching reply. JT400 sends this on connect
 // when package-cache=true; the reply carries CP 0x380B with the
-// server-cached statement entries. The body of the reply is
-// returned verbatim for the caller (or a follow-up parser) to
-// decode -- the M10-3 deliverable ships the wire round-trip; the
-// per-statement parse is wired in a follow-up.
-func SendReturnPackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) ([]byte, error) {
+// server-cached statement entries, which we parse into
+// PackageStatement values so the driver can drive the cache-hit
+// fast path. Returns nil/nil when the package exists but holds
+// zero statements (fresh *PGM).
+func SendReturnPackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) ([]PackageStatement, error) {
 	params, err := BuildReturnPackageParams(name, library, ccsid)
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: build RETURN_PACKAGE: %w", err)
@@ -376,18 +407,405 @@ func SendReturnPackage(conn io.ReadWriter, name, library string, ccsid uint16, n
 		return nil, dbErr
 	}
 	// Pull the cpPackageReplyInfo (0x380B) payload out of the parsed
-	// reply, if present. JT400 ships it as one CP with the entire
-	// package-info structure inside. The detailed parse is deferred
-	// to M10-followup; M10-3 demonstrates the wire round-trip is
-	// happy.
+	// reply, if present, and decode it into PackageStatement entries.
 	for _, p := range rep.Params {
 		if p.CodePoint == cpPackageReplyInfo {
-			out := make([]byte, len(p.Data))
-			copy(out, p.Data)
-			return out, nil
+			return ParsePackageInfo(p.Data)
 		}
 	}
 	return nil, nil
+}
+
+// Per-statement entry layout inside a CP 0x380B (package info)
+// reply. Mirrors JT400's DBReplyPackageInfo.java byte-for-byte. The
+// values below are byte offsets within ONE 64-byte entry record.
+const (
+	packageEntryHeaderLen = 42 // bytes before the first entry record
+	packageEntrySize      = 64 // fixed stride per entry
+
+	pkgEntryNeedsCollection = 0  // 1 byte
+	pkgEntryStatementType   = 1  // 2 bytes
+	pkgEntryStatementName   = 3  // 18 bytes (EBCDIC, padded with 0x40)
+	pkgEntryReserved        = 21 // 19 bytes
+	pkgEntryFormatOffset    = 40 // 4 bytes
+	pkgEntryFormatLen       = 44 // 4 bytes
+	pkgEntryTextOffset      = 48 // 4 bytes
+	pkgEntryTextLen         = 52 // 4 bytes
+	pkgEntryPMFormatOffset  = 56 // 4 bytes
+	pkgEntryPMFormatLen     = 60 // 4 bytes
+
+	// Inside the CP 0x380B body the offset fields are written "as
+	// if" there were a 6-byte LL/CP wrapper preceding the body --
+	// matching JT400's `(offset_ - 6) + offset` indexing trick.
+	// We unfold by subtracting 6 from each stored offset before
+	// indexing into the body slice. Length fields are NOT adjusted
+	// (they're the raw region byte counts).
+	packageOffsetBias = 6
+
+	// JT400 treats length=6 (the LL/CP wrapper bytes alone) and
+	// length=0 as "no data here" for the format / pm-format regions.
+	// See DBReplyPackageInfo.java:getDataFormat.
+	packageEmptyFormatLen = 6
+)
+
+// CCSID written into the CP 0x380B header at offset+4. 0x34b0 =
+// 13488 (UCS-2 BE), which is the only value our V7R6M0 fixtures
+// have observed; JT400's DBReplyPackageInfo treats it as
+// authoritative for both the SQL text and the statement-name
+// decoding. Defined as a named constant so future expansion to
+// CCSID 1200 (UTF-16 BE) or 37 (US EBCDIC) lands as a switch.
+const packageHeaderCCSIDOffset = 4
+
+// SQLDA layout inside the format / pm-format region of a package
+// entry. JT400's DBSQLDADataFormat.java reads:
+//
+//	+0..+13 8 bytes EBCDIC "SQLDA   " + 6 bytes header
+//	+14..+15 numberOfFields (uint16 BE)
+//	+16+     per-field fixed records of 80 bytes
+//
+// Each per-field record:
+//
+//	+0..+1   SQL type (uint16 BE)
+//	+2..+3   length (uint16 BE; high byte = precision)
+//	+3        scale (byte; same byte as length low)
+//	+18..+19 CCSID (uint16 BE) -- relative to SQLDA start +34 minus 16
+//	+32      parameter direction byte (EBCDIC 'I'=C9 / 'O'=D6 / 'B'=C2)
+//	+48..+49 name length (uint16 BE)
+//	+50..    name bytes (job CCSID)
+const (
+	sqldaHeaderLen          = 16
+	sqldaFieldRecordLen     = 80 // REPEATED_LENGTH_ in JT400
+	sqldaNumberOfFieldsHigh = 14 // numberOfFields lives at SQLDA+14..+15
+	// per-field offsets, relative to the start of the 80-byte record
+	sqldaFieldSQLType    = 0
+	sqldaFieldLength     = 2
+	sqldaFieldScale      = 3
+	sqldaFieldPrecision  = 2
+	sqldaFieldCCSID      = 18
+	sqldaFieldParamType  = 32
+	sqldaFieldNameLength = 48
+	sqldaFieldNameStart  = 50
+)
+
+// SQLDA "magic" prefix in EBCDIC. JT400's DBSQLDADataFormat doesn't
+// itself check this, but our parser validates the marker so a
+// malformed payload surfaces with a useful error instead of garbage
+// SQL types.
+var sqldaMagicPrefix = []byte{0xe2, 0xd8, 0xd3, 0xc4, 0xc1} // "SQLDA"
+
+// ParsePackageInfo decodes the CP 0x380B (package info) reply body
+// into a slice of PackageStatement values. The body is what
+// SendReturnPackage receives as the cpPackageReplyInfo CP's payload.
+//
+// Layout (from JT400 DBReplyPackageInfo.java):
+//
+//	+0..3   total length      (uint32 BE; matches len(body))
+//	+4..5   CCSID             (uint16 BE; 13488 in our fixtures)
+//	+6..23  default collection (18 bytes, EBCDIC blank-padded)
+//	+24..25 statement count   (uint16 BE)
+//	+26..41 reserved          (16 bytes, all zero in fixtures)
+//	+42..   per-statement entries, fixed 64-byte stride
+//
+// Each entry's variable-length SQL text + SQLDA format regions live
+// past the last entry record; offsets are written assuming a 6-byte
+// LL/CP wrapper precedes the body.
+//
+// Returns an error if the body is shorter than the declared total
+// length or the statement count cannot be reconciled with the entry
+// records present.
+func ParsePackageInfo(body []byte) ([]PackageStatement, error) {
+	if len(body) < packageEntryHeaderLen {
+		return nil, fmt.Errorf("hostserver: CP 0x380B body too short: %d bytes", len(body))
+	}
+	be := binary.BigEndian
+	totalLen := be.Uint32(body[0:4])
+	if int(totalLen) > len(body) {
+		return nil, fmt.Errorf("hostserver: CP 0x380B total_length=%d exceeds body=%d", totalLen, len(body))
+	}
+	headerCCSID := be.Uint16(body[packageHeaderCCSIDOffset : packageHeaderCCSIDOffset+2])
+	count := be.Uint16(body[24:26])
+	if count == 0 {
+		return nil, nil
+	}
+	// Sanity: the entry records alone must fit in totalLen.
+	if int(totalLen) < packageEntryHeaderLen+int(count)*packageEntrySize {
+		return nil, fmt.Errorf("hostserver: CP 0x380B truncated: total=%d count=%d (need >= %d)",
+			totalLen, count, packageEntryHeaderLen+int(count)*packageEntrySize)
+	}
+
+	out := make([]PackageStatement, 0, count)
+	for i := 0; i < int(count); i++ {
+		entryOff := packageEntryHeaderLen + i*packageEntrySize
+		eb := body[entryOff : entryOff+packageEntrySize]
+
+		nameBytes := make([]byte, 18)
+		copy(nameBytes, eb[pkgEntryStatementName:pkgEntryStatementName+18])
+		nameStr, err := ebcdic.CCSID37.Decode(nameBytes)
+		if err != nil {
+			// CCSID37 covers IBM i statement-name characters
+			// (uppercase + digits + a few punct); a decode failure
+			// here means corrupt bytes, surface it.
+			return nil, fmt.Errorf("hostserver: CP 0x380B entry %d name decode: %w", i, err)
+		}
+		ps := PackageStatement{
+			Name:                   strings.TrimRight(nameStr, " "),
+			NameBytes:              nameBytes,
+			StatementType:          be.Uint16(eb[pkgEntryStatementType : pkgEntryStatementType+2]),
+			NeedsDefaultCollection: eb[pkgEntryNeedsCollection],
+		}
+
+		textOff := be.Uint32(eb[pkgEntryTextOffset : pkgEntryTextOffset+4])
+		textLen := be.Uint32(eb[pkgEntryTextLen : pkgEntryTextLen+4])
+		if textLen > 0 {
+			start, err := unbiasPackageOffset(textOff, textLen, uint32(len(body)))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d text: %w", i, err)
+			}
+			ps.SQLText, err = decodePackageText(body[start:start+int(textLen)], headerCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d text decode: %w", i, err)
+			}
+		}
+
+		fmtOff := be.Uint32(eb[pkgEntryFormatOffset : pkgEntryFormatOffset+4])
+		fmtLen := be.Uint32(eb[pkgEntryFormatLen : pkgEntryFormatLen+4])
+		if fmtLen > packageEmptyFormatLen {
+			start, err := unbiasPackageOffset(fmtOff, fmtLen, uint32(len(body)))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d data-format: %w", i, err)
+			}
+			raw := body[start : start+int(fmtLen)]
+			cols, err := parsePackageSQLDADataFormat(raw)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d data-format: %w", i, err)
+			}
+			ps.DataFormat = cols
+			ps.RawDataFormat = append([]byte(nil), raw...)
+		}
+
+		pmOff := be.Uint32(eb[pkgEntryPMFormatOffset : pkgEntryPMFormatOffset+4])
+		pmLen := be.Uint32(eb[pkgEntryPMFormatLen : pkgEntryPMFormatLen+4])
+		if pmLen > packageEmptyFormatLen {
+			start, err := unbiasPackageOffset(pmOff, pmLen, uint32(len(body)))
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d pm-format: %w", i, err)
+			}
+			raw := body[start : start+int(pmLen)]
+			markers, err := parsePackageSQLDAParameterMarkerFormat(raw)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: CP 0x380B entry %d pm-format: %w", i, err)
+			}
+			ps.ParameterMarkerFormat = markers
+			ps.RawParameterMarkerFormat = append([]byte(nil), raw...)
+		}
+
+		out = append(out, ps)
+	}
+	return out, nil
+}
+
+// unbiasPackageOffset converts a stored offset (which assumes a
+// 6-byte LL/CP wrapper precedes the body) into a valid index into
+// the body slice, validating it against the region length.
+func unbiasPackageOffset(off, regionLen, bodyLen uint32) (int, error) {
+	if off < packageOffsetBias {
+		return 0, fmt.Errorf("offset %d below LL/CP bias of %d", off, packageOffsetBias)
+	}
+	start := off - packageOffsetBias
+	if start+regionLen > bodyLen {
+		return 0, fmt.Errorf("region [%d,%d) past body len %d", start, start+regionLen, bodyLen)
+	}
+	return int(start), nil
+}
+
+// decodePackageText decodes a SQL-text region inside the package
+// payload using the package header's CCSID. JT400 supports CCSIDs 37
+// (US EBCDIC) and 13488 (UCS-2 BE) here; our V7R6M0 fixtures only
+// ship 13488, so we implement that path and reject anything else
+// with a typed error.
+func decodePackageText(raw []byte, ccsid uint16) (string, error) {
+	switch ccsid {
+	case 13488, 1200:
+		// UCS-2 BE / UTF-16 BE -- text is N UCS-2 code units. The
+		// region may have trailing zero padding past the last real
+		// character; trim that before decoding so the resulting Go
+		// string doesn't carry NUL runs.
+		if len(raw)%2 != 0 {
+			return "", fmt.Errorf("UCS-2 text length %d is not even", len(raw))
+		}
+		codes := make([]uint16, 0, len(raw)/2)
+		for i := 0; i+1 < len(raw); i += 2 {
+			c := binary.BigEndian.Uint16(raw[i : i+2])
+			if c == 0 {
+				break
+			}
+			codes = append(codes, c)
+		}
+		return string(utf16.Decode(codes)), nil
+	case 37:
+		// Trim trailing zero bytes; then EBCDIC decode.
+		end := len(raw)
+		for end > 0 && raw[end-1] == 0 {
+			end--
+		}
+		return ebcdic.CCSID37.Decode(raw[:end])
+	default:
+		return "", fmt.Errorf("unsupported package text CCSID %d", ccsid)
+	}
+}
+
+// parsePackageSQLDADataFormat decodes the SQLDA-format bytes from a
+// package data-format region into SelectColumn descriptors. Mirrors
+// JT400's DBSQLDADataFormat field-by-field. Returns nil/nil when
+// the SQLDA holds zero fields.
+func parsePackageSQLDADataFormat(raw []byte) ([]SelectColumn, error) {
+	numFields, err := validateSQLDAHeader(raw)
+	if err != nil {
+		return nil, err
+	}
+	if numFields == 0 {
+		return nil, nil
+	}
+	be := binary.BigEndian
+	cols := make([]SelectColumn, 0, numFields)
+	for i := 0; i < numFields; i++ {
+		base := sqldaHeaderLen + i*sqldaFieldRecordLen
+		sqlType := be.Uint16(raw[base+sqldaFieldSQLType : base+sqldaFieldSQLType+2])
+		length := uint32(be.Uint16(raw[base+sqldaFieldLength : base+sqldaFieldLength+2]))
+		precision := uint16(raw[base+sqldaFieldPrecision])
+		scale := uint16(raw[base+sqldaFieldScale])
+		ccsid := be.Uint16(raw[base+sqldaFieldCCSID : base+sqldaFieldCCSID+2])
+		col := SelectColumn{
+			SQLType:   sqlType,
+			Length:    length,
+			Scale:     scale,
+			Precision: precision,
+			CCSID:     ccsid,
+		}
+		name, err := readSQLDAFieldName(raw, base)
+		if err == nil {
+			col.Name = name
+		}
+		col.TypeName, col.DisplaySize, col.Signed = sqlTypeMetadata(col.SQLType, col.Length, col.Precision, col.Scale)
+		col.Nullable = col.SQLType%2 == 1
+		cols = append(cols, col)
+	}
+	return cols, nil
+}
+
+// parsePackageSQLDAParameterMarkerFormat decodes the SQLDA bytes
+// from a package pm-format region into ParameterMarkerField shapes.
+// JT400's DBSQLDADataFormat returns -1 for LOBLocator/LOBMaxSize on
+// SQLDA, matching the package-storage rule that LOBs trigger a
+// re-prepare; we leave both zero.
+func parsePackageSQLDAParameterMarkerFormat(raw []byte) ([]ParameterMarkerField, error) {
+	numFields, err := validateSQLDAHeader(raw)
+	if err != nil {
+		return nil, err
+	}
+	if numFields == 0 {
+		return nil, nil
+	}
+	be := binary.BigEndian
+	out := make([]ParameterMarkerField, 0, numFields)
+	for i := 0; i < numFields; i++ {
+		base := sqldaHeaderLen + i*sqldaFieldRecordLen
+		f := ParameterMarkerField{
+			SQLType:     be.Uint16(raw[base+sqldaFieldSQLType : base+sqldaFieldSQLType+2]),
+			FieldLength: uint32(be.Uint16(raw[base+sqldaFieldLength : base+sqldaFieldLength+2])),
+			Precision:   uint16(raw[base+sqldaFieldPrecision]),
+			Scale:       uint16(raw[base+sqldaFieldScale]),
+			CCSID:       be.Uint16(raw[base+sqldaFieldCCSID : base+sqldaFieldCCSID+2]),
+			ParamType:   sqldaParamDirection(raw[base+sqldaFieldParamType]),
+		}
+		if name, err := readSQLDAFieldName(raw, base); err == nil {
+			f.Name = name
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// validateSQLDAHeader checks the 16-byte SQLDA header and returns
+// the number-of-fields field. The "SQLDA" EBCDIC magic is
+// mandatory: a body that doesn't start with it is from a
+// non-SQLDA descriptor variant we don't support yet.
+func validateSQLDAHeader(raw []byte) (int, error) {
+	if len(raw) < sqldaHeaderLen {
+		return 0, fmt.Errorf("SQLDA region too short: %d bytes", len(raw))
+	}
+	if !bytesHasPrefix(raw, sqldaMagicPrefix) {
+		return 0, fmt.Errorf("SQLDA region missing %q magic prefix (first bytes: %x)",
+			"SQLDA", raw[:5])
+	}
+	numFields := int(binary.BigEndian.Uint16(raw[sqldaNumberOfFieldsHigh : sqldaNumberOfFieldsHigh+2]))
+	if numFields < 0 || numFields > 1<<16 {
+		return 0, fmt.Errorf("SQLDA implausible field count %d", numFields)
+	}
+	want := sqldaHeaderLen + numFields*sqldaFieldRecordLen
+	if len(raw) < want {
+		return 0, fmt.Errorf("SQLDA truncated: have %d bytes, need >= %d for %d fields",
+			len(raw), want, numFields)
+	}
+	return numFields, nil
+}
+
+// bytesHasPrefix avoids importing the "bytes" package just for one
+// HasPrefix call (db_package.go already pulls "binary" / "strings"
+// and that's plenty).
+func bytesHasPrefix(b, prefix []byte) bool {
+	if len(b) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if b[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sqldaParamDirection maps the EBCDIC direction byte JT400 stores
+// at SQLDA field offset +32 to the 0xF0/0xF1/0xF2 surface our
+// PreparedParam.ParamType uses elsewhere in the package.
+//
+//	'I' (0xC9) -> 0xF0 (input)
+//	'O' (0xD6) -> 0xF1 (output)
+//	'B' (0xC2) -> 0xF2 (inout)
+//
+// Anything else falls back to "input" (matches DBSQLDADataFormat's
+// default switch arm).
+func sqldaParamDirection(b byte) byte {
+	switch b {
+	case 0xD6:
+		return 0xF1
+	case 0xC2:
+		return 0xF2
+	default:
+		return 0xF0
+	}
+}
+
+// readSQLDAFieldName returns the name stored in a SQLDA per-field
+// record. The name length lives at sqldaFieldNameLength (uint16 BE)
+// and the bytes follow at sqldaFieldNameStart. JT400 decodes with
+// the connection's job CCSID; we default to CCSID 37 (US EBCDIC),
+// matching what our IBM Cloud V7R6M0 LPAR has been seen to use for
+// these auto-generated marker names ("00001", "00002", ...).
+func readSQLDAFieldName(raw []byte, fieldBase int) (string, error) {
+	be := binary.BigEndian
+	if fieldBase+sqldaFieldNameStart > len(raw) {
+		return "", fmt.Errorf("field record %d truncated", fieldBase)
+	}
+	nameLen := int(be.Uint16(raw[fieldBase+sqldaFieldNameLength : fieldBase+sqldaFieldNameLength+2]))
+	if nameLen == 0 {
+		return "", nil
+	}
+	start := fieldBase + sqldaFieldNameStart
+	if start+nameLen > len(raw) {
+		return "", fmt.Errorf("field name overruns record: start=%d len=%d raw=%d", start, nameLen, len(raw))
+	}
+	return ebcdic.CCSID37.Decode(raw[start : start+nameLen])
 }
 
 // ebcdicVarStringBytes converts s to EBCDIC bytes for the given
