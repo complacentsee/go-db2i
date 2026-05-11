@@ -12,6 +12,55 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-1 fuzz tests covering the wire-touching parsers most likely to
+  mishandle adversarial input: `internal/wirelog.ParseJTOpenTrace`,
+  `hostserver.ParseDBReply`, `hostserver.decompressRLE1`,
+  `hostserver.decompressDataStreamRLE`, and `driver.parseDSN`. Each
+  fuzzer seeds from the committed fixtures + unit-test payloads and
+  was run for ≥60 s against the live build. Total ≥4M execs across
+  the five corpora; no panics. Two fuzz-found inputs preserved as
+  regression seeds under `driver/testdata/fuzz/FuzzParseDSN/` and
+  `hostserver/testdata/fuzz/FuzzParseDBReply/`. The fuzzers surfaced
+  three real hardening defects, all fixed in this same milestone (see
+  Fixed section below).
+
+### Fixed
+
+- `unwrapCompressedReply` and `parseLOBReply` now reject a
+  wire-declared decompressed length exceeding 64 MiB before calling
+  the RLE-1 decompressor. Pre-fix, a hostile or malformed
+  `RETRIEVE_LOB_DATA` / CP 0x3832-wrapped reply could declare a
+  4-byte length near 2 GiB and trigger an unbounded `make([]byte,
+  expectedLen)` inside the decompressor, which would panic the Go
+  process on any reasonably sized host. JT400 sidesteps this by
+  trusting the JVM to raise OutOfMemoryError; Go callers don't have
+  that safety net. The 64 MiB cap is two orders of magnitude above
+  the LOB block size (1 MiB) and well above any host-server reply
+  goJTOpen has captured. Pinned via
+  `TestParseDBReplyCompressedLengthCapped`; surfaced by
+  `FuzzParseDBReply`.
+- `ParseDBReply` always returns a non-nil `DBParam.Data` slice, even
+  for header-only params (LL == 6). Pre-fix,
+  `append([]byte(nil), emptyData...)` returned nil for empty data,
+  so callers iterating reply params had to distinguish `Data == nil`
+  from "empty payload" -- a footgun the wire shape never demanded.
+  Live wire replies have never been observed to ship LL == 6 params,
+  but the fuzzer found that an attacker-controlled reply could; the
+  fix is to always allocate a fresh, retainable backing array.
+  Pinned via the regression seed at
+  `hostserver/testdata/fuzz/FuzzParseDBReply/5c5762c2c1a948f8`.
+- `parseDSN` rejects port 0 / port > 65535 (for both the URL `:port`
+  and `?signon-port=N`) and an empty username (e.g. `gojtopen://@h/`)
+  at parse time rather than letting the failure surface as an
+  opaque "signon rejected" error from the host server later. New
+  negative cases pinned in `TestParseDSNRejectsBadInputs/{empty_user,
+  port_zero, port_over_65535, signon-port_zero}`; surfaced by
+  `FuzzParseDSN`. Live-validated: plaintext conformance suite
+  (`GOJTOPEN_DSN` against IBM Cloud V7R6M0, ~151 s, full pass) still
+  green after the parser tightenings.
+
+### Added
+
 - LOB *bind* via parameter markers. `db.Exec("INSERT INTO t (id, b)
   VALUES (?, ?)", id, payload)` now writes BLOB / CLOB / DBCLOB
   columns through the JT400 `WRITE_LOB_DATA` (function `0x1817`)

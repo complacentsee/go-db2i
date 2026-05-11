@@ -602,10 +602,24 @@ citations.
 
 ### M8 — Hardening, observability, docs (~2-3 weeks)
 
-- `slog` integration in the driver layer.
-- OpenTelemetry spans on `Query`/`Exec`.
-- Fuzz tests on `wirelog.ParseJTOpenTrace` and the DB reply parser.
-- godoc, migration guide from JTOpen DSN, performance tuning notes.
+Track A (foundations):
+
+- **M8-1 Fuzz tests** ✅ 2026-05-11 — `testing.F` corpora seeded
+  against `internal/wirelog.ParseJTOpenTrace`,
+  `hostserver.ParseDBReply`, `hostserver.decompressRLE1`,
+  `hostserver.decompressDataStreamRLE`, and `driver.parseDSN`. Five
+  fuzzers, ≥60 s each. Surfaced and fixed three hardening defects:
+  unbounded preallocation in `unwrapCompressedReply` /
+  `parseLOBReply` (now capped at 64 MiB), `DBParam.Data` returning
+  nil for header-only params, and `parseDSN` accepting port 0 plus
+  empty username. Two fuzz-found corpus seeds preserved as
+  regression gates (`driver/testdata/fuzz/FuzzParseDSN/...`,
+  `hostserver/testdata/fuzz/FuzzParseDBReply/...`).
+- **M8-2 godoc audit** ⏳
+- **M8-3 slog integration** ⏳
+- **M8-4 OpenTelemetry spans** ⏳
+- **M8-5 JTOpen DSN migration guide** ⏳
+- **M8-6 Performance tuning notes** ⏳
 
 **Total remaining: ~14-22 weeks.** The original 17-25 week M0-M8
 estimate net of M0/M1 gives us roughly the same window.

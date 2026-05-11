@@ -299,7 +299,7 @@ func parseDSN(dsn string) (*Config, error) {
 	if u.Scheme != "gojtopen" {
 		return nil, fmt.Errorf("scheme %q not recognised (want gojtopen)", u.Scheme)
 	}
-	if u.User == nil {
+	if u.User == nil || u.User.Username() == "" {
 		return nil, fmt.Errorf("DSN missing user info -- expected gojtopen://USER:PWD@HOST/...")
 	}
 	cfg := DefaultConfig()
@@ -315,6 +315,9 @@ func parseDSN(dsn string) (*Config, error) {
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid port %d (want 1..65535)", port)
 		}
 		cfg.DBPort = port
 	}
@@ -360,6 +363,9 @@ func parseDSN(dsn string) (*Config, error) {
 		port, err := strconv.Atoi(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid signon-port %q: %w", v, err)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid signon-port %d (want 1..65535)", port)
 		}
 		cfg.SignonPort = port
 	}

@@ -242,6 +242,20 @@ func parseLOBReply(rep *DBReply) (*LOBData, error) {
 			if out.CCSID == 13488 || out.CCSID == 1200 {
 				expectedRaw = actualLen * 2
 			}
+			// Guard against a wire-declared actualLen large enough
+			// to OOM the process when the decompressor preallocates
+			// the output buffer. 64 MiB ceiling is two orders of
+			// magnitude above a typical LOB block; any single
+			// RETRIEVE_LOB_DATA reply exceeding this is malformed
+			// or hostile. Wire payloads carrying their actual length
+			// (len(payload) == expectedRaw) bypass the allocation
+			// path and so don't need this check, but we apply it
+			// uniformly for defence-in-depth.
+			const maxLOBExpectedLen = 64 * 1024 * 1024
+			if expectedRaw < 0 || expectedRaw > maxLOBExpectedLen {
+				return nil, fmt.Errorf("hostserver: LOB actualLen %d (ccsid=%d, expectedRaw=%d) exceeds cap %d",
+					actualLen, out.CCSID, expectedRaw, maxLOBExpectedLen)
+			}
 			switch {
 			case len(payload) == expectedRaw:
 				// Raw passthrough. Copy so the caller can hold the

@@ -103,14 +103,18 @@ func TestParseDSNIsolations(t *testing.T) {
 
 func TestParseDSNRejectsBadInputs(t *testing.T) {
 	cases := map[string]string{
-		"wrong scheme":     "postgres://u:p@h/db",
-		"missing user":     "gojtopen://h:8471/",
-		"missing host":     "gojtopen://u:p@",
-		"bad port":         "gojtopen://u:p@h:notnumeric/",
-		"bad date format":  "gojtopen://u:p@h/?date=bogus",
-		"bad isolation":    "gojtopen://u:p@h/?isolation=bogus",
-		"bad signon-port":  "gojtopen://u:p@h/?signon-port=notanumber",
-		"bad lob mode":     "gojtopen://u:p@h/?lob=bogus",
+		"wrong scheme":      "postgres://u:p@h/db",
+		"missing user":      "gojtopen://h:8471/",
+		"empty user":        "gojtopen://@h:8471/",
+		"missing host":      "gojtopen://u:p@",
+		"bad port":          "gojtopen://u:p@h:notnumeric/",
+		"port zero":         "gojtopen://u:p@h:0/",
+		"port over 65535":   "gojtopen://u:p@h:99999/",
+		"bad date format":   "gojtopen://u:p@h/?date=bogus",
+		"bad isolation":     "gojtopen://u:p@h/?isolation=bogus",
+		"bad signon-port":   "gojtopen://u:p@h/?signon-port=notanumber",
+		"signon-port zero":  "gojtopen://u:p@h/?signon-port=0",
+		"bad lob mode":      "gojtopen://u:p@h/?lob=bogus",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {

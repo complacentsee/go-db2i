@@ -3,6 +3,7 @@ package hostserver
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +130,29 @@ func TestParseDBReplyCompressedMarkerShort(t *testing.T) {
 	be.PutUint32(payload[4:8], dataCompressedMask)
 	if _, err := ParseDBReply(payload); err == nil {
 		t.Fatal("expected error on too-short compressed payload, got nil")
+	}
+}
+
+// TestParseDBReplyCompressedLengthCapped rejects a payload whose
+// CP 0x3832 wrapper declares a decompressed length larger than the
+// 64 MiB cap. Without the cap, the underlying decompressor would
+// call make([]byte, expectedLen) and OOM-kill the process on any
+// box with less than ~4 GiB free. JT400 leaves the equivalent
+// allocation unchecked because the JVM raises OutOfMemoryError
+// rather than aborting; Go's make() panics, so we cap explicitly.
+func TestParseDBReplyCompressedLengthCapped(t *testing.T) {
+	be := binary.BigEndian
+	payload := make([]byte, 20+10) // template + bare wrap header
+	be.PutUint32(payload[4:8], dataCompressedMask)
+	be.PutUint32(payload[20:24], 10)              // ll = 10 (wrap header only)
+	be.PutUint16(payload[24:26], 0x3832)          // correct compression CP
+	be.PutUint32(payload[26:30], 1<<30)           // 1 GiB declared decompressed length
+	_, err := ParseDBReply(payload)
+	if err == nil {
+		t.Fatal("expected error on oversized declared decompressed length, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds cap") {
+		t.Fatalf("expected cap-mention error, got: %v", err)
 	}
 }
 

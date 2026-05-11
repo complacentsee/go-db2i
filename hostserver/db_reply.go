@@ -143,9 +143,16 @@ func ParseDBReply(payload []byte) (*DBReply, error) {
 		}
 		cp := be.Uint16(payload[pos+4 : pos+6])
 		data := payload[pos+6 : pos+int(ll)]
+		// Always allocate a fresh, non-nil backing array so callers
+		// can rely on Data being safe to retain after the underlying
+		// reply buffer is recycled, and on `Data == nil` not having
+		// to be distinguished from "empty payload" (LL=6 is a
+		// legitimate header-only param).
+		buf := make([]byte, len(data))
+		copy(buf, data)
 		rep.Params = append(rep.Params, DBParam{
 			CodePoint: cp,
-			Data:      append([]byte(nil), data...),
+			Data:      buf,
 		})
 		pos += int(ll)
 	}
@@ -180,6 +187,14 @@ func unwrapCompressedReply(payload []byte) ([]byte, error) {
 		tplLen         = 20
 		wrapHdrLen     = 10 // ll(4) + CP(2) + decompressed_len(4)
 		minWrapPayload = tplLen + wrapHdrLen
+		// maxDecompressedReplyLen guards the preallocation
+		// inside decompressDataStreamRLE against a malformed (or
+		// hostile) wire claiming a multi-GiB output size. 64 MiB
+		// is two orders of magnitude above LOB_BLOCK_SIZE (1 MiB)
+		// and well above any real-world host-server reply
+		// goJTOpen has captured. JT400 lets the JVM raise
+		// OutOfMemoryError; Go's make() would panic the process.
+		maxDecompressedReplyLen = 64 * 1024 * 1024
 	)
 	if len(payload) < minWrapPayload {
 		return nil, fmt.Errorf("hostserver: compressed reply too short: %d bytes (want >= %d)", len(payload), minWrapPayload)
@@ -189,7 +204,11 @@ func unwrapCompressedReply(payload []byte) ([]byte, error) {
 	if cp != cpDBDataCompressionRLE {
 		return nil, fmt.Errorf("hostserver: compressed reply CP 0x%04X (want 0x%04X)", cp, cpDBDataCompressionRLE)
 	}
-	decompressedLen := int(be.Uint32(payload[tplLen+6 : tplLen+10]))
+	decompressedLenU := be.Uint32(payload[tplLen+6 : tplLen+10])
+	if decompressedLenU > maxDecompressedReplyLen {
+		return nil, fmt.Errorf("hostserver: compressed reply declared decompressed length %d exceeds cap %d", decompressedLenU, maxDecompressedReplyLen)
+	}
+	decompressedLen := int(decompressedLenU)
 	compressed := payload[tplLen+wrapHdrLen:]
 	decompressed, err := decompressDataStreamRLE(compressed, decompressedLen)
 	if err != nil {
