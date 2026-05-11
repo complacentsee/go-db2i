@@ -1,13 +1,16 @@
 package driver_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	db2i "github.com/complacentsee/go-db2i/driver"
@@ -365,4 +368,122 @@ func Example_contextTimeout() {
 		log.Fatal(err)
 	}
 	defer rows.Close()
+}
+
+// Example_packageCache shows the minimal opt-in for v0.7.0 extended-
+// dynamic SQL packages + the v0.7.1 client-side cache-hit fast path.
+//
+// Wire flow on the first call against a fresh package:
+//
+//	CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + OPEN  (cache miss)
+//
+// After the first call, the server has filed the prepared plan in
+// MYLIB/APP9899 (10-char wire name = "APP" base + JT400-equal
+// suffix). Subsequent calls with byte-equal SQL hit the cache:
+//
+//	CREATE_RPB + CHANGE_DESCRIPTOR + OPEN-with-name-override  (cache hit)
+//
+// The cached 18-byte server-assigned statement name rides in CP
+// 0x3806 so the server runs the filed plan directly. See
+// docs/package-caching.md for the full setup + verification flow.
+func Example_packageCache() {
+	dsn := "db2i://USER:PASSWORD@host.example.com:8471/" +
+		"?library=MYLIB" +
+		"&extended-dynamic=true" +
+		"&package=APP" +
+		"&package-library=MYLIB" +
+		"&package-cache=true"
+	db, err := sql.Open("db2i", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// First call -- cache miss; server files the statement.
+	row := db.QueryRow(`SELECT label FROM mylib.things WHERE id = ?`, 42)
+	var label string
+	if err := row.Scan(&label); err != nil {
+		log.Fatal(err)
+	}
+
+	// Repeated identical SQL hits the cache. With a *slog.Logger
+	// attached, observe "db2i: query cache-hit" DEBUG lines.
+	for i := 0; i < 100; i++ {
+		_ = db.QueryRow(`SELECT label FROM mylib.things WHERE id = ?`, i).Scan(&label)
+	}
+}
+
+// Example_packageCacheObservability shows how to assert cache-hit
+// dispatch happened, either in unit tests or in a structured-log
+// pipeline. A *bytes.Buffer-backed slog handler captures every
+// DEBUG line the driver emits; the cache-hit dispatch is marked
+// by the message text "db2i: exec cache-hit" or
+// "db2i: query cache-hit" plus the op attr
+// (EXECUTE_PREPARED_CACHED / OPEN_SELECT_PREPARED_CACHED).
+//
+// In production, replace bytes.Buffer with whatever sink your
+// observability stack uses (slog.NewJSONHandler to stderr,
+// otelslog.NewHandler for OTel logs SDK, etc.).
+func Example_packageCacheObservability() {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	cfg := db2i.DefaultConfig()
+	cfg.Host = "host.example.com"
+	cfg.User = "USER"
+	cfg.Password = "PASSWORD"
+	cfg.Library = "MYLIB"
+	cfg.ExtendedDynamic = true
+	cfg.PackageName = "APP"
+	cfg.PackageLibrary = "MYLIB"
+	cfg.PackageCache = true
+	cfg.Logger = logger
+
+	connector, err := db2i.NewConnector(&cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+
+	const q = `SELECT 1 FROM SYSIBM.SYSDUMMY1`
+	_ = db.QueryRow(q).Scan(new(int)) // miss
+	_ = db.QueryRow(q).Scan(new(int)) // hit
+
+	// Cross-check in tests / log pipelines:
+	if !strings.Contains(buf.String(), "db2i: query cache-hit") {
+		log.Println("expected cache-hit dispatch; check package-criteria " +
+			"and that the SQL text byte-equals the previous call")
+	}
+}
+
+// Example_packageCacheCriteria shows the package-criteria knob.
+// Default rejects unparameterised SELECT (zero markers) -- the
+// SELECT below would NOT be filed. package-criteria=select adds
+// it to the cache pool, matching JT400's broader filter.
+//
+// Use "select" when your workload has many identical zero-
+// parameter SELECTs (typical of dashboards refreshing the same
+// metric). Use "default" (the JT400 default) to minimise *PGM
+// size in workloads where unparameterised SQL varies.
+func Example_packageCacheCriteria() {
+	dsn := "db2i://USER:PASSWORD@host.example.com:8471/" +
+		"?library=MYLIB" +
+		"&extended-dynamic=true" +
+		"&package=APP" +
+		"&package-library=MYLIB" +
+		"&package-cache=true" +
+		"&package-criteria=select"
+	db, err := sql.Open("db2i", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// Filed under "select" criteria; would be rejected under "default".
+	row := db.QueryRow(`SELECT CURRENT_TIMESTAMP FROM SYSIBM.SYSDUMMY1`)
+	var ts time.Time
+	_ = row.Scan(&ts)
 }

@@ -934,6 +934,13 @@ final class Cases {
             p.put("extended dynamic", "true");
             p.put("package", PACKAGE_NAME);
             p.put("package library", schema);
+            // package add=true is REQUIRED for JT400 to issue the
+            // WRITE_SQL_STATEMENT_TEXT wire request that files the
+            // PREPAREd plan into the *PGM. Without it the package is
+            // created but never accumulates entries -- confirmed
+            // against IBM Cloud V7R6M0 on 2026-05-11.
+            p.put("package add", "true");
+            p.put("package criteria", "default");
             // Subclasses overriding this should call super and then put
             // their own keys on top.
             return p;

@@ -170,6 +170,64 @@ trust boundary; the first-connect overhead is amortised by the
 pool's connection lifetime, and on-the-wire metadata (CCSID, user
 ID, SQL text) is otherwise transmitted in clear EBCDIC.
 
+## Extended-dynamic SQL package caching
+
+`?extended-dynamic=true&package=APP&package-cache=true` files every
+PREPAREd statement into a server-side `*PGM` and dispatches a
+cache-hit fast path that skips PREPARE_DESCRIBE for any SQL that
+byte-equals a previously filed entry. The full conceptual guide
+lives in [`package-caching.md`](./package-caching.md); this section
+covers the perf characteristics.
+
+### Wire round-trip saving
+
+| Path | Frames per call |
+|---|---|
+| Cache miss | `CREATE_RPB` + `PREPARE_DESCRIBE` + `CHANGE_DESCRIPTOR` + `EXECUTE`/`OPEN` (4 round-trips) |
+| Cache hit | `CREATE_RPB` + `CHANGE_DESCRIPTOR` + `EXECUTE`/`OPEN` with name override in CP `0x3806` (3 round-trips) |
+
+One round-trip saved per call. The percentage saving depends on
+latency to the LPAR — on a high-latency tunnel (cross-region IBM
+Cloud SSH tunnel) the v0.7.1 smoke test measured warm-up at ~514 ms
+and steady-state cache hits at ~104 ms (~4× speed-up). On an
+LPAR-local network the saving is closer to ~10-20%; the
+PREPARE_DESCRIBE frame is doing real plan-compilation work, not
+just a round-trip.
+
+### When to opt out
+
+- **SQL text varies every call.** ORMs that interpolate
+  identifiers instead of using `?` parameter markers produce
+  unique strings — every call misses, every call adds an entry,
+  the `*PGM` grows without bound.
+- **High deploy churn.** If you redeploy frequently and the SQL
+  text shifts between releases, the stale cached entries waste
+  `*PGM` storage without benefit. `DLTPGM` between deploys or
+  set `package-cache=false` on the leading edge.
+- **Mixed-criteria workload.** If 90% of your SQL is unparameterised
+  ad-hoc queries, `package-criteria=select` will fill the `*PGM`
+  with entries that miss anyway. Stay on `default` (parameterised
+  only).
+
+### Verifying cache hits in production
+
+Inject a `*slog.Logger` at INFO+; cache-hits emit DEBUG only, so
+their cost is the LevelDebug filter check (a few ns when filtered
+out). To audit the cache during diagnosis, set the handler level
+to DEBUG and grep for `"db2i: query cache-hit"` /
+`"db2i: exec cache-hit"`. The `cached_name` attribute is the
+18-byte server-assigned statement name; cross-reference against
+`QSYS2.SYSPACKAGESTMT.statement_name` for the matching SQL text.
+
+OTel users see the same signal via the span's
+`db.operation.name` attribute — `EXECUTE_PREPARED_CACHED` /
+`OPEN_SELECT_PREPARED_CACHED` on hit, `EXECUTE_PREPARED` /
+`OPEN_SELECT_PREPARED` on miss.
+
+Reference: `test/conformance/cache_hit_test.go` exercises 12
+scenarios across the JDBC type matrix and asserts the slog probe
+on each cache-hit dispatch.
+
 ## Lazy iteration via `Rows.Next`
 
 `Rows.Next` pulls one row at a time from the underlying
@@ -225,3 +283,4 @@ the picture.
 - `hostserver/db_lob_rle_test.go` — RLE compression decompressor coverage.
 - `docs/lob-known-gaps.md` — the LOB-side history for the compression / threshold knobs.
 - `docs/configuration.md` — the full DSN reference.
+- `docs/package-caching.md` — operator's guide for extended-dynamic + cache-hit dispatch.

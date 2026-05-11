@@ -81,6 +81,18 @@ type DBAttributesOptions struct {
 	// bigger LOBs and skip the RETRIEVE_LOB_DATA round trip for
 	// repetitive small-LOB workloads.
 	LOBThreshold uint32
+
+	// ExtendedDynamic tells SET_SQL_ATTRIBUTES to emit the full
+	// JT400 wire shape that JT400's AS400JDBCConnectionImpl uses
+	// when the JDBC URL set "extended dynamic=true". JT400 emits 5
+	// additional date/time/separator CPs (0x3807-0x380B) with the
+	// session's defaults so the server has a definite value to feed
+	// into the package-suffix derivation, instead of relying on the
+	// job-default fallback. v0.7.2 live testing against IBM Cloud
+	// V7R6M0 confirmed: without these 5 extras the server doesn't
+	// file PREPAREd statements into the *PGM even with otherwise
+	// byte-identical wire shape.
+	ExtendedDynamic bool
 }
 
 // DateFormat constants for DBAttributesOptions.DateFormat. The
@@ -285,9 +297,44 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		// changes based on the option, but JT400 always emits the
 		// CP so byte-equality tests rely on it being present.
 		DBParamShort(0x380E, isolationLevelWireValue(opts.IsolationLevel)),
+	}
+	// CP 0x3807 (DateFormatParserOption) + CP 0x3808
+	// (DateSeparatorParserOption). Sent as 2-byte shorts only when
+	// the user picks an explicit format -- omitted for JOB so the
+	// server falls back to its job default. Mirrors JTOpen's
+	// AS400JDBCConnectionImpl.java which calls
+	// setDateFormatParserOption only when the JDBC URL set
+	// "date format". Same shape for the separator.
+	//
+	// Exception: ExtendedDynamic=true forces emission of all 5
+	// date/time/separator CPs (0x3807-0x380B) with JT400's
+	// JDBC-default values so the server's package-suffix derivation
+	// has a definite value to key on. JT400's
+	// AS400JDBCConnectionImpl follows the same pattern when
+	// "extended dynamic=true" -- v0.7.2 live testing against IBM
+	// Cloud V7R6M0 showed without these the server doesn't file
+	// PREPAREd statements into the *PGM even with otherwise
+	// byte-identical wire shape on the PREPARE_DESCRIBE itself.
+	// Wire order must match JT400's: 0x3807-0x380B come immediately
+	// after 0x380E and before 0x380C/0x3823/0x380F.
+	if opts.ExtendedDynamic {
+		params = append(params,
+			DBParamShort(0x3807, 0x0001), // DateFormatParserOption: mdy
+			DBParamShort(0x3808, 0x0000), // DateSeparatorParserOption: slash
+			DBParamShort(0x3809, 0x0000), // TimeFormatParserOption: hms
+			DBParamShort(0x380A, 0x0000), // TimeSeparatorParserOption: colon
+			DBParamShort(0x380B, 0x0000), // DecimalSeparatorParserOption: period
+		)
+	} else if idx, ok := dateFormatParserIndex(opts.DateFormat); ok {
+		params = append(params, DBParamShort(0x3807, idx))
+		if sep, ok := dateSeparatorParserIndex(opts.DateFormat); ok {
+			params = append(params, DBParamShort(0x3808, sep))
+		}
+	}
+	params = append(params,
 		DBParamShort(0x380C, 0x0000),
 		DBParamShort(0x3823, 0x0000),
-	}
+	)
 	// 0x380F default SQL library -- variable-length CCSID-tagged.
 	// JTOpen sends this when the JDBC URL specifies libraries=;
 	// our default omits it.
@@ -297,19 +344,6 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 			return Header{}, nil, fmt.Errorf("hostserver: encode default SQL library: %w", err)
 		}
 		params = append(params, DBParamVarString(0x380F, 273, dlBytes))
-	}
-	// CP 0x3807 (DateFormatParserOption) + CP 0x3808
-	// (DateSeparatorParserOption). Sent as 2-byte shorts only when
-	// the user picks an explicit format -- omitted for JOB so the
-	// server falls back to its job default. Mirrors JTOpen's
-	// AS400JDBCConnectionImpl.java which calls
-	// setDateFormatParserOption only when the JDBC URL set
-	// "date format". Same shape for the separator.
-	if idx, ok := dateFormatParserIndex(opts.DateFormat); ok {
-		params = append(params, DBParamShort(0x3807, idx))
-		if sep, ok := dateSeparatorParserIndex(opts.DateFormat); ok {
-			params = append(params, DBParamShort(0x3808, sep))
-		}
 	}
 	params = append(params,
 		DBParamShort(0x3812, 0x0001),                                    // PackageAddStmtAllowed

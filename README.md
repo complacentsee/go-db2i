@@ -1,5 +1,10 @@
 # go-db2i
 
+> **Current: v0.7.2 (2026-05-11)** — extended-dynamic SQL package
+> caching live across the JDBC type matrix. See
+> [`docs/package-caching.md`](./docs/package-caching.md) for the
+> operator's guide and the `Example_packageCache*` godoc snippets.
+
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
 sidecar, no IBM client packages — just a Go binary that talks to the
@@ -73,17 +78,19 @@ implemented end-to-end:
 - OpenTelemetry spans (`Config.Tracer`) following the May 2025
   semantic-conventions refresh, with `*Db2Error` attributes for
   alerting routing
-- Extended-dynamic SQL package caching (`?extended-dynamic=true&package=APP`)
-  — the driver issues `CREATE_PACKAGE` on connect, adds CP 0x3804
-  to each `PREPARE_DESCRIBE`, and re-uses the server's `*PGM`
-  cache across reconnects. The 10-char wire name is byte-equal to
-  JT400 for the same session options, so a Go client and a Java
-  client targeting the same LPAR share one `*PGM`. See
-  [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
-  for the 9-key DSN surface (`extended-dynamic`, `package`,
-  `package-library`, `package-cache`, `package-error`,
-  `package-criteria`, `package-ccsid`, plus migration-friendly
-  `package-add` / `package-clear`).
+- Extended-dynamic SQL package caching + client-side cache-hit fast
+  path (`?extended-dynamic=true&package=APP&package-cache=true`).
+  v0.7.0 added the wire shape: `CREATE_PACKAGE` on connect, CP 0x3804
+  on `PREPARE_DESCRIBE`, server-side `*PGM` that accumulates plans.
+  v0.7.1 added the dispatch: on a byte-equal SQL hit against the
+  downloaded cache, `Stmt.Exec` / `Stmt.Query` skip `PREPARE_DESCRIBE`
+  and run via `ExecutePreparedCached` / `OpenSelectPreparedCached`
+  with the cached 18-byte server-assigned statement name in CP 0x3806
+  — one round-trip saved per call. The 10-char wire name is
+  byte-equal to JT400 for the same session options, so a Go client
+  and a Java client targeting the same LPAR share one `*PGM`.
+  Operator guide: [`docs/package-caching.md`](./docs/package-caching.md).
+  DSN surface: [`docs/configuration.md`](./docs/configuration.md).
 
 Out of scope (use the JTOpen Java jar for these):
 
@@ -124,6 +131,31 @@ db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 The `DB_PORT` segment defaults to 8471 (as-database). Library names
 are upper-cased on parse — IBM i schema lookups are case-insensitive
 but the wire format expects EBCDIC uppercase.
+
+## Examples
+
+Runnable [godoc examples](https://pkg.go.dev/github.com/complacentsee/go-db2i/driver)
+live in [`driver/example_test.go`](./driver/example_test.go):
+
+| Example | What it shows |
+|---|---|
+| `Example` | Open + Query basics |
+| `Example_largeResult` | Lazy `Rows.Next` iteration over a million-row SELECT |
+| `Example_transaction` | `db.Begin` / `tx.Commit` / `tx.Rollback` |
+| `Example_lastInsertId` | `Result.LastInsertId` via `IDENTITY_VAL_LOCAL()` |
+| `Example_call` | Stored procedure with IN parameters |
+| `Example_callWithOut` | Stored procedure with `sql.Out` |
+| `Example_callMultiResultSet` | `Rows.NextResultSet` |
+| `Example_db2Error` | Typed `*hostserver.Db2Error` + predicate helpers |
+| `Example_blobInsert` | BLOB locator-bind |
+| `Example_clobInsert` | CLOB EBCDIC bind |
+| `Example_lobValueStream` | Streamed `*LOBValue` insert |
+| `Example_lobReader` | Streamed `*LOBReader` read via `?lob=stream` |
+| `Example_dsnKnobs` | `?lob-threshold` / `?ccsid` / `?tls=true` together |
+| `Example_contextTimeout` | `context.WithTimeout` cancellation |
+| **`Example_packageCache`** *(v0.7.1)* | Extended-dynamic + cache-hit fast path enable |
+| **`Example_packageCacheObservability`** *(v0.7.1)* | slog probe pattern for cache-hit dispatch |
+| **`Example_packageCacheCriteria`** *(v0.7.1)* | `package-criteria=select` for unparameterised SELECT |
 
 ## Quick examples
 
@@ -198,8 +230,8 @@ if err != nil {
 
 | IBM i version | Status |
 |---|---|
-| V7R6 (7.6) | wire-validated (PBKDF2 / SHA-1, full feature set) |
-| V7R5 (7.5) | should work — same protocol level; not regularly tested |
+| V7R6 (7.6) | wire-validated on IBM Cloud V7R6M0 (PBKDF2 / SHA-1, full feature set). Note: extended-dynamic package filing is wire-correct on go-db2i and byte-identical to JT400, but the IBM Cloud V7R6M0 LPAR exhibits a server-side / JT400-client-heuristic that prevents fresh statement filing — see [`docs/package-caching.md`](./docs/package-caching.md). Cache-hit dispatch works correctly against any pre-populated `*SQLPKG`. |
+| V7R5 (7.5) | should work — same protocol level; full feature set including package filing (PUB400 V7R5M0 baseline) |
 | V7R4 (7.4) | should work; tested via PUB400 (some features auto-fallback) |
 | V7R3 (7.3) | should work via password levels 2/3 (SHA-1) |
 | ≤ V7R2 | DES auth path (levels 0/1) is implemented but spec-validated only — no live testing yet. PBKDF2 is unavailable on these servers anyway. |

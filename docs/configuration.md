@@ -25,6 +25,15 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `tls`                        | `false`      | Wraps both sockets in `crypto/tls`. Flips default ports to 9471/9476. |
 | `tls-insecure-skip-verify`   | `false`      | Disable cert verification (self-signed certs without SANs).           |
 | `tls-server-name`            | `host`       | Override the SNI / cert-verify hostname.                              |
+| `extended-dynamic`           | `false`      | Enable server-side `*PGM` package caching. See [`package-caching.md`](./package-caching.md). |
+| `package`                    | (none)       | Base package name (1-6 chars). Required when `extended-dynamic=true`. |
+| `package-library`            | `QGPL`       | Library housing the `*PGM` object. Must already exist (`CRTLIB`).     |
+| `package-cache`              | `false`      | Download the filed `*PGM` on connect and dispatch cache-hit fast path (v0.7.1). Requires `extended-dynamic=true`. |
+| `package-error`              | `warning`    | One of `warning`, `exception`, `none`. Policy for `CREATE_PACKAGE` / `RETURN_PACKAGE` failures. |
+| `package-criteria`           | `default`    | One of `default`, `select`. `select` adds unparameterised SELECT statements to the cache pool. |
+| `package-ccsid`              | `13488`      | CCSID for package-stored SQL text. Accepts `13488` (UCS-2 BE), `1200` (UTF-16 LE), or `0` (job default). |
+| `package-add`                | (ignored)    | JT400-compatibility key. Accepted but no-op; the driver always adds. |
+| `package-clear`              | (warn)       | JT400-compatibility key. Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. |
 
 ## TLS
 

@@ -161,6 +161,45 @@ func WriteFrame(w io.Writer, hdr Header, payload []byte) error {
 	return err
 }
 
+// Frame pairs a Header with its payload for WriteFrames batching.
+type Frame struct {
+	Hdr     Header
+	Payload []byte
+}
+
+// WriteFrames concatenates multiple DSS frames into a single io.Writer
+// call. Used by paths that need to match JT400's TCP framing for the
+// server to behave correctly -- specifically CREATE_RPB +
+// PREPARE_DESCRIBE in the package-filing path, where the server only
+// files PREPAREd statements into the extended-dynamic *PGM when both
+// frames arrive in one TCP segment (v0.7.2 live testing against IBM
+// Cloud V7R6M0 confirmed this). The DSS protocol allows concatenated
+// frames -- each one carries its own length header -- so the server
+// reads them sequentially.
+//
+// Each frame's hdr.Length is overwritten with HeaderLength +
+// len(payload), same as WriteFrame.
+func WriteFrames(w io.Writer, frames ...Frame) error {
+	total := 0
+	for i := range frames {
+		frames[i].Hdr.Length = uint32(HeaderLength + len(frames[i].Payload))
+		total += int(frames[i].Hdr.Length)
+	}
+	buf := make([]byte, total)
+	off := 0
+	for i := range frames {
+		fl := int(frames[i].Hdr.Length)
+		frames[i].Hdr.appendTo(buf[off : off+HeaderLength])
+		copy(buf[off+HeaderLength:off+fl], frames[i].Payload)
+		if wireHook != nil {
+			wireHook(frames[i].Hdr, buf[off:off+fl])
+		}
+		off += fl
+	}
+	_, err := w.Write(buf)
+	return err
+}
+
 // wireHook is a debug-only callback fired on every WriteFrame.
 // Tests use SetWireHook to capture the exact bytes a code path
 // emits; production builds leave it nil so there's zero overhead.

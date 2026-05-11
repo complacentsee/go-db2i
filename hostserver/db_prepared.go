@@ -434,7 +434,14 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
 	}
 
-	// --- 1) CREATE_RPB. ---
+	// --- 1) CREATE_RPB + 2) PREPARE_DESCRIBE (concatenated). ---
+	// Both DSS frames are buffered into one io.Write call so the server
+	// receives them in a single TCP segment. JT400 ships these
+	// concatenated and v0.7.2 live testing on IBM Cloud V7R6M0 showed
+	// the server only files PREPAREd statements into the extended-
+	// dynamic *PGM when both frames arrive together; sending them as
+	// separate writes leaves the *PGM unpopulated even with otherwise
+	// byte-identical wire shape.
 	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
 	if err != nil {
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode stmt name: %w", err)
@@ -443,78 +450,73 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	if err != nil {
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode cursor name: %w", err)
 	}
-	{
-		tpl := DBRequestTemplate{
-			ORSBitmap:                 ORSDataCompression,
-			ReturnORSHandle:           1,
-			FillORSHandle:             1,
-			BasedOnORSHandle:          0,
-			RPBHandle:                 1,
-			ParameterMarkerDescriptor: 0,
-		}
-		createParams := []DBParam{
-			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
-			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
-		}
-		if opts.extendedDynamic && opts.packageLibrary != "" {
-			libParam, err := buildPackageLibraryParam(opts.packageLibrary)
-			if err != nil {
-				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package library: %w", err)
-			}
-			createParams = append(createParams, libParam)
-		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
-		if err != nil {
-			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
-		}
-		hdr.CorrelationID = nextCorr()
-		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
-		}
+	createTpl := DBRequestTemplate{
+		ORSBitmap:                 ORSDataCompression,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
 	}
+	createParams := []DBParam{
+		DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+		DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
+	}
+	if opts.extendedDynamic && opts.packageLibrary != "" {
+		libParam, err := buildPackageLibraryParam(opts.packageLibrary)
+		if err != nil {
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package library: %w", err)
+		}
+		createParams = append(createParams, libParam)
+	}
+	createHdr, createPayload, err := BuildDBRequest(ReqDBSQLRPBCreate, createTpl, createParams)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
+	}
+	createHdr.CorrelationID = nextCorr()
 
-	// --- 2) PREPARE_DESCRIBE (with ORSParameterMarkerFmt). ---
 	stmtBytes := utf16BE(sql)
 	prepCorr := nextCorr()
-	{
-		ors := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | ORSDataCompression
-		if opts.extendedMetadata {
-			ors |= ORSExtendedColumnDescrs
-		}
-		tpl := DBRequestTemplate{
-			ORSBitmap:                 ors,
-			ReturnORSHandle:           1,
-			FillORSHandle:             1,
-			BasedOnORSHandle:          0,
-			RPBHandle:                 1,
-			ParameterMarkerDescriptor: 0,
-		}
-		prepParams := []DBParam{
-			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
-			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParamByte(cpDBPrepareOption, prepareOptionByte(opts.extendedDynamic && opts.packageName != "")),
-		}
-		if opts.extendedMetadata {
-			// CP 0x3829 = 0xF1 -- without it the server ships
-			// CP 0x3811 with zero bytes. Mirrors JT400's
-			// DBSQLRequestDS.setExtendedColumnDescriptorOption.
-			prepParams = append(prepParams, DBParamByte(0x3829, 0xF1))
-		}
-		if opts.extendedDynamic {
-			pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
-			if err != nil {
-				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
-			}
-			prepParams = append(prepParams, pkgParam)
-		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
+	prepOrs := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | ORSDataCompression
+	if opts.extendedMetadata {
+		prepOrs |= ORSExtendedColumnDescrs
+	}
+	prepTpl := DBRequestTemplate{
+		ORSBitmap:                 prepOrs,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
+	}
+	prepParams := []DBParam{
+		dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
+		DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+		DBParamByte(cpDBPrepareOption, prepareOptionByte(opts.extendedDynamic && opts.packageName != "")),
+	}
+	if opts.extendedMetadata {
+		// CP 0x3829 = 0xF1 -- without it the server ships
+		// CP 0x3811 with zero bytes. Mirrors JT400's
+		// DBSQLRequestDS.setExtendedColumnDescriptorOption.
+		prepParams = append(prepParams, DBParamByte(0x3829, 0xF1))
+	}
+	if opts.extendedDynamic {
+		pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
 		if err != nil {
-			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
 		}
-		hdr.CorrelationID = prepCorr
-		if err := WriteFrame(conn, hdr, payload); err != nil {
-			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
-		}
+		prepParams = append(prepParams, pkgParam)
+	}
+	prepHdr, prepPayload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, prepTpl, prepParams)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+	}
+	prepHdr.CorrelationID = prepCorr
+	if err := WriteFrames(conn,
+		Frame{Hdr: createHdr, Payload: createPayload},
+		Frame{Hdr: prepHdr, Payload: prepPayload},
+	); err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send CREATE_RPB+PREPARE_DESCRIBE: %w", err)
 	}
 	prepRepHdr, prepRepPayload, err := ReadDBReplyMatching(conn, prepCorr, 8)
 	if err != nil {

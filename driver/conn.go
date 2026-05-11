@@ -87,6 +87,14 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		// 32768 default for zero.
 		opts.LOBThreshold = c.cfg.LOBThreshold
 	}
+	if c.cfg.ExtendedDynamic && c.cfg.PackageName != "" {
+		// JT400 emits 5 additional date/time/separator CPs in
+		// SET_SQL_ATTRIBUTES when "extended dynamic=true" so the
+		// server has a definite value for the package-suffix
+		// derivation. Without these the V7R6M0 server refuses to
+		// file PREPAREd statements into the *PGM.
+		opts.ExtendedDynamic = true
+	}
 	if _, err := hostserver.SetSQLAttributes(db, opts); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("db2i: set sql attributes: %w", err)

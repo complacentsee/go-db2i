@@ -95,7 +95,7 @@ the *Notes* column says why.
 | `extended dynamic` | `extended-dynamic` | M10. When `true` together with `package=<NAME>`, the driver tells the server to keep PREPAREd statements in a persistent `*PGM` so co-tenant reconnects skip the PREPARE round-trip. |
 | `package` | `package` | M10. 1-6 chars from the IBM-i object-name set (`A-Z 0-9 _ # @ $`). The 10-char wire name is the base + a 4-char options-derived suffix, byte-equal to JT400 (`hostserver.BuildPackageName`). |
 | `package library` | `package-library` | M10. Library the `*PGM` lives in; default `QGPL`. Up to 10 chars from the same charset. |
-| `package cache` | `package-cache` | M10. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses PREPARE on a client-side cache hit. |
+| `package cache` | `package-cache` | M10 + v0.7.1. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses `PREPARE_DESCRIBE` on a client-side cache hit (`ExecutePreparedCached` / `OpenSelectPreparedCached`). See [`package-caching.md`](./package-caching.md) for the wire flow and observability. |
 | `package error` | `package-error` | M10. `warning` (default) / `exception` / `none` — controls how the driver reacts to package-related server errors. |
 | `package criteria` | `package-criteria` | M10. `default` (default, parameterised statements only) / `select` (broader: also caches SELECT statements without markers). Mirrors JT400's [JDSQLStatement.java filter](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java). |
 | `package add` | `package-add` (accept-ignore) | M10. JT400's only documented value is `true`; go-db2i always adds when `extended-dynamic=true`, so `package-add=true` is accepted as a no-op for DSN-migration friendliness and `package-add=false` is rejected with a clear message. |
@@ -229,9 +229,27 @@ For `translate binary=true`: the equivalent behaviour is built in.
 go-db2i always returns CCSID-65535 / FOR BIT DATA columns as `[]byte`;
 no flag needed.
 
+### Cache-hit fast path (v0.7.1)
+
+`extended-dynamic=true&package=APP&package-cache=true` activates
+both the server-side `*PGM` filing (JT400-equivalent) AND a
+client-side cache-hit dispatch that skips `PREPARE_DESCRIBE` for
+any SQL byte-equal to a filed entry. Because the 10-char on-wire
+package name is byte-equal to JT400's `JDPackageManager` for the
+same session options, **a Java service and a Go service hitting
+the same LPAR share one `*PGM` on disk**. The Go client benefits
+from plans the Java client filed (and vice versa) without any
+coordination.
+
+See [`package-caching.md`](./package-caching.md) for setup,
+observability (slog DEBUG `"db2i: query cache-hit"` lines, OTel
+`db.operation.name=OPEN_SELECT_PREPARED_CACHED`), and
+`QSYS2.SYSPACKAGE` / `QSYS2.SYSPACKAGESTMT` verification.
+
 ## Cross-references
 
 - [JT400 JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java) — the authoritative list of all 109 JT400 properties.
 - [`docs/configuration.md`](./configuration.md) — the full go-db2i DSN reference.
+- [`docs/package-caching.md`](./package-caching.md) — operator's guide for extended-dynamic + cache-hit dispatch.
 - [`docs/performance.md`](./performance.md) — tuning notes for connection-pool sizing, LOB streaming, CCSID choice.
 - [`driver/driver.go`](../driver/driver.go) — `Config` struct + `parseDSN` are the source of truth for what the driver accepts.

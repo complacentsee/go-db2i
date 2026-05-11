@@ -559,11 +559,11 @@ type selectOpts struct {
 // / cursor-name var-strings are tagged with. Our M0-M9 captures
 // (prepared_int_param.trace, prepared_call_*.trace, etc.) used
 // CCSID 273; JT400's newer extended-dynamic captures (first_use,
-// cache_download, cache_hit) use CCSID 37 throughout. Both work
-// on V7R6M0 because the IBM-i-object-name charset (A-Z + 0-9 + _)
-// round-trips byte-identical between SBCS EBCDIC pages. We keep
-// 273 for back-compat with the older fixtures' byte-level tests;
-// future fixture re-captures may flip this.
+// cache_download, cache_hit) use CCSID 37. Both decode byte-
+// identically on the IBM-i-object-name charset (A-Z + 0-9 + _);
+// v0.7.2 live testing confirmed the server accepts either value
+// for the name fields. Keep 273 for back-compat with the older
+// fixtures' byte-level tests.
 func rpbStringCCSID() uint16 { return 273 }
 
 // WithExtendedMetadata asks the server to ship per-column schema,
