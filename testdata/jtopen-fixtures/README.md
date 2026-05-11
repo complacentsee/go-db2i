@@ -1,8 +1,9 @@
 # JTOpen fixture-capture harness
 
-This is the M0 deliverable for goJTOpen: a small Maven project that uses the
-real JTOpen JDBC driver against [PUB400](https://pub400.com) to produce two
-artifacts per test case:
+This is the M0 deliverable for goJTOpen — a small Maven project that uses the
+[JT400 JDBC driver](https://github.com/IBM/JTOpen) (the JDBC half of
+IBM Toolbox for Java) against a real IBM i to produce two artifacts per
+test case:
 
 1. **`fixtures/<case>.trace`** — JTOpen's `com.ibm.as400.access.Trace`
    datastream dump (every byte sent and received, with offsets).
@@ -40,9 +41,10 @@ Set environment variables before running:
 
 | Variable        | Required | Default            | Notes                                      |
 | --------------- | -------- | ------------------ | ------------------------------------------ |
-| `PUB400_USER`   | yes      | —                  | Your PUB400 user ID                        |
-| `PUB400_PWD`    | yes      | —                  | Your PUB400 password                       |
-| `PUB400_HOST`   | no       | `pub400.com`       | Override only if running against a private IBM i |
+| `PUB400_USER`   | yes      | —                  | Your IBM i user ID                         |
+| `PUB400_PWD`    | yes      | —                  | Your IBM i password                        |
+| `PUB400_HOST`   | no       | `pub400.com`       | IBM i host. Use `127.0.0.1` with an SSH tunnel to reach a private LPAR. |
+| `PUB400_PORT`   | no       | (port mapper)      | Explicit database-host-server port (e.g. `8471` when tunneled through 127.0.0.1). When set, JT400's `skipSignonServer_` codepath engages so the harness doesn't need port 449 / 8476 reachable. |
 | `PUB400_SCHEMA` | no       | `PUB400_USER` (uppercased) | Schema/library used for table-backed cases |
 | `FIXTURES_DIR`  | no       | `fixtures`         | Where to write `.trace` and `.golden.json` |
 | `ONLY`          | no       | (run all)          | Comma-separated list of case names to run  |
@@ -111,7 +113,14 @@ ONLY=connect_only,select_dummy mvn -q exec:java
 | `select_multi_column`           | Multi-column row, mixed types                  |
 | `prepared_int_param`, etc.      | PREPARE + EXECUTE with bound parameters        |
 | `multi_row_fetch_1k`            | Block fetch / continuation across 1000 rows    |
+| `prepared_blob_*`               | LOB bind via WRITE_LOB_DATA + locator handles  |
+| `prepared_binary_bind`          | BINARY / VARBINARY (FOR BIT DATA)              |
 | `tx_commit`, `tx_rollback`      | Manual transaction boundaries                  |
+| `prepared_call_in_only`         | `CALL P_INS('A', 10)` — IN-only, no result set |
+| `prepared_call_in_out`          | `CALL P_LOOKUP(?, ?, ?)` with two OUT registrations |
+| `prepared_call_result_set`      | `CALL P_INVENTORY(?)` first dynamic result set |
+| `prepared_call_multi_set`       | Same proc, both dynamic result sets via `getMoreResults` |
+| `prepared_call_inout`           | `CALL P_ROUNDTRIP(?)` with INOUT INTEGER       |
 | `error_syntax`, `error_table_not_found` | SQLException → SQLCARD mapping         |
 
 Add new cases by editing `src/main/java/.../Cases.java` and re-running.

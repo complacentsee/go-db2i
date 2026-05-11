@@ -5,6 +5,20 @@ host-server datastream protocol directly over TCP. No CGo, no Java
 sidecar, no IBM client packages — just a Go binary that talks to the
 as-database (8471) and as-signon (8476) services on any IBM i.
 
+> **Scope.** goJTOpen aims to be a drop-in replacement for the
+> **JT400 JDBC driver** — the `com.ibm.as400.access.AS400JDBCDriver`
+> half of [IBM Toolbox for Java (JTOpen)](https://github.com/IBM/JTOpen) —
+> not the entire JTOpen toolbox. The dozens of non-JDBC services
+> JTOpen exposes (`AS400` programmatic auth + IFS access,
+> `CommandCall`, `ProgramCall`, `DataQueue`, `IFSFile`, `SystemValue`,
+> print spool, FTP, BiDi, proxy server, etc.) are explicitly out of
+> scope. If your Go service talks to IBM i exclusively through
+> JDBC — `db.Query` / `db.Exec` / `tx.Begin` / `CallableStatement` —
+> this driver replaces the JT400 jar one-for-one. If you need
+> `CommandCall.run("WRKACTJOB")` or `IFSFile`, use the JTOpen jar
+> via a JVM sidecar (or fork goJTOpen to add the service you need;
+> the host-server datastream format is the same).
+
 ```go
 import (
     "database/sql"
@@ -16,35 +30,60 @@ db, err := sql.Open("gojtopen", "gojtopen://USER:PWD@host.example.com:8471/?libr
 
 ## Status
 
-Wire-validated against IBM i 7.6 (V7R6M0) on IBM Cloud Power VS. The
-core `database/sql` interfaces are implemented end-to-end:
+Wire-validated against IBM i 7.6 (V7R6M0) on IBM Cloud Power VS.
+The full `database/sql` JDBC surface that JT400 exposes is
+implemented end-to-end:
 
 - Sign-on (password levels 2 / 3 SHA-1, 4 PBKDF2-HMAC-SHA-512)
+- TLS sign-on / database (ports 9476 / 9471)
 - Static and parameterised `SELECT` with lazy `Rows` iteration via
   continuation FETCH (streamed 86k rows of `QSYS2.SYSCOLUMNS` in
   testing without buffering)
 - Static and parameterised `INSERT` / `UPDATE` / `DELETE`
+- **Stored procedures** via `db.Exec("CALL ...")` and
+  `db.Query("CALL ...")`: IN parameters through driver.Value, OUT
+  and INOUT parameters via `sql.Out{Dest: &x, In: bool}`, multi-
+  result-set procedures via `Rows.NextResultSet`
 - Transactions (`db.Begin`, `tx.Commit`, `tx.Rollback`) with
   configurable commitment-control level
+- LOB bind + read: BLOB / CLOB / DBCLOB. Streaming reads via
+  `?lob=stream` opt-in (`*LOBReader` per row); inline materialisation
+  by default. Inline-small-LOB threshold via `?lob-threshold=N`.
+- RLE-compressed `RETRIEVE_LOB_DATA` chunks (5-byte whole-payload
+  wrapper) end-to-end
 - Typed `*hostserver.Db2Error` with `SQLState` / `SQLCode` /
-  `MessageID` / `MessageTokens`
+  `MessageID` / `MessageTokens` + predicate helpers
+  (`IsNotFound` / `IsConstraintViolation` / `IsLockTimeout` /
+  `IsConnectionLost`)
 - `driver.ErrBadConn` on TCP-level failures so the pool auto-recovers
 - `context.Context` propagation including mid-query cancellation
 - `Result.LastInsertId` via `IDENTITY_VAL_LOCAL()`
 - UTF-8 string binds and decode on V7R3+ (CCSID 1208 passthrough),
-  EBCDIC fallback (CCSID 37) on older servers
+  EBCDIC fallback (CCSID 37) on older servers; per-DSN CCSID
+  override via `?ccsid=N`
 - Type round-trip: INTEGER, BIGINT, SMALLINT, DOUBLE, REAL, DECIMAL,
-  NUMERIC, DECFLOAT(16/34), CHAR, VARCHAR (and FOR BIT DATA), DATE,
-  TIME, TIMESTAMP, BLOB, CLOB, DBCLOB
+  NUMERIC, DECFLOAT(16/34), CHAR, VARCHAR (and FOR BIT DATA),
+  BOOLEAN, BINARY, VARBINARY, DATE, TIME, TIMESTAMP, BLOB, CLOB,
+  DBCLOB
+- Extended column metadata
+  (`*sql.ColumnType.ScanType` / `DatabaseTypeName` / `Length` /
+  `Precision` / `Scale` / `Nullable`) including schema / table /
+  base-column-name / label via the V7R3+ extended-metadata reply
+- `log/slog` integration via `Config.Logger`
+- OpenTelemetry spans (`Config.Tracer`) following the May 2025
+  semantic-conventions refresh, with `*Db2Error` attributes for
+  alerting routing
 
-Larger items still on the roadmap (`docs/PLAN.md`):
+Out of scope (use the JTOpen Java jar for these):
 
-- **M7**: BLOB/CLOB streaming via `io.Reader` (read-side currently
-  materialises the full LOB at Scan time -- fine for most LOBs;
-  the streaming Reader is a follow-up). LOB *bind* on parameter
-  markers. Broader CCSID coverage.
-- **M8**: `slog` integration, OpenTelemetry spans, fuzz tests on the
-  reply parser.
+- Non-JDBC JTOpen services: `AS400`-class programmatic auth,
+  `CommandCall`, `ProgramCall`, `DataQueue`, `IFSFile`, `JobLog`,
+  `SystemValue`, print spool, FTP, BiDi reordering, proxy server.
+- JDBC extras that aren't in the database/sql contract: scrollable
+  cursors (forward-only across the board), client reroute /
+  seamless failover, extended-dynamic-package caching, JDBC escape
+  syntax `{call ...}`, named-parameter binding via
+  `sql.Named("p", ...)` for procs (positional only).
 
 ## Install
 
@@ -96,6 +135,23 @@ tx, err := db.Begin()
 tx.Exec(`INSERT ...`)
 tx.Exec(`UPDATE ...`)
 tx.Commit()
+
+// Stored procedure with OUT parameters
+var name string
+var qty int
+_, err = db.Exec(`CALL mylib.p_lookup(?, ?, ?)`,
+    "WIDGET",
+    sql.Out{Dest: &name},
+    sql.Out{Dest: &qty},
+)
+
+// Stored procedure that returns multiple result sets
+rows, _ := db.Query(`CALL mylib.p_inventory(?)`, 5)
+defer rows.Close()
+for rows.Next() { /* first set */ }
+if rows.NextResultSet() {
+    for rows.Next() { /* second set */ }
+}
 ```
 
 ## Error classification
@@ -143,7 +199,7 @@ details.
 
 ## Why pure Go?
 
-The IBM-supplied options for connecting Go programs to IBM i are:
+The IBM-supplied options for connecting Go programs to IBM i Db2 are:
 
 1. **`go_ibm_db`** — DRDA-only over port 446. Often firewalled in
    industrial deployments where only the host-server ports are open.
@@ -153,19 +209,30 @@ The IBM-supplied options for connecting Go programs to IBM i are:
 3. **Java + JTOpen sidecar** — works but adds a JVM and a
    process boundary to a Go service.
 
-goJTOpen takes the **same protocol as JTOpen** (which uses the
-host-server datastream over 8471) but reimplements it natively in Go.
-The result is one binary that runs anywhere Go runs.
+goJTOpen takes the **same protocol as JTOpen's JDBC driver** (which
+uses the host-server datastream over 8471 / 9471) and reimplements
+the JDBC half natively in Go. The result is one statically-linked
+binary that runs anywhere Go runs, with the same JDBC behaviour the
+JT400 jar gives a Java app — minus the JVM, the classpath, and the
+~10 MB jar. Non-JDBC JTOpen services (`CommandCall`, `IFSFile`, etc.)
+are out of scope; the [Migrating from JT400](docs/migrating-from-jt400.md)
+guide spells out the JDBC-property-to-DSN-key mapping in detail.
 
 ## Acknowledgements
 
-Wire-format implementation builds on the open-source IBM Toolbox for
-Java (JTOpen, IBM Public License v1.0) as a protocol reference.
-goJTOpen is a clean-room reimplementation; no JTOpen source is
-included in this repository or copied at build time. The fixture
-harness (`testdata/jtopen-fixtures/`) uses JTOpen at runtime via
-Maven Central to record wire traces, but the recorded fixtures are
-data-only.
+Wire-format implementation builds on the open-source
+[IBM Toolbox for Java (JTOpen)](https://github.com/IBM/JTOpen)
+under the IBM Public License v1.0 as a protocol reference --
+specifically the
+`com.ibm.as400.access.AS400JDBC*` JDBC driver classes and the
+`DBBaseRequestDS` / `DBReplyRequestedDS` host-server-datastream
+encoders/decoders that JT400 hands to its `AS400` connection
+object. goJTOpen is a clean-room reimplementation: no JTOpen
+source is included in this repository or copied at build time.
+The fixture harness (`testdata/jtopen-fixtures/`) pulls JTOpen
+from Maven Central at trace-capture time, but the recorded
+`.trace` / `.golden.json` fixtures are data-only and carry no
+JTOpen code.
 
 ## License
 
