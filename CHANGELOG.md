@@ -8,7 +8,54 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
-## [Unreleased]
+## [0.6.0] - 2026-05-11
+
+Second tagged release. M9 stored-procedure support shipped on top
+of the v0.5.0 base. The four M9 sub-items are all live-validated
+against IBM Cloud V7R6M0 on plaintext (8471/8476); the M1-M8
+surface is unchanged and re-validated end-to-end (full plaintext
+conformance suite green, ~160 s on the 1-CPU LPAR). The TLS path
+(9471/9476) also passes basic connectivity.
+
+The added public API surface is purely additive vs v0.5.0 -- no
+breaking changes:
+
+- `sql.Out{Dest: &x, In: bool}` admission via `Stmt.CheckNamedValue`
+- `*Rows.NextResultSet() error` + `HasNextResultSet() bool`
+- New `hostserver` constants `ORSCursorAttributes`,
+  `ORSDataCompression`, `ReqDBSQLOpenDescribe`
+- New `hostserver.Cursor` methods `MoreResultSets`,
+  `AdvanceResultSet`, `NumberOfResults`, `CurrentResultSet`
+- `hostserver.ExecResult.OutValues []any`
+
+`hostserver.closeCursorReuse` is exposed for the multi-result-set
+advance; the existing `closeCursor` is now a wrapper preserving the
+M1-M8 behaviour. The 0x00040000 / 0x00008000 / 0x1804 raw hex
+literals scattered through `hostserver/db_*.go` have all been
+replaced by named constants.
+
+Roadmap parked for M10+:
+- Extended-dynamic-package caching (server-side prepared-statement
+  cache; highest-impact wire optimization remaining).
+- Batch parameter binds (multi-row CP 0x381F or `ExecBatch` API
+  sugar). Multi-row `VALUES (?,?), (?,?)` SQL already works today.
+- JDBC escape syntax (`{call ...}`, `{fn ...}`, `{d ...}`).
+- DatabaseMetaData catalog (currently callers must `SELECT FROM
+  QSYS2.SYSTABLES` directly).
+- Kerberos / GSS auth.
+- Client reroute / seamless failover.
+- Locator-based LOB UPDATE (`PUT_LOB_DATA`).
+
+Documented out-of-scope (use the JTOpen jar):
+- Non-JDBC JTOpen services (`CommandCall`, `IFSFile`, `DataQueue`,
+  etc.). See README "Scope" section.
+- Scrollable cursors (`database/sql/driver.Rows` is forward-only
+  by design).
+- Stored procedures returning OUT params AND result sets in the
+  same call (JT400 ordering: drain result sets first, then read
+  OUTs; database/sql idiom is unclear).
+- Return-value parameter at index 1 for CALL (JT400 fakes this;
+  IBM i procs don't actually have return values).
 
 ### Added
 
