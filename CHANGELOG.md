@@ -12,6 +12,20 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- **v0.7.1-B**: client-side cache-hit fast path -- `hostserver`
+  layer. `ExecutePreparedCached` and `OpenSelectPreparedCached`
+  build a single EXECUTE (0x1805) / OPEN_DESCRIBE_FETCH (0x180E)
+  frame from a `*PackageStatement`, skipping CREATE_RPB,
+  PREPARE_DESCRIBE, and CHANGE_DESCRIPTOR entirely. The cached
+  18-byte server-assigned name is sent verbatim in CP 0x3806
+  (statement-name override), the cached parameter-marker shapes
+  populate CP 0x381E (extended data format), and bound values go
+  in CP 0x381F (extended data). OUT/INOUT shapes are rejected up
+  front so callable statements can't accidentally lose their
+  destinations through the fast path. Mirrors JT400's
+  AS400JDBCStatement.commonExecute nameOverride_ behaviour; live
+  wiring follows in v0.7.1-C/D.
+
 - **v0.7.1-A**: CP 0x380B (package info) per-statement decoder.
   `hostserver.ParsePackageInfo` walks JT400's 42-byte header + N x
   64-byte entry stride + per-entry SQLDA-format regions and produces
