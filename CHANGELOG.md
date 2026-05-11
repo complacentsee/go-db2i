@@ -12,6 +12,24 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-5 JTOpen DSN migration guide at
+  [`docs/migrating-from-jt400.md`](docs/migrating-from-jt400.md).
+  Side-by-side table covers every JT400 JDBC URL property (~70
+  distinct keys cross-referenced against JT400's
+  [JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
+  enumeration of 109 attributes). For each: the goJTOpen DSN
+  equivalent or "deferred / out of scope" with the reason. Groups
+  by topic (auth + host, TLS, session attributes, CCSID, LOB,
+  performance, reroute, diagnostics, behaviour overrides). Includes
+  a migration recipe converting a typical jt400 URL into a
+  `gojtopen://...` DSN + programmatic `gojtopen.NewConnector`
+  Config for the slog / OTel paths. Honest about the coverage gap:
+  goJTOpen ships 12 DSN keys plus three programmatic Config fields;
+  JT400 ships ~109 properties, most of them either toolbox-side
+  features (BiDi reordering, proxy server) or features goJTOpen
+  intentionally defers (extended-dynamic-package caching,
+  client-reroute / seamless failover).
+
 - M8-4 OpenTelemetry spans on `Stmt.ExecContext` /
   `Stmt.QueryContext`. New `driver.Config.Tracer trace.Tracer` field
   takes a `go.opentelemetry.io/otel/trace` API tracer (v1.36.0

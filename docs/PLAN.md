@@ -658,7 +658,15 @@ Track A (foundations):
   OTel SDK. `cmd/smoketest -trace-stdout` flag wires the stdout
   exporter; live-validated against IBM Cloud V7R6M0 (span tree
   matches conventions byte-for-byte).
-- **M8-5 JTOpen DSN migration guide** ⏳
+- **M8-5 JTOpen DSN migration guide** ✅ 2026-05-11 —
+  `docs/migrating-from-jt400.md` enumerates every JTOpen JDBC URL
+  property (~70 distinct keys covered, cross-referenced against
+  JT400's [JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
+  enumeration). For each, the doc shows the goJTOpen DSN equivalent
+  or marks it "deferred" / "out of scope" with reasoning. Includes
+  a side-by-side migration recipe (jt400 URL -> gojtopen DSN +
+  programmatic Config code) and gotchas (naming default, extended
+  dynamic, socket timeout, lob threshold).
 - **M8-6 Performance tuning notes** ⏳
 
 **Total remaining: ~14-22 weeks.** The original 17-25 week M0-M8
