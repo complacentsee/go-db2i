@@ -429,6 +429,36 @@ func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
 	}
 }
 
+// packageLookup walks c.pkg.Cached looking for a PackageStatement
+// whose SQLText byte-equals sql. Returns nil/false when:
+//
+//   - the connection has no package context (cfg.PackageCache off,
+//     or initPackage soft-disabled the package via PackageError);
+//   - the cache was empty on connect (fresh *PGM);
+//   - no entry's SQL text matches.
+//
+// Lookup is linear -- the typical *PGM holds tens to low hundreds of
+// statements and the per-call cost is dominated by other work
+// (parameter encoding, network). If a workload ever produces a
+// thousand-entry package we'll swap in a map keyed on SQLText hash.
+//
+// Byte equality (not normalised SQL) matches JT400's
+// JDPackageManager.getCachedStatementIndex behaviour: a whitespace
+// or case change in the caller's SQL string forces a re-prepare,
+// which is the right outcome since the server-side cache lookup
+// uses the same identity.
+func (c *Conn) packageLookup(sql string) *hostserver.PackageStatement {
+	if c.pkg == nil || len(c.pkg.Cached) == 0 {
+		return nil
+	}
+	for i := range c.pkg.Cached {
+		if c.pkg.Cached[i].SQLText == sql {
+			return &c.pkg.Cached[i]
+		}
+	}
+	return nil
+}
+
 // firstSQLVerb returns the first whitespace-delimited token of sql
 // (after leading spaces / tabs / newlines), without allocating. The
 // returned slice aliases sql.

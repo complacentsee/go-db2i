@@ -691,6 +691,68 @@ func TestPackageEligibleFor_NoPkgIsAlwaysFalse(t *testing.T) {
 // PackageManager (its zero value works for the criteria helper).
 var fakePackageManager hostserver.PackageManager
 
+// TestPackageLookup exercises the byte-equal SQL lookup the cache-
+// hit fast-path uses to decide whether ExecutePreparedCached fires.
+// Three asserts: miss returns nil (no allocation, no panic on the
+// nil-pkg path), exact-match returns the cached entry, and case /
+// whitespace divergence returns nil (matching JT400's
+// JDPackageManager.getCachedStatementIndex byte-identity rule).
+func TestPackageLookup(t *testing.T) {
+	conn := &Conn{
+		cfg: &Config{
+			ExtendedDynamic: true,
+			PackageName:     "APP",
+			PackageLibrary:  "QGPL",
+		},
+		pkg: &hostserver.PackageManager{
+			Cached: []hostserver.PackageStatement{
+				{
+					Name:    "QZAF481815E802E001",
+					SQLText: "SELECT ? FROM SYSIBM.SYSDUMMY1",
+				},
+				{
+					Name:    "QZAF4818AAAAAA0002",
+					SQLText: "INSERT INTO T VALUES (?, ?)",
+				},
+			},
+		},
+	}
+
+	if got := conn.packageLookup("SELECT ? FROM SYSIBM.SYSDUMMY1"); got == nil {
+		t.Fatal("expected hit for exact SELECT match")
+	} else if got.Name != "QZAF481815E802E001" {
+		t.Errorf("hit returned wrong entry: %q", got.Name)
+	}
+
+	if got := conn.packageLookup("INSERT INTO T VALUES (?, ?)"); got == nil {
+		t.Fatal("expected hit for exact INSERT match")
+	}
+
+	// Case divergence -- JT400 doesn't normalise SQL on the lookup
+	// side, neither should we. A "select" caller and a "SELECT"
+	// caller live in separate cache lanes.
+	if got := conn.packageLookup("select ? from sysibm.sysdummy1"); got != nil {
+		t.Errorf("expected miss for case-divergent SQL, got %q", got.Name)
+	}
+
+	// Whitespace divergence -- same logic.
+	if got := conn.packageLookup("SELECT  ? FROM SYSIBM.SYSDUMMY1"); got != nil {
+		t.Errorf("expected miss for whitespace-divergent SQL, got %q", got.Name)
+	}
+
+	// Empty cache returns nil.
+	emptyConn := &Conn{pkg: &hostserver.PackageManager{}}
+	if got := emptyConn.packageLookup("SELECT 1 FROM SYSIBM.SYSDUMMY1"); got != nil {
+		t.Errorf("expected miss for empty cache, got %q", got.Name)
+	}
+
+	// Nil pkg returns nil (PackageError soft-disable path).
+	nilConn := &Conn{}
+	if got := nilConn.packageLookup("SELECT 1 FROM SYSIBM.SYSDUMMY1"); got != nil {
+		t.Errorf("expected miss for nil pkg, got %q", got.Name)
+	}
+}
+
 // TestPackageCriteriaPlumbing wires selectOptionsFor through and
 // asserts the extended-dynamic flag is dropped when the criteria
 // rejects the SQL.

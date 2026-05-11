@@ -224,6 +224,24 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Cache-hit fast path: when this connection's package cache
+	// holds a statement whose stored SQL byte-equals s.query AND
+	// no caller argument is sql.Out (callable statements can't
+	// take the fast path because their OUT destinations aren't
+	// representable on the wire without the CHANGE_DESCRIPTOR
+	// pre-step), skip CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR
+	// entirely. Falls through to ExecutePreparedSQL on miss; that
+	// path still adds the CP 0x3804 marker that POPULATES the
+	// cache for subsequent calls.
+	if cached := s.conn.packageLookup(s.query); cached != nil && len(outDests) == 0 {
+		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc())
+		s.logExecCached(logger, len(args), start, res, cached.Name, err)
+		if err != nil {
+			return nil, s.conn.classifyConnErr(err)
+		}
+		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
+	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
@@ -233,6 +251,34 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 	return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
+}
+
+// logExecCached is the Exec-path equivalent of logExec for cache-hit
+// dispatches. Tagged with op="EXECUTE_PREPARED_CACHED" and carries
+// the cached statement's 18-char server name so operators can grep
+// for fast-path activity and cross-reference QSYS2.SYSPACKAGE entries.
+func (s *Stmt) logExecCached(logger *slog.Logger, paramCount int, start time.Time, res *hostserver.ExecResult, cachedName string, err error) {
+	if logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("op", "EXECUTE_PREPARED_CACHED"),
+		slog.Int("params", paramCount),
+		slog.Duration("elapsed", time.Since(start)),
+		slog.String("cached_name", cachedName),
+	}
+	if res != nil {
+		attrs = append(attrs, slog.Int64("rows_affected", res.RowsAffected))
+	}
+	if s.conn.cfg != nil && s.conn.cfg.LogSQL {
+		attrs = append(attrs, slog.String("sql", s.query))
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: exec cache-hit failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: exec cache-hit", attrs...)
 }
 
 // logExec emits one DEBUG line per Exec call. SQL text is gated on

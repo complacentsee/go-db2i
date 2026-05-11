@@ -12,6 +12,18 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- **v0.7.1-C**: driver Stmt cache-hit dispatch. `Stmt.Exec` now
+  calls `Conn.packageLookup(sql)` after the bind step; on a
+  byte-equal hit (and no `sql.Out` arg) it dispatches to
+  `hostserver.ExecutePreparedCached` instead of
+  `ExecutePreparedSQL`, skipping the CREATE_RPB / PREPARE_DESCRIBE
+  / CHANGE_DESCRIPTOR preamble for that call. New slog DEBUG line
+  `db2i: exec cache-hit` (op=`EXECUTE_PREPARED_CACHED`,
+  `cached_name`=server-assigned 18-char name) so operators can see
+  fast-path activity and cross-reference QSYS2.SYSPACKAGE entries.
+  Stmt.Query still routes through the normal prepare-and-open flow
+  pending the v0.7.1-D wire validation.
+
 - **v0.7.1-B**: client-side cache-hit fast path -- `hostserver`
   layer. `ExecutePreparedCached` and `OpenSelectPreparedCached`
   build a single EXECUTE (0x1805) / OPEN_DESCRIBE_FETCH (0x180E)
