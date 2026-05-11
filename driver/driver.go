@@ -136,6 +136,9 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
@@ -335,12 +338,32 @@ type Config struct {
 	Logger *slog.Logger
 
 	// LogSQL gates whether the driver attaches the SQL text as an
-	// attribute on Stmt.Exec / Stmt.Query DEBUG lines. Off by default
+	// attribute on Stmt.Exec / Stmt.Query DEBUG lines AND the
+	// db.statement OpenTelemetry span attribute. Off by default
 	// because SQL text often carries customer identifiers or other
-	// data callers wouldn't want flowing through their log pipeline.
-	// Set true when actively debugging a specific query and pair with
-	// a Logger that filters by level.
+	// data callers wouldn't want flowing through their log /
+	// trace pipeline. Set true when actively debugging a specific
+	// query.
 	LogSQL bool
+
+	// Tracer is the OpenTelemetry trace.Tracer the driver uses to
+	// emit spans on Stmt.ExecContext / Stmt.QueryContext. Nil (the
+	// default) disables span emission via an internal noop-tracer
+	// fallback so call sites never have to nil-check.
+	//
+	// The driver follows the OpenTelemetry database semantic
+	// conventions. Span names are the operation kind ("EXEC",
+	// "QUERY"), and attributes include `db.system.name`,
+	// `db.namespace` (Library), `db.user`, `server.address`,
+	// `server.port`, `db.statement.parameters.count`, and for Exec
+	// `db.response.returned_rows`. SQL text rides on `db.statement`
+	// when LogSQL is also true. Errors set the span status to Error
+	// and record the *Db2Error sqlstate / sqlcode / message-id when
+	// the underlying error is a typed Db2Error.
+	//
+	// Use the API package (`go.opentelemetry.io/otel/trace`), not
+	// the SDK, so callers can plug in any OTel SDK / exporter.
+	Tracer trace.Tracer
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -377,6 +400,20 @@ func resolveLogger(l *slog.Logger) *slog.Logger {
 		return l
 	}
 	return silentLogger
+}
+
+// noopTracer is the no-op trace.Tracer the driver substitutes when
+// Config.Tracer is nil. Spans started on it are valid but record
+// nothing.
+var noopTracer = noop.NewTracerProvider().Tracer("gojtopen")
+
+// resolveTracer returns the caller-supplied tracer or the no-op
+// fallback. Always non-nil so call sites can skip the nil check.
+func resolveTracer(t trace.Tracer) trace.Tracer {
+	if t != nil {
+		return t
+	}
+	return noopTracer
 }
 
 func parseDSN(dsn string) (*Config, error) {

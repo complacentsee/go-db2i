@@ -3,10 +3,15 @@ package driver
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
@@ -57,9 +62,18 @@ func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	cleanup := withContextDeadline(ctx, s.conn.conn)
 	defer cleanup()
+
+	ctx, span := s.startSpan(ctx, "EXEC", len(args))
+	defer span.End()
+
 	res, err := s.Exec(namedToValues(args))
 	if err != nil {
-		return nil, resolveCtxErr(ctx, err)
+		err = resolveCtxErr(ctx, err)
+		s.recordSpanError(span, err)
+		return nil, err
+	}
+	if r, ok := res.(*Result); ok {
+		span.SetAttributes(attribute.Int64("db.response.returned_rows", r.rowsAffected))
 	}
 	return res, nil
 }
@@ -69,11 +83,83 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	cleanup := withContextDeadline(ctx, s.conn.conn)
 	defer cleanup()
+
+	ctx, span := s.startSpan(ctx, "QUERY", len(args))
+	defer span.End()
+
 	rows, err := s.Query(namedToValues(args))
 	if err != nil {
-		return nil, resolveCtxErr(ctx, err)
+		err = resolveCtxErr(ctx, err)
+		s.recordSpanError(span, err)
+		return nil, err
 	}
 	return rows, nil
+}
+
+// startSpan starts a span on the conn's tracer following OpenTelemetry
+// database semantic conventions. Returns the derived ctx (caller
+// passes it on so child spans nest correctly) and the started span
+// (caller is responsible for ending it via defer).
+//
+// Span name is the operation verb ("EXEC", "QUERY") since the driver
+// can't reliably parse the SQL into a target table/procedure without
+// a query parser; the convention's "operation name" guidance allows
+// a free-form operation when the underlying API is statement-oriented.
+func (s *Stmt) startSpan(ctx context.Context, op string, paramCount int) (context.Context, trace.Span) {
+	tracer := s.conn.tracer
+	if tracer == nil {
+		tracer = noopTracer
+	}
+	attrs := []attribute.KeyValue{
+		// db.system.name uses the dialect form introduced in the May
+		// 2025 conventions refresh. Older collectors that key off the
+		// historical "db.system" attribute key still recognise the
+		// value via wildcard matchers.
+		attribute.String("db.system.name", "ibm_db2_for_i"),
+		attribute.String("db.operation.name", op),
+		attribute.Int("db.statement.parameters.count", paramCount),
+	}
+	if s.conn.cfg != nil {
+		if s.conn.cfg.Library != "" {
+			attrs = append(attrs, attribute.String("db.namespace", s.conn.cfg.Library))
+		}
+		if s.conn.cfg.User != "" {
+			attrs = append(attrs, attribute.String("db.user", s.conn.cfg.User))
+		}
+		if s.conn.cfg.Host != "" {
+			attrs = append(attrs, attribute.String("server.address", s.conn.cfg.Host))
+		}
+		if s.conn.cfg.DBPort != 0 {
+			attrs = append(attrs, attribute.Int("server.port", s.conn.cfg.DBPort))
+		}
+		if s.conn.cfg.LogSQL {
+			attrs = append(attrs, attribute.String("db.statement", s.query))
+		}
+	}
+	return tracer.Start(ctx, op,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attrs...),
+	)
+}
+
+// recordSpanError sets the span status to Error and, for *Db2Error,
+// attaches the structured SQLSTATE / SQLCODE / MessageID attributes
+// so consumers can route alerts off them instead of regexing the
+// span event's free-form message.
+func (s *Stmt) recordSpanError(span trace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.SetStatus(codes.Error, err.Error())
+	var dbErr *hostserver.Db2Error
+	if errors.As(err, &dbErr) {
+		span.SetAttributes(
+			attribute.String("db.response.status_code", dbErr.SQLState),
+			attribute.Int("db.ibm_db2_for_i.sqlcode", int(dbErr.SQLCode)),
+			attribute.String("db.ibm_db2_for_i.message_id", dbErr.MessageID),
+		)
+	}
+	span.RecordError(err)
 }
 
 // namedToValues drops the parameter names (we don't use them; IBM i

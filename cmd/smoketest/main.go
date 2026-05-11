@@ -26,10 +26,80 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	gojtopen "github.com/complacentsee/goJTOpen/driver"
 	"github.com/complacentsee/goJTOpen/ebcdic"
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
+
+// runTraceStdout exercises a single round-trip Query through the
+// database/sql driver layer with an OTel stdout exporter attached.
+// Used by the -trace-stdout flag to demonstrate the M8-4 OTel
+// plumbing -- the resulting span JSON lands on stderr and shows
+// the db.system.name / db.namespace / db.operation.name / etc.
+// attributes the convention specifies. Reads the same env vars
+// as runLogDebug.
+func runTraceStdout() {
+	host := envOr("PUB400_HOST", "pub400.com")
+	signonPort := envOr("PUB400_PORT", "8476")
+	dbPort := envOr("PUB400_DBPORT", "8471")
+	user, ok := requireEnv("PUB400_USER")
+	if !ok {
+		os.Exit(2)
+	}
+	pwd, ok := requireEnv("PUB400_PWD")
+	if !ok {
+		os.Exit(2)
+	}
+
+	exporter, err := stdouttrace.New(
+		stdouttrace.WithWriter(os.Stderr),
+		stdouttrace.WithPrettyPrint(),
+	)
+	if err != nil {
+		fail("stdouttrace.New: %v", err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+	)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	cfg := gojtopen.DefaultConfig()
+	cfg.User = user
+	cfg.Password = pwd
+	cfg.Host = host
+	fmt.Sscanf(dbPort, "%d", &cfg.DBPort)
+	fmt.Sscanf(signonPort, "%d", &cfg.SignonPort)
+	cfg.Library = envOr("PUB400_LIB", "QSYS2")
+	cfg.LogSQL = true // include db.statement on the span
+	cfg.Tracer = tp.Tracer("gojtopen-smoketest")
+
+	connector, err := gojtopen.NewConnector(&cfg)
+	if err != nil {
+		fail("new connector: %v", err)
+	}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+
+	rows, err := db.QueryContext(context.Background(), "SELECT CURRENT_TIMESTAMP, CURRENT_USER FROM SYSIBM.SYSDUMMY1")
+	if err != nil {
+		fail("query: %v", err)
+	}
+	for rows.Next() {
+		var ts time.Time
+		var u string
+		if err := rows.Scan(&ts, &u); err != nil {
+			fail("scan: %v", err)
+		}
+		fmt.Printf("ts=%s user=%s\n", ts.Format(time.RFC3339), u)
+	}
+	if err := rows.Err(); err != nil {
+		fail("rows: %v", err)
+	}
+	rows.Close()
+}
 
 // runLogDebug exercises a single round-trip Query through the
 // database/sql driver layer with a slog text handler attached.
@@ -85,7 +155,12 @@ func runLogDebug() {
 
 func main() {
 	logDebug := flag.Bool("log-debug", false, "exercise the database/sql driver with slog DEBUG attached to stderr (M8-3 demo); skips the host-server smoketest")
+	traceStdout := flag.Bool("trace-stdout", false, "exercise the database/sql driver with the OTel stdout span exporter (M8-4 demo); skips the host-server smoketest")
 	flag.Parse()
+	if *traceStdout {
+		runTraceStdout()
+		return
+	}
 	if *logDebug {
 		runLogDebug()
 		return

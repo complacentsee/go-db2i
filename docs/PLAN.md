@@ -641,7 +641,23 @@ Track A (foundations):
   filtered text-handler stream to stderr; live-validated against
   IBM Cloud V7R6M0 (visible: INFO connect, DEBUG
   OPEN_SELECT_STATIC, INFO close).
-- **M8-4 OpenTelemetry spans** ⏳
+- **M8-4 OpenTelemetry spans** ✅ 2026-05-11 — `Config.Tracer
+  trace.Tracer` field. Nil resolves to the noop-tracer fallback so
+  call sites are nil-free. Stmt.ExecContext / Stmt.QueryContext
+  emit a SpanKindClient span tagged with the OTel database
+  semantic-convention attributes: `db.system.name=ibm_db2_for_i`,
+  `db.operation.name=EXEC|QUERY`, `db.namespace=<library>`,
+  `db.user`, `server.address`, `server.port`,
+  `db.statement.parameters.count`, plus `db.response.returned_rows`
+  for Exec. `db.statement` rides on the span only when LogSQL is
+  also true (same gate as M8-3). On *Db2Error, the span status
+  flips to Error and the SQLSTATE / SQLCODE / MessageID attach as
+  `db.response.status_code` / `db.ibm_db2_for_i.sqlcode` /
+  `db.ibm_db2_for_i.message_id`. API uses
+  `go.opentelemetry.io/otel/trace` v1.36.0 so callers can mix any
+  OTel SDK. `cmd/smoketest -trace-stdout` flag wires the stdout
+  exporter; live-validated against IBM Cloud V7R6M0 (span tree
+  matches conventions byte-for-byte).
 - **M8-5 JTOpen DSN migration guide** ⏳
 - **M8-6 Performance tuning notes** ⏳
 

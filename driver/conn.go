@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
@@ -99,7 +101,13 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		}
 	}
 
-	conn := &Conn{conn: db, cfg: c.cfg, serverVRM: serverVRM, log: log}
+	conn := &Conn{
+		conn:      db,
+		cfg:       c.cfg,
+		serverVRM: serverVRM,
+		log:       log,
+		tracer:    resolveTracer(c.cfg.Tracer),
+	}
 	conn.log = log.With(slog.Uint64("server_vrm", uint64(serverVRM)))
 	conn.log.LogAttrs(ctx, slog.LevelInfo, "gojtopen: connected",
 		slog.String("user", c.cfg.User),
@@ -130,6 +138,10 @@ type Conn struct {
 	// fallback when Config.Logger is nil). Tagged with
 	// driver=gojtopen, dsn_host=<host>, server_vrm=<vrm>.
 	log *slog.Logger
+
+	// tracer is the resolved OTel trace.Tracer. Always non-nil
+	// (no-op fallback when Config.Tracer is nil).
+	tracer trace.Tracer
 }
 
 // Logger returns the per-connection slog.Logger. Always non-nil --

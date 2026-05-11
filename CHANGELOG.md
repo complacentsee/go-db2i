@@ -12,6 +12,44 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-4 OpenTelemetry spans on `Stmt.ExecContext` /
+  `Stmt.QueryContext`. New `driver.Config.Tracer trace.Tracer` field
+  takes a `go.opentelemetry.io/otel/trace` API tracer (v1.36.0
+  pinned); the driver doesn't depend on any specific OTel SDK so
+  callers can plug in any exporter. Nil tracer resolves to the
+  noop-tracer fallback (same idiom as Config.Logger from M8-3).
+  Spans follow the OpenTelemetry database semantic conventions
+  ([May 2025 refresh](https://opentelemetry.io/docs/specs/semconv/database/database-spans/)):
+    - SpanKind = Client
+    - Span name = the operation verb (`EXEC` for `db.Exec`,
+                  `QUERY` for `db.Query`).
+    - Attributes:
+        - `db.system.name = "ibm_db2_for_i"` (dialect form).
+        - `db.operation.name = "EXEC" | "QUERY"`.
+        - `db.namespace = <Config.Library>` when set.
+        - `db.user`, `server.address`, `server.port` from Config.
+        - `db.statement.parameters.count` always.
+        - `db.response.returned_rows` on Exec.
+        - `db.statement` only when `Config.LogSQL=true` (same gate
+                                                       as the slog
+                                                       integration).
+    - On error: span status set to Error,
+                `*hostserver.Db2Error` (when present) attaches
+                `db.response.status_code` (SQLSTATE),
+                `db.ibm_db2_for_i.sqlcode`, and
+                `db.ibm_db2_for_i.message_id` as dedicated
+                attributes so alerting routes don't have to regex
+                the message.
+  `cmd/smoketest -trace-stdout` wires the OTel stdout exporter for
+  reproducible captures. Live-validated against IBM Cloud V7R6M0:
+  a 71 ms QUERY span emitted with SpanKindClient + the full
+  convention-compliant attribute set. Internal offline coverage:
+  `driver/tracer_test.go` (5 cases) walks the API + the Db2Error
+  recording path through an in-memory exporter. Full plaintext
+  conformance suite (~152 s) remains green; the noop-tracer
+  fallback adds no measurable overhead under the default
+  nil-Tracer configuration.
+
 - M8-3 slog integration. New `driver.Config.Logger *slog.Logger`
   field hands the driver a caller-controlled logging sink; nil (the
   default) silences all driver-side logging via an internal
