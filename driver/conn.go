@@ -518,6 +518,29 @@ func (c *Conn) packageLookup(sql string) *hostserver.PackageStatement {
 	return ps
 }
 
+// purgeCachedStatement removes the cached entry for sql. Called by
+// the cache-hit dispatch sites when an EXECUTE fails with SQL-204
+// (object not found) or SQL-805 (package not usable) -- both
+// indicate the server-renamed-statement reference is stale (the
+// underlying object got DROP+CREATEd under the *PGM). After the
+// purge, the dispatch falls through to plain PREPARE_DESCRIBE,
+// which re-files the statement against the new object; subsequent
+// PREPAREs accumulate against the freshly-stubbed entry and
+// auto-populate re-learns the server-renamed name once the local
+// retry threshold is re-crossed.
+//
+// Safe to call when sql isn't cached or the conn has no package
+// context -- both no-op.
+//
+// This is the first delete path on c.pkg.Cached; symmetric to the
+// merge-on-refresh pattern in refreshPackageCache.
+func (c *Conn) purgeCachedStatement(sql string) {
+	if c.pkg == nil || c.pkg.Cached == nil {
+		return
+	}
+	delete(c.pkg.Cached, sql)
+}
+
 // filingRefreshTriggers is the schedule of LocalPrepareCount
 // values at which the conn issues a RETURN_PACKAGE refresh to
 // learn the server-assigned filed name. The first trigger (3)

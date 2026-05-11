@@ -237,10 +237,20 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if cached != nil && !hasOutDest(outDests) && s.conn.pkg != nil {
 		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logExecCached(logger, len(args), start, res, cached.Name, err)
-		if err != nil {
-			return nil, s.conn.classifyConnErr(err)
+		if shouldRefallbackToPrepare(err) {
+			// SQL-204 / SQL-805 on the cached path: the
+			// server-renamed plan is stale (DROP+CREATE under
+			// the *PGM since the cache was downloaded). Purge
+			// the entry and fall through to the regular
+			// PREPARE_DESCRIBE path below, which will re-file
+			// the statement against the new object.
+			s.conn.purgeCachedStatement(s.query)
+		} else {
+			if err != nil {
+				return nil, s.conn.classifyConnErr(err)
+			}
+			return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 		}
-		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 	}
 
 	// Track this PREPARE_DESCRIBE for the v0.7.4 auto-populate
@@ -368,10 +378,16 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if cached := s.conn.packageLookup(s.query); cached != nil && len(cached.DataFormat) > 0 && s.conn.pkg != nil {
 		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logQueryCached(len(args), start, cached.Name, err)
-		if err != nil {
-			return nil, s.conn.classifyConnErr(err)
+		if shouldRefallbackToPrepare(err) {
+			// SQL-204 / SQL-805: stale cached plan. Purge and
+			// fall through to plain PREPARE_DESCRIBE below.
+			s.conn.purgeCachedStatement(s.query)
+		} else {
+			if err != nil {
+				return nil, s.conn.classifyConnErr(err)
+			}
+			return &Rows{cursor: cursor, conn: s.conn}, nil
 		}
-		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
 
 	// v0.7.4 auto-populate: track this PREPARE for the threshold-
@@ -740,6 +756,41 @@ func hasOutDest(outDests []*stdsql.Out) bool {
 		}
 	}
 	return false
+}
+
+// shouldRefallbackToPrepare reports whether err should trigger the
+// cache-hit -> regular-PREPARE fallback. Three trigger conditions:
+//
+//   - *Db2Error with SQLCode -204 (SQL0204: object not found):
+//     the underlying object was DROP+CREATEd under the live *PGM,
+//     so the cached server-renamed plan is stale.
+//   - *Db2Error with SQLCode -805 (SQL0805: package not usable):
+//     the *PGM itself is unavailable; same staleness signal.
+//   - hostserver.ErrUnsupportedCachedParamType: the cache-hit
+//     encoder hit a SQL type it has no branch for (typically a
+//     LOB-bind statement, where the *PGM stores raw-LOB SQL types
+//     405/409/etc while our encoder only handles the live-PREPARE
+//     locator types 960/961/etc). The regular path computes
+//     shapes from the live PREPARE_DESCRIBE reply and routes
+//     through the LOB-locator wire path, so it succeeds where the
+//     cache-hit fast path can't.
+//
+// Cache-hit dispatch wraps its call in shouldRefallbackToPrepare to
+// decide whether to purge the stale entry and re-route through the
+// plain PREPARE_DESCRIBE path versus propagating the error to the
+// caller. Tight scope on purpose: any other SQL error -- syntax,
+// permission, constraint -- should NOT be silently retried, because
+// the next PREPARE would just fail the same way and the caller
+// loses the diagnostic.
+func shouldRefallbackToPrepare(err error) bool {
+	if errors.Is(err, hostserver.ErrUnsupportedCachedParamType) {
+		return true
+	}
+	var dbErr *hostserver.Db2Error
+	if !errors.As(err, &dbErr) {
+		return false
+	}
+	return dbErr.SQLCode == -204 || dbErr.SQLCode == -805
 }
 
 // writeBackOutParams reflect-assigns each decoded OUT value into the

@@ -2,6 +2,7 @@ package hostserver
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -9,6 +10,24 @@ import (
 
 	"github.com/complacentsee/go-db2i/ebcdic"
 )
+
+// ErrUnsupportedCachedParamType is wrapped by EncodeDBExtendedData
+// when the SQL type of a parameter has no encoder branch. Surfaced
+// as a sentinel so the driver-layer cache-hit dispatch can detect
+// the encoder gap via errors.Is and fall through to plain
+// PREPARE_DESCRIBE rather than propagating the failure.
+//
+// The regular prepared path computes parameter shapes from the
+// live PREPARE_DESCRIBE reply (which uses LOB-locator types
+// 960/961/etc that this encoder DOES support); the cache-hit path
+// reads shapes from the *PGM-stored ParameterMarkerFormat, which
+// can carry the raw-LOB SQL types 405/409/etc that this encoder
+// has no branch for. Sentinel-driven fallback to PREPARE_DESCRIBE
+// keeps cached LOB-bind statements working at the cost of one
+// extra round-trip per call (the original v0.7.1 cache-miss
+// behaviour for LOB binds, now triggered by an empirical signal
+// instead of an upfront syntax filter).
+var ErrUnsupportedCachedParamType = errors.New("hostserver: cached-param SQL type has no encoder branch")
 
 // SQL function IDs in the descriptor (0x1E__) family. JTOpen splits
 // "describe parameters" off from "execute statement": between PREPARE
@@ -372,7 +391,7 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			// Remaining bytes left zero (server reads SL).
 			dataOff += int(p.FieldLength)
 		default:
-			return nil, fmt.Errorf("hostserver: param %d: SQL type %d not yet supported (M3 covers int/varchar)", i, p.SQLType)
+			return nil, fmt.Errorf("hostserver: param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
 		}
 	}
 	return buf, nil

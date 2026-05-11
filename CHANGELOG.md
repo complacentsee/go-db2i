@@ -10,6 +10,111 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Fixed: DDL cache invalidation (SQL-204 / SQL-805 fallback)
+
+`Stmt.Exec` / `Stmt.Query` cache-hit dispatch now catches SQL-204
+(object not found) and SQL-805 (package not usable) from the
+EXECUTE / OPEN reply, purges the stale cache entry, and falls
+through to the plain `PREPARE_DESCRIBE` path. The previous
+behaviour propagated the error to the caller, leaving the
+package's stale reference in the conn's `pkg.Cached` map until
+the connection cycled.
+
+Empirical finding on V7R6M0: same-shape `DROP` + `CREATE TABLE`
+does NOT trigger SQL-204 -- the server transparently rebinds the
+filed plan. The fallback fires only for object-genuinely-gone or
+package-unusable conditions (the typical real-world scenarios
+where this matters).
+
+Tight scope: only -204 / -805 trigger the fallback. Constraint
+violations, lock timeouts, permission errors, etc. propagate as
+before; silently re-PREPAREing them would mask diagnostics.
+
+Verified end-to-end via the new `TestCacheHit_DDLInvalidation`
+(unconditional in the `DB2I_TEST_FILING=1` matrix) against
+IBM Cloud V7R6M0: DROP table, observe SQL-204 on cache-hit, the
+fallback purges, fresh PREPARE returns the new row. Unit tests
+cover the `shouldRefallbackToPrepare` predicate and the symmetric
+`purgeCachedStatement` delete.
+
+### Validated: PUB400 V7R5M0 cross-LPAR
+
+Full Filing + CacheHit conformance suite runs green on PUB400
+V7R5M0 (the v0.7.4 plan promised this cross-LPAR validation but
+the v0.7.4 session shipped with V7R6M0-only verification).
+
+- DSN: `db2i://<USER>:<PWD>@pub400.com:8471/?signon-port=8476&library=<USER_LIB>`
+  (PUB400 free-tier account; per-user library)
+- 23 `TestFiling_*` + `TestCacheHit_*` tests pass in 294 s
+  (vs ~3 s baseline on IBM Cloud V7R6M0 LAN; ~100× reflects the
+  public-internet RTT).
+- `TestFiling_WireEquivalenceWithJT400` captures 3 packaged
+  PREPARE_DESCRIBE + 3 regular EXECUTE + 1 cache-hit EXECUTE on
+  V7R5M0 -- byte-identical CP set to the V7R6M0 capture.
+- Test bug fix: `TestFiling_WireEquivalenceWithJT400` previously
+  hardcoded `GOTEST.GOJTWEQ` instead of using `schema()`; now
+  reads the dynamic schema, so it runs portably against any
+  configured target.
+- New PUB400-specific environmental skips (not code changes):
+  - `TestCacheHit_OutParameterFallthrough`: skips with a clear
+    message when `CREATE SCHEMA` returns SQL-552 / 42502 (no
+    authority on shared free-tier LPARs).
+  - `TestTxQuery`: skips with a clear message when the test
+    schema isn't journaled (SQL-7008 / 55019 from `tx.Exec`).
+    AFTRAEGE1B is unjournaled by default on PUB400.
+
+PUB400 environmental quirk worth noting: leftover `*PGM` state
+from prior cache tests can accumulate and exceed the package's
+usable threshold on free-tier LPARs, causing `fillPackageCache`
+to silently miss the filing threshold on subsequent runs. Clean
+wipe (`DLTOBJ OBJ(<lib>/GOTCHE*) OBJTYPE(*SQLPKG)`) between full
+conformance runs avoids the flake. Documented for users running
+their own conformance suites.
+
+### Fixed: cache-hit fallback on unsupported parameter types (LOB-bind)
+
+Empirical investigation of LOB-bind filing under extended-dynamic
+(`TestLOBBind_FilingProbe` against V7R6M0) overturned the v0.7.4
+CHANGELOG assertion that the server refuses to file LOB-bind
+statements: the server DOES file them, and v0.7.4's auto-populate
+correctly learned the renamed name on the 4th iteration. The
+real gap was downstream: the cache-hit encoder
+(`EncodeDBExtendedData` in `hostserver/db_prepared.go`) only has
+branches for the live-PREPARE locator SQL types (960/961/964/965/
+968/969), while the *PGM-stored `ParameterMarkerFormat` carries
+the raw-LOB SQL types (404/405/408/409). The cache-hit dispatch
+hit an "SQL type N not yet supported" error on iter 4+ of every
+LOB-bind INSERT after the threshold crossed.
+
+- New sentinel `hostserver.ErrUnsupportedCachedParamType` (wrapped
+  via `%w` in `EncodeDBExtendedData`'s default branch). Drivers
+  use `errors.Is` to detect the encoder gap.
+- `shouldRefallbackToPrepare` extended to treat the sentinel as a
+  fallback trigger, alongside the v0.7.5 SQL-204 / SQL-805 codes.
+  Cache-hit dispatch purges the entry and re-routes through plain
+  `PREPARE_DESCRIBE` — the regular path computes shapes from the
+  live reply, gets the locator types the encoder DOES support,
+  and ships the bytes via `WRITE_LOB_DATA` normally.
+- `ExecutePreparedCached` cleans up the partially-built RPB on
+  encoder error so the fallback `PREPARE_DESCRIBE` can
+  `CREATE_RPB` cleanly (the symmetric path already exists for
+  the wire-error cases). Without this, the fallback re-PREPARE
+  failed with SQL-101 from the dirty RPB slot.
+
+Verified: `TestLOBBind_FilingProbe` on V7R6M0 now completes all 4
+iterations successfully (3 regular EXECUTEs + 1 cache-hit-fallback-
+to-regular-EXECUTE on iter 4); full Filing + CacheHit suite green.
+
+The fictional limitation in v0.7.4 ("LOB-bind filing continues to
+fall through ... per JT400's `JDPackageManager` filter") is
+removed from the Known limitations list. The actual behaviour is
+now: LOB-bind statements DO file server-side, the cache-hit fast
+path doesn't yet support binding their cached shape, and the
+fallback to regular `PREPARE_DESCRIBE` keeps everything working
+end-to-end. Cache-hit dispatch for LOB binds remains a v0.7.6
+candidate (would require extending the encoder for the raw-LOB
+SQL types).
+
 ## [0.7.4] - 2026-05-11
 
 Fifth tagged release. Wraps the post-v0.7.2 work that accumulated
@@ -131,9 +236,17 @@ Under `DB2I_TEST_FILING=1` against IBM Cloud V7R6M0:
 
 ### Known driver-side limitations (still tracked)
 
-- **LOB-bind filing** continues to fall through to the cache-miss
-  path per JT400's `JDPackageManager` filter -- documented
-  behaviour, not a regression.
+- **LOB-bind cache-hit fast path** is not yet implemented: the
+  *PGM-stored parameter shape uses raw-LOB SQL types (404/405/
+  etc) while the cache-hit encoder only handles the live-PREPARE
+  locator types (960/961/etc). v0.7.5 added a graceful fallback
+  via `ErrUnsupportedCachedParamType` -- the regular path keeps
+  working end-to-end; the cache-hit round-trip saving simply
+  doesn't apply to LOB binds yet. (Prior CHANGELOG text claimed
+  LOB-bind statements weren't filed at all per a JT400 source
+  inference; empirical testing showed the server DOES file them,
+  and the limitation is in our cache-hit encoder, not in JT400's
+  upstream filter or the server.)
 
 ### Investigation: extended-dynamic filing on V7R6M0 IBM Cloud + V7R5M0 PUB400
 

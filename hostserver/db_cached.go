@@ -77,6 +77,14 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	// --- 3) EXECUTE with cached statement-name override + bound values.
 	dataPayload, err := EncodeDBExtendedData(shapes, paramValues)
 	if err != nil {
+		// Encoder gap (typically ErrUnsupportedCachedParamType on
+		// LOB-bind statements where the *PGM stores raw-LOB SQL
+		// types but the encoder only handles locator types).
+		// We've already done CREATE_RPB + CHANGE_DESCRIPTOR on the
+		// wire; the RPB slot is now dirty. Drop it so the
+		// driver-layer fallback to plain PREPARE_DESCRIBE can
+		// re-CREATE_RPB cleanly.
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: encode cached input parameter data: %w", err)
 	}
 	execCorr := nextCorr()

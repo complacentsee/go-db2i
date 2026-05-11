@@ -1,13 +1,15 @@
 # go-db2i
 
-> **Current: v0.7.4 (2026-05-11)** — extended-dynamic SQL package
-> caching live across the JDBC type matrix, with `INSERT` / `UPDATE`
-> / `DELETE` filing wired end-to-end and the cache-hit param-binding
-> regression fixed. Per-conn auto-populate refreshes the cache after
-> first-time filing so subsequent calls dispatch via the fast path
-> without a server-renamed-name round-trip. See
-> [`docs/package-caching.md`](./docs/package-caching.md) for the
-> operator's guide and the `Example_packageCache*` godoc snippets.
+> **Current: v0.7.5 (2026-05-11)** — adds DDL cache invalidation
+> (cache-hit dispatch catches SQL-204 / SQL-805 and re-routes
+> through plain PREPARE_DESCRIBE), graceful fallback on
+> LOB-bind cache-hit (the *PGM stores raw-LOB SQL types our
+> cache-hit encoder doesn't handle; v0.7.5 falls through cleanly
+> instead of erroring), cross-LPAR validation against PUB400
+> V7R5M0, and a forward-commit password scrub for the auth-test
+> fixtures. See [`docs/package-caching.md`](./docs/package-caching.md)
+> for the operator's guide and the `Example_packageCache*` godoc
+> snippets.
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java

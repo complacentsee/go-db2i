@@ -918,6 +918,16 @@ func TestTxQuery(t *testing.T) {
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO %s (id, name) VALUES (?, ?)`, tbl), 1, "bob"); err != nil {
+		// SQL-7008 / SQLSTATE 55019: object not journaled and
+		// cannot participate in commitment control. Standard
+		// outcome on PUB400's shared free-tier libraries (no
+		// STRJRN authority for end-users). The transaction
+		// machinery is correctly engaged; the schema just can't
+		// support it. Skip cleanly.
+		if strings.Contains(err.Error(), "SQL-7008") ||
+			strings.Contains(err.Error(), "55019") {
+			t.Skipf("schema %s is not journaled; transactions require journaling: %v", schema(), err)
+		}
 		t.Fatalf("tx Exec: %v", err)
 	}
 	rows, err := tx.Query(fmt.Sprintf(`SELECT name FROM %s WHERE id = ?`, tbl), 1)
@@ -1737,8 +1747,16 @@ func setUpStoredProcs(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	// CREATE SCHEMA -- ignore SQLSTATE 42710 (already exists). DB2
-	// for i has no CREATE SCHEMA IF NOT EXISTS.
+	// for i has no CREATE SCHEMA IF NOT EXISTS. SQLSTATE 42502
+	// (insufficient authority -- common on PUB400's shared free-
+	// tier, where users get a pre-created personal library but no
+	// authority to make more) skips the test cleanly instead of
+	// failing it; the test doesn't apply to that environment.
 	if _, err := db.Exec("CREATE SCHEMA " + procLibrary); err != nil {
+		if strings.Contains(err.Error(), "42502") ||
+			strings.Contains(err.Error(), "SQL-552") {
+			t.Skipf("no authority to create schema %s: %v", procLibrary, err)
+		}
 		if !strings.Contains(err.Error(), "42710") &&
 			!strings.Contains(err.Error(), "already exists") {
 			t.Fatalf("CREATE SCHEMA %s: %v", procLibrary, err)

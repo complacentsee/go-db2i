@@ -224,6 +224,27 @@ identical zero-parameter SELECTs (typical of dashboards that hit
 the same metric query every refresh). Use `default` (the JT400
 default) if you want to minimise the `*PGM` size.
 
+### LOB binds + the cache-hit fast path
+
+`INSERT INTO t (id, payload) VALUES (?, ?)` where `payload` is a
+`BLOB` / `CLOB` / `DBCLOB` column DOES file into the `*PGM`
+server-side (verified on V7R6M0 via `TestLOBBind_FilingProbe`).
+What it does NOT do — yet — is benefit from the client-side
+cache-hit fast path. The `*PGM`-stored parameter shape uses the
+raw-LOB SQL types (404/405/408/409) while our cache-hit encoder
+only has branches for the live-PREPARE locator types (960/961/
+964/965/968/969). When the cache-hit dispatch fires for a
+LOB-bind statement, it hits `ErrUnsupportedCachedParamType` and
+v0.7.5 falls through to plain `PREPARE_DESCRIBE` — same wire shape
+as the original cache-miss path, no data corruption, just no
+round-trip saving for that call.
+
+Practical impact: a LOB-bind INSERT loop run on a single
+connection pays the regular round-trip cost on every call,
+identical to the pre-v0.7.1 behaviour for the same SQL. Non-LOB
+parameterised statements still get the full cache-hit speedup.
+Cache-hit support for LOB binds is a v0.7.6 candidate.
+
 ## Observability
 
 ### slog DEBUG lines

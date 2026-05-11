@@ -986,10 +986,21 @@ func TestCacheHit_CriteriaSelect(t *testing.T) {
 }
 
 // TestCacheHit_LOBBindFallthrough verifies that INSERTs binding a
-// BLOB column through the WRITE_LOB_DATA path correctly skip the
-// cache. LOB binds force a re-prepare per JT400's
-// JDPackageManager filter, so the package never files them and
-// the cache-hit path can't pick them up.
+// BLOB column don't emit a cache-hit dispatch line under the
+// 2-iter cold-cache test pattern.
+//
+// v0.7.4 attributed this fall-through to JT400's `JDPackageManager`
+// filter; v0.7.5's `TestLOBBind_FilingProbe` overturned that. The
+// actual behaviour: the server DOES file LOB-bind statements, and
+// the auto-populate path WOULD attempt a cache-hit dispatch on
+// iter 4+, but our cache-hit encoder has no branch for the *PGM-
+// stored raw-LOB SQL types (404/405/etc) and v0.7.5 falls through
+// gracefully via ErrUnsupportedCachedParamType. This test only
+// runs 2 iters on a fresh conn (the package starts empty, the
+// LocalPrepareCount stays under the threshold), so neither iter
+// crosses into cache-hit territory and the v0.7.5 fallback isn't
+// exercised here -- see `TestLOBBind_FilingProbe` for the
+// 4-iter + threshold-crossing scenario.
 func TestCacheHit_LOBBindFallthrough(t *testing.T) {
 	db, buf := openDBWithPackageCache(t, "")
 	tbl := makeCacheTestTable(t, db, "lob",
@@ -1538,7 +1549,7 @@ func TestFiling_WireEquivalenceWithJT400(t *testing.T) {
 		t.Fatalf("db.Conn: %v", err)
 	}
 	defer conn.Close()
-	const insertSQL = "INSERT INTO " + "GOTEST.GOJTWEQ" + " (ID, LABEL) VALUES (?, ?)"
+	insertSQL := "INSERT INTO " + qual + " (ID, LABEL) VALUES (?, ?)"
 	for i := 0; i < filingPrepareCount; i++ {
 		if _, err := conn.ExecContext(ctx, insertSQL, i, fmt.Sprintf("row-%d", i)); err != nil {
 			t.Fatalf("INSERT iter %d: %v", i, err)
@@ -1631,4 +1642,289 @@ func paramData(params []hostserver.DBParam, cp uint16) []byte {
 		}
 	}
 	return nil
+}
+
+// TestCacheHit_DDLInvalidation pins the v0.7.5 SQL-204 / SQL-805
+// fallback on the cache-hit dispatch path. Empirical finding on
+// V7R6M0: same-shape DROP+CREATE TABLE does NOT invalidate the
+// filed plan -- the server transparently rebinds and the cache-hit
+// continues to work. To exercise a real SQL-204 / SQL-805 we have
+// to DROP the table without recreating it.
+//
+// Sequence:
+//
+//  1. Wipe the package; create a fresh test table with one row.
+//  2. Fill the cache by running a parameterised SELECT 4 times on
+//     a pinned conn -- crosses IBM's 3-PREPARE threshold so the
+//     SELECT files.
+//  3. Open a fresh conn (downloads the now-populated *PGM cache)
+//     and confirm the SELECT cache-hits.
+//  4. Through a SEPARATE (non-package-cache) conn, DROP the table.
+//     The filed plan in the *PGM now references a missing object.
+//  5. Re-run the SELECT on the cache-loaded conn. Expect SQL-204
+//     from the cache-hit path; the v0.7.5 fallback purges the
+//     entry and re-routes through plain PREPARE_DESCRIBE, which
+//     also fails with SQL-204 (the table really IS gone) -- the
+//     caller sees SQL-204 from PREPARE, not from the cache-hit
+//     dispatch. The cache entry is purged regardless.
+//  6. Recreate the table with a new row.
+//  7. Re-run the SELECT once more. With the purge in place, the
+//     cache lookup misses, the regular PREPARE_DESCRIBE path
+//     runs against the new table, and the call succeeds returning
+//     the new row. Asserts no cache-hit dispatch fires (the entry
+//     IS gone) and the row content matches the post-recreate data.
+//
+// requireFiling-gated because the 4-iter fill depends on the
+// 3-PREPARE threshold and the DROP requires schema authority.
+// Runs end-to-end in ~½ s on V7R6M0.
+func TestCacheHit_DDLInvalidation(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Step 1: wipe package + (re)create the test table.
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+	tbl := makeCacheTestTable(t, wipeDB, "ddl",
+		"(id INTEGER NOT NULL PRIMARY KEY, label VARCHAR(32))")
+	if _, err := wipeDB.ExecContext(ctx,
+		"INSERT INTO "+tbl+" (id, label) VALUES (1, 'before')"); err != nil {
+		t.Fatalf("seed insert: %v", err)
+	}
+
+	// Step 2: file the SELECT.
+	selectSQL := "SELECT label FROM " + tbl + " WHERE id = ?"
+	fillPackageCache(t, fillQuery, selectSQL, 1)
+
+	// Step 3: fresh conn -- cache-loaded; verify the SELECT
+	// cache-hits cleanly.
+	db, buf := openDBWithPackageCache(t, "")
+	defer db.Close()
+	var label string
+	if err := db.QueryRowContext(ctx, selectSQL, 1).Scan(&label); err != nil {
+		t.Fatalf("pre-DDL SELECT: %v", err)
+	}
+	if label != "before" {
+		t.Fatalf("pre-DDL label = %q, want %q", label, "before")
+	}
+	expectCacheHit(t, buf, cacheHitQueryMsg)
+	preDDLHits := countCacheHits(buf)
+
+	// Step 4: DROP the table (no recreate yet). The cache-loaded
+	// conn's *PGM still references the now-missing object.
+	if _, err := wipeDB.ExecContext(ctx, "DROP TABLE "+tbl); err != nil {
+		t.Fatalf("DROP TABLE: %v", err)
+	}
+
+	// Step 5: the cache-hit dispatch should hit SQL-204, the
+	// v0.7.5 fallback should purge the entry, the regular
+	// PREPARE_DESCRIBE path should also fail SQL-204 (the table
+	// is genuinely gone), and the caller sees an error. The
+	// important invariant is that the fallback path fired -- we
+	// verify that in step 7 (no more cache-hit dispatch for the
+	// purged entry).
+	err := db.QueryRowContext(ctx, selectSQL, 1).Scan(&label)
+	if err == nil {
+		t.Fatalf("post-DROP SELECT unexpectedly succeeded; table is gone")
+	}
+	var dbErr *hostserver.Db2Error
+	if !errors.As(err, &dbErr) {
+		t.Fatalf("post-DROP SELECT err is not *Db2Error: %T %v", err, err)
+	}
+	if dbErr.SQLCode != -204 {
+		// SQL-204 is the documented signal; the test asserts it
+		// loud so a future server release that changes the signal
+		// gets a clear diagnostic.
+		t.Fatalf("post-DROP SQLCode = %d, want -204", dbErr.SQLCode)
+	}
+
+	// Step 6: recreate the table with new row.
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (id INTEGER NOT NULL PRIMARY KEY, label VARCHAR(32))"); err != nil {
+		t.Fatalf("re-CREATE TABLE: %v", err)
+	}
+	if _, err := wipeDB.ExecContext(ctx,
+		"INSERT INTO "+tbl+" (id, label) VALUES (1, 'after')"); err != nil {
+		t.Fatalf("post-recreate insert: %v", err)
+	}
+
+	// Step 7: on the same cache-loaded conn, re-run the SELECT.
+	// The entry was purged in step 5, so the cache-hit dispatch
+	// must NOT fire; the regular PREPARE_DESCRIBE path runs
+	// against the new table and succeeds returning the new row.
+	hitsBeforeFinal := countCacheHits(buf)
+	if err := db.QueryRowContext(ctx, selectSQL, 1).Scan(&label); err != nil {
+		t.Fatalf("post-recreate SELECT: %v", err)
+	}
+	if label != "after" {
+		t.Errorf("post-recreate label = %q, want %q", label, "after")
+	}
+	finalHits := countCacheHits(buf)
+	if finalHits > hitsBeforeFinal {
+		t.Errorf("cache-hit dispatch fired after purge: pre-DDL=%d before-final=%d final=%d "+
+			"-- the v0.7.5 purge after SQL-204 didn't take",
+			preDDLHits, hitsBeforeFinal, finalHits)
+	}
+}
+
+// TestLOBBind_FilingProbe answers the v0.7.5 LOB-bind filing
+// investigation question empirically: does the IBM i server file a
+// LOB-bind INSERT when asked? Our existing CHANGELOG line ("LOB-bind
+// filing continues to fall through to the cache-miss path per
+// JT400's `JDPackageManager` filter") infers from JT400's source
+// that the exclusion is correct; this test measures the actual
+// server behaviour against V7R6M0.
+//
+// The test does NOT assert pass/fail on whether filing happens --
+// the goal is empirical observation. Result interpretation:
+//
+//   - SYSPACKAGESTAT shows the LOB-bind INSERT as a filed entry:
+//     the server accepts filing for LOB-bind statements. Our
+//     v0.7.4 cache-hit path needs to be extended to handle LOB
+//     locator binds, and the JT400-derived exclusion in our docs
+//     is obsolete (V7R6 has moved past whatever historical
+//     limitation JT400 was working around).
+//   - SYSPACKAGESTAT does NOT show the LOB-bind INSERT, OR shows
+//     it but cache-hit re-prepares on subsequent calls: the
+//     existing fall-through behaviour is correct; our docs need
+//     to point at the real (server-side) gate rather than
+//     inferring it from JT400 source.
+//
+// The test logs the outcome via t.Logf so the result is visible in
+// CI output regardless of pass/fail; the assertion is only that
+// the test ran end-to-end without a wire error.
+//
+// requireFiling-gated because the 4-iter fill depends on the
+// 3-PREPARE threshold and the WIP package wipe requires schema
+// authority.
+func TestLOBBind_FilingProbe(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+	tbl := makeCacheTestTable(t, wipeDB, "lobf",
+		"(id INTEGER NOT NULL, payload BLOB(64K))")
+
+	// Pin a single conn so all 4 PREPAREs accumulate against one
+	// QZDASOINIT job (the server's per-job filing counter).
+	db, buf := openDBWithPackageCache(t, "default")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+
+	insertSQL := "INSERT INTO " + tbl + " (id, payload) VALUES (?, ?)"
+	// Small 1 KB BLOB -- enough to exercise the locator-bind path
+	// without crossing the chunk boundary that would dominate
+	// timing on a slow link.
+	payload := bytes.Repeat([]byte{0xAB}, 1024)
+	// Track outcomes per iteration. Errors are logged but don't
+	// fail the test -- the goal is observation. If iter 0 errors,
+	// that IS a failure (no measurement possible).
+	var iterErr [4]error
+	for i := 0; i < filingPrepareCount; i++ {
+		_, err := conn.ExecContext(ctx, insertSQL, i, payload)
+		iterErr[i] = err
+		if err != nil {
+			t.Logf("LOB-bind INSERT iter %d: %v", i, err)
+			if i == 0 {
+				conn.Close()
+				t.Fatalf("iter 0 must succeed for the probe to be meaningful")
+			}
+		}
+	}
+	conn.Close()
+	db.Close()
+
+	// Query SYSPACKAGESTAT on a fresh, non-package-cache conn (the
+	// visibility-delay rule from TestFiling_ServerSideStateVerified
+	// applies).
+	row := wipeDB.QueryRowContext(ctx, `
+		SELECT PACKAGE_NAME, NUMBER_STATEMENTS, PACKAGE_USED_SIZE
+		FROM   QSYS2.SYSPACKAGESTAT
+		WHERE  PACKAGE_NAME LIKE '`+cachePackageName+`%'
+		  AND  PACKAGE_SCHEMA = '`+schema()+`'
+		ORDER BY PACKAGE_NAME
+		FETCH FIRST 1 ROWS ONLY`)
+	var pkgName string
+	var numStmts, usedSize int64
+	if err := row.Scan(&pkgName, &numStmts, &usedSize); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			t.Logf("SYSPACKAGESTAT empty -- server did NOT create *PGM (or LOB-bind PREPARE skipped CREATE_PACKAGE).")
+			return
+		}
+		t.Fatalf("SYSPACKAGESTAT: %v", err)
+	}
+	t.Logf("LOB-bind filing observation: pkg=%s.%s NUMBER_STATEMENTS=%d PACKAGE_USED_SIZE=%d",
+		schema(), pkgName, numStmts, usedSize)
+
+	// Per-statement detail -- if filing happened, the STATEMENT_TEXT
+	// will start with 'INSERT' (or its EBCDIC equivalent depending
+	// on the catalog view's CCSID handling).
+	rows, err := wipeDB.QueryContext(ctx, `
+		SELECT STATEMENT_NAME, NUMBER_TIMES_PREPARED, NUMBER_TIMES_EXECUTED,
+		       SUBSTR(STATEMENT_TEXT, 1, 80) AS STMT
+		FROM   QSYS2.SYSPACKAGESTMTSTAT
+		WHERE  PACKAGE_NAME = '`+pkgName+`'
+		  AND  PACKAGE_SCHEMA = '`+schema()+`'
+		ORDER BY STATEMENT_NAME`)
+	if err != nil {
+		t.Fatalf("SYSPACKAGESTMTSTAT: %v", err)
+	}
+	defer rows.Close()
+	stmtSeen := 0
+	for rows.Next() {
+		var name, stmt string
+		var prepared, executed int64
+		if err := rows.Scan(&name, &prepared, &executed, &stmt); err != nil {
+			t.Fatalf("scan stmt row: %v", err)
+		}
+		t.Logf("  filed statement: %s prepared=%d executed=%d text=%q",
+			name, prepared, executed, stmt)
+		stmtSeen++
+	}
+
+	// Observability: did our driver log any cache-hit dispatch?
+	// (None expected on iter 1-3; iter 4 would only cache-hit if
+	// auto-populate after refresh saw a populated NameBytes.)
+	hits := countCacheHits(buf)
+	t.Logf("driver cache-hit dispatches observed: %d", hits)
+
+	// Did the auto-populate path cause a late-iteration cache-hit
+	// attempt? If so, did it succeed or hit an encoder gap?
+	autoPopulateFired := false
+	cacheHitErr := ""
+	for i, err := range iterErr {
+		if err == nil {
+			continue
+		}
+		if strings.Contains(err.Error(), "cached") || strings.Contains(err.Error(), "SQL type") {
+			autoPopulateFired = true
+			cacheHitErr = fmt.Sprintf("iter %d: %v", i, err)
+			break
+		}
+	}
+
+	// Empirical summary -- not a hard assertion since the answer
+	// depends on server behaviour.
+	switch {
+	case numStmts == 0:
+		t.Logf("CONCLUSION: server refused to file LOB-bind INSERT. Our cache-miss fall-through is correct; the limitation lives on the server, not the driver.")
+	case numStmts >= 1 && stmtSeen == 0:
+		t.Logf("CONCLUSION: SYSPACKAGESTAT counts a statement but SYSPACKAGESTMTSTAT is empty -- unusual. Investigate before declaring v0.7.5 done.")
+	case numStmts >= 1 && autoPopulateFired:
+		t.Logf("CONCLUSION: server DID file the LOB-bind INSERT, AND v0.7.4 auto-populate fired on iter 3+. " +
+			"BUT the cache-hit encoder rejected the LOB locator (%s). " +
+			"v0.7.5 should either: (a) skip auto-populate for SQLs with LOB binds "+
+			"(`packageEligibleFor` extension), or (b) defer to v0.7.6 with extended "+
+			"cache-hit encoder support for LOB types. The server cooperation is now "+
+			"empirically confirmed.", cacheHitErr)
+	case numStmts >= 1 && stmtSeen >= 1:
+		t.Logf("CONCLUSION: server DID file the LOB-bind INSERT. Our cache-miss fall-through leaves a round-trip win on the table; consider extending v0.7.6 to file LOB-bind eligibly.")
+	}
 }

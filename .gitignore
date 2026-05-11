@@ -25,6 +25,7 @@ Thumbs.db
 # Local env files
 .env
 .env.local
+.env.*
 
 # Live credentials / private keys -- never commit
 AUTH.md
