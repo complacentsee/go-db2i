@@ -33,13 +33,43 @@ across IBM i versions; expect the public API surface to settle at
   case-scoped DLTOBJ via QCMDEXC under extended-dynamic) get a
   Connection wired the same way as `execute()`.
 
+### Added (M10-1 — package-cache wire encoder)
+
+- `hostserver/db_package.go`: function-code constants
+  `ReqDBSQLCreatePackage` (0x180F), `ReqDBSQLReturnPackage`
+  (0x1815), `ReqDBSQLDeletePackage` (0x1811),
+  `ReqDBSQLClearPackage` (0x1810). CP constants
+  `cpPackageName` (0x3804), `cpPackageLibrary` (0x3801),
+  `cpPackageReturnOption` (0x3815), `cpPackageReplyInfo`
+  (0x380B). Note: the wire reality is CP 0x3801 for library,
+  not 0x3805 as the plan originally guessed.
+- New types: `PackageOptions` (session options the suffix
+  formula reads), `PackageManager` (per-conn state for M10-3),
+  `PackageStatement` (cached PREPARE entry inside a package).
+- `SuffixFromOptions(opts) → 4-char string`: byte-equal to
+  JT400's `JDPackageManager.java:442-522`. Includes the
+  COMMIT_MODE_RR overflow encoding that re-uses dateSep bits.
+- `BuildPackageName(base, opts) → 10-char wire name`: 6-char
+  upper/underscore/pad base + 4-char options suffix.
+- `BuildCreatePackageParams` + `BuildReturnPackageParams`:
+  param-list builders for CREATE_PACKAGE / RETURN_PACKAGE.
+  Output is byte-equal to JT400 (asserted against the
+  `prepared_package_first_use` and `prepared_package_cache_hit`
+  fixture bytes).
+- Table-driven tests cover the four formula slots, both
+  COMMIT_MODE_RR overflow branches, IBM-i object-name charset
+  encoding, and reject-bad-character validation.
+- Integration into the existing PREPARE / EXECUTE flow is
+  intentionally NOT in this commit; that lands in M10-3 once
+  M10-2 wires the Config / DSN surface.
+
 ### Notes
 
 - `prepared_package_overflow` is deferred — server-side package
   threshold (~1024 entries) makes the trace prohibitively large
   for the cache-hit suite. Will land before M10-4 closes.
-- M10-1+ work (wire encoder, DSN surface, client cache, error
-  handling) lives in `plans/m10-package-caching.md`.
+- M10-2+ work (DSN surface, client cache, error handling) lives
+  in `plans/m10-package-caching.md`.
 
 ## [0.6.0] - 2026-05-11
 
