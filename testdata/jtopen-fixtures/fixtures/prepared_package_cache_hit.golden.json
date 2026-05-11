@@ -1,0 +1,31 @@
+{
+  "case" : "prepared_package_cache_hit",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "TIMESTAMP",
+      "sqlType" : 93,
+      "displaySize" : 26,
+      "precision" : 26,
+      "scale" : 6,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "00002",
+      "label" : "00002",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "2026-05-11T03:56:51.912621", 2 ] ]
+  } ]
+}

@@ -1,0 +1,583 @@
+Toolbox for Java - JDBC 4.2 Open Source Software, JTOpen 21.0.4 codebase 5770-SS1 V7R6M0.00 built=2025-05-29 12:35:53 (GMT)
+java.home=/usr/lib/jvm/java-21-openjdk-arm64 java.vm.vendor=Ubuntu java.vm.info=mixed mode, sharing java.runtime.version=21.0.10+7-Ubuntu-122.04 java.fullversion=null java.vm.version=21.0.10+7-Ubuntu-122.04 java.version=21.0.10 os.name=Linux os.version=5.15.185-tegra
+Mon May 11 03:57:49:303 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 1C 03 00 E0 04 00 00 00 00 00 00 00 00 
+00 08 70 01 00 00 01 9E 15 2F 1B 77 
+Mon May 11 03:57:49:372 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 27 03 04 E0 04 00 00 00 00 00 00 00 00 
+00 0C F0 01 
+Mon May 11 03:57:49:372 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 00 D9 2A B6 3D D0 83 4C C7 00 00 00 07 
+11 2E 00 
+Mon May 11 03:57:49:420 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 6C 02 00 E0 04 00 00 00 00 00 00 00 00 
+00 02 70 02 07 01 00 00 00 46 11 05 C4 6D 74 D3 
+0C 94 F5 9C C2 39 F9 4E 25 4B D8 12 4F B0 25 C8 
+D4 35 36 9E 84 DA 67 6B B1 4D 17 FD 2C DF C3 6B 
+46 83 B7 8A 31 8D EC 2A AE 86 55 85 F3 55 D4 C0 
+AA 21 49 88 B5 02 23 9D BC 26 09 D8 00 00 00 10 
+11 04 C7 D6 E3 C5 E2 E3 40 40 40 40 
+Mon May 11 03:57:49:456 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 3C 02 00 E0 04 00 00 00 00 00 00 00 00 
+00 04 F0 02 
+Mon May 11 03:57:49:457 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 00 00 00 00 24 11 1F 00 00 00 00 F1 F2 
+F7 F2 F0 F4 61 D8 E4 E2 C5 D9 6D D5 C3 61 D8 E9 
+C4 C1 E2 D6 C9 D5 C9 E3 
+Mon May 11 03:57:49:458 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 01 19 00 00 E0 04 00 00 00 00 00 00 00 01 
+00 14 1F 80 81 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 16 00 00 00 08 38 01 34 B0 
+00 00 00 0C 38 02 00 25 F2 F9 F2 F4 00 00 00 14 
+38 03 00 25 E5 F7 D9 F2 D4 F0 F1 40 40 40 00 00 
+00 00 00 07 38 05 F0 00 00 00 08 38 06 00 01 00 
+00 00 07 38 24 E8 00 00 00 08 38 0E 00 00 00 00 
+00 08 38 0C 00 00 00 00 00 08 38 23 00 00 00 00 
+00 10 38 0F 00 25 00 06 C7 D6 E3 C5 E2 E3 00 00 
+00 08 38 12 00 01 00 00 00 07 38 21 F2 00 00 00 
+0A 38 22 00 00 80 00 00 00 00 08 38 11 00 01 00 
+00 00 0A 38 25 F2 00 00 00 00 00 00 0C 38 27 00 
+1F 00 1F 00 00 00 00 00 07 38 28 00 00 00 00 08 
+38 30 00 01 00 00 00 0E 38 3C 00 25 00 04 D1 C4 
+C2 C3 00 00 00 1E 38 3D 00 25 00 14 C9 C2 D4 40 
+E3 96 96 93 82 96 A7 40 86 96 99 40 D1 81 A5 81 
+00 00 00 12 38 3E 00 25 00 08 F0 F7 F0 F6 F0 F0 
+F0 F1 00 00 00 07 38 3F E8 
+Mon May 11 03:57:49:493 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 AA 00 00 E0 04 00 00 00 00 00 00 00 01 
+00 14 28 00 
+Mon May 11 03:57:49:494 UTC 2026  Data stream data received (connID=1836463382) ...
+81 04 00 00 00 00 00 00 00 00 1F 80 1F 80 00 00 
+00 00 00 00 00 00 00 82 38 04 00 00 00 01 00 00 
+00 00 00 00 00 00 00 00 00 01 00 00 00 01 F0 00 
+25 00 00 C5 D5 E4 5C C8 C5 E7 40 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 F2 F9 F8 F4 E5 F7 
+D9 F6 D4 F0 F0 F0 F1 F6 E2 C5 D9 C9 C5 E2 40 40 
+40 40 40 40 40 40 40 40 40 40 C7 D6 E3 C5 E2 E3 
+40 40 40 40 D8 E9 C4 C1 E2 D6 C9 D5 C9 E3 D8 E4 
+E2 C5 D9 6D D5 C3 40 40 F1 F2 F7 F2 F0 F4 00 06 
+C7 D6 E3 C5 E2 E3 
+Mon May 11 03:57:49:494 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 3B 00 00 E0 05 00 00 00 00 00 00 00 02 
+00 14 18 0C 80 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 01 00 00 00 13 38 13 00 25 
+00 01 C3 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:57:49:529 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 28 00 00 E0 05 00 00 00 00 00 00 00 02 
+00 14 28 00 
+Mon May 11 03:57:49:529 UTC 2026  Data stream data received (connID=1836463382) ...
+80 04 00 00 00 00 00 00 00 00 18 0C 18 0C 00 00 
+00 00 00 00 
+Mon May 11 03:57:49:530 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 4C 00 00 E0 04 00 00 00 00 00 00 00 03 
+00 14 18 0F 80 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 02 00 00 00 14 38 04 00 25 
+00 0A C7 D6 D1 E3 D7 D2 F9 F8 F9 F9 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:57:49:564 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 03 
+00 14 28 00 
+Mon May 11 03:57:49:565 UTC 2026  Data stream data received (connID=1836463382) ...
+80 04 00 00 00 00 00 00 00 00 18 0F 18 0F 00 01 
+FF FF FD A7 
+Mon May 11 03:57:49:565 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 56 00 00 E0 04 00 00 00 00 00 00 00 04 
+00 14 18 15 80 14 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 03 00 00 00 14 38 04 00 25 
+00 0A C7 D6 D1 E3 D7 D2 F9 F8 F9 F9 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 00 00 00 0A 
+38 15 00 00 00 00 
+Mon May 11 03:57:49:600 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 02 38 00 00 E0 04 00 00 00 00 00 00 00 04 
+00 14 28 00 
+Mon May 11 03:57:49:600 UTC 2026  Data stream data received (connID=1836463382) ...
+80 14 00 00 00 00 00 00 00 00 18 15 18 15 00 00 
+00 00 00 00 00 00 02 10 38 0B 00 00 02 0A 34 B0 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 00 01 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 02 D8 E9 C1 C6 F4 F8 F1 F8 F1 
+F5 C5 F8 F0 F2 C5 F0 F0 F1 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 
+00 00 00 B0 00 00 00 70 00 00 00 84 00 00 01 B0 
+00 00 00 60 00 53 00 45 00 4C 00 45 00 43 00 54 
+00 20 00 43 00 55 00 52 00 52 00 45 00 4E 00 54 
+00 5F 00 54 00 49 00 4D 00 45 00 53 00 54 00 41 
+00 4D 00 50 00 2C 00 20 00 43 00 41 00 53 00 54 
+00 28 00 3F 00 20 00 41 00 53 00 20 00 49 00 4E 
+00 54 00 45 00 47 00 45 00 52 00 29 00 20 00 46 
+00 52 00 4F 00 4D 00 20 00 53 00 59 00 53 00 49 
+00 42 00 4D 00 2E 00 53 00 59 00 53 00 44 00 55 
+00 4D 00 4D 00 59 00 31 00 00 00 00 00 00 00 00 
+00 00 00 00 E2 D8 D3 C4 C1 40 40 40 00 00 00 B0 
+00 02 00 02 01 88 00 1A 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 25 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F1 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 01 F1 00 04 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F2 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 E2 D8 D3 C4 C1 40 40 40 00 00 00 60 
+00 01 00 01 01 F1 00 04 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F1 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 
+Mon May 11 03:57:49:603 UTC 2026  Data stream sent (connID=1388278453) ...
+00 00 00 34 00 00 E0 09 00 00 00 00 00 00 00 00 
+00 00 70 03 00 00 00 0A 11 01 00 00 00 01 00 00 
+00 08 11 02 00 0A 00 00 00 0E 11 03 00 00 01 9E 
+15 2F 1C A3 
+Mon May 11 03:57:49:672 UTC 2026  Data stream data received (connID=1388278453) ...
+00 00 00 68 00 00 E0 09 00 00 00 00 00 00 00 00 
+00 04 F0 03 
+Mon May 11 03:57:49:672 UTC 2026  Data stream data received (connID=1388278453) ...
+00 00 00 00 00 00 00 0A 11 01 00 07 06 00 00 00 
+00 08 11 02 00 12 00 00 00 0E 11 03 94 BF 86 64 
+73 B3 85 62 00 00 00 07 11 19 04 00 00 00 22 11 
+1F 00 00 00 00 F1 F2 F7 F1 F2 F9 61 D8 E4 E2 C5 
+D9 6D D5 C3 61 D8 E9 E2 D6 E2 C9 C7 D5 00 00 00 
+07 11 2E 00 
+Mon May 11 03:57:49:673 UTC 2026  Data stream sent (connID=1388278453) ...
+00 00 00 14 00 00 E0 09 00 00 00 00 00 00 00 00 
+00 00 70 06 
+Mon May 11 03:57:49:674 UTC 2026  Exception does not contain a message.
+java.lang.reflect.InvocationTargetException
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:118)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at com.ibm.as400.access.PortMapper.getSocketConnection(PortMapper.java:280)
+	at com.ibm.as400.access.PortMapper.getServerSocket(PortMapper.java:213)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1503)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1431)
+	at com.ibm.as400.access.NLSImplRemote.connect(NLSImplRemote.java:38)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsidFromServer(AS400ImplRemote.java:1324)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsid(AS400ImplRemote.java:1266)
+	at com.ibm.as400.access.DBBaseReplyDS.parse(DBBaseReplyDS.java:774)
+	at com.ibm.as400.access.AS400JDBCConnectionImpl.sendAndReceive(AS400JDBCConnectionImpl.java:3149)
+	at com.ibm.as400.access.JDPackageManager.cache(JDPackageManager.java:145)
+	at com.ibm.as400.access.JDPackageManager.create(JDPackageManager.java:228)
+	at com.ibm.as400.access.AS400JDBCStatement.commonPrepare(AS400JDBCStatement.java:1457)
+	at com.ibm.as400.access.AS400JDBCStatement.executeQuery(AS400JDBCStatement.java:2602)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1561)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1447)
+	at com.ibm.as400.access.AS400JDBCDriver.initializeConnection(AS400JDBCDriver.java:1370)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:517)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:322)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:295)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:683)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:191)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.openConnection(Capture.java:271)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.runCase(Capture.java:183)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.main(Capture.java:78)
+Caused by: java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.connect0(Native Method)
+	at java.base/sun.nio.ch.Net.connect(Net.java:601)
+	at java.base/sun.nio.ch.Net.connect(Net.java:590)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:583)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	... 25 more
+Mon May 11 03:57:49:676 UTC 2026  Connection refused
+java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.connect0(Native Method)
+	at java.base/sun.nio.ch.Net.connect(Net.java:601)
+	at java.base/sun.nio.ch.Net.connect(Net.java:590)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:583)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at com.ibm.as400.access.PortMapper.getSocketConnection(PortMapper.java:280)
+	at com.ibm.as400.access.PortMapper.getServerSocket(PortMapper.java:213)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1503)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1431)
+	at com.ibm.as400.access.NLSImplRemote.connect(NLSImplRemote.java:38)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsidFromServer(AS400ImplRemote.java:1324)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsid(AS400ImplRemote.java:1266)
+	at com.ibm.as400.access.DBBaseReplyDS.parse(DBBaseReplyDS.java:774)
+	at com.ibm.as400.access.AS400JDBCConnectionImpl.sendAndReceive(AS400JDBCConnectionImpl.java:3149)
+	at com.ibm.as400.access.JDPackageManager.cache(JDPackageManager.java:145)
+	at com.ibm.as400.access.JDPackageManager.create(JDPackageManager.java:228)
+	at com.ibm.as400.access.AS400JDBCStatement.commonPrepare(AS400JDBCStatement.java:1457)
+	at com.ibm.as400.access.AS400JDBCStatement.executeQuery(AS400JDBCStatement.java:2602)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1561)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1447)
+	at com.ibm.as400.access.AS400JDBCDriver.initializeConnection(AS400JDBCDriver.java:1370)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:517)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:322)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:295)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:683)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:191)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.openConnection(Capture.java:271)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.runCase(Capture.java:183)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.main(Capture.java:78)
+Mon May 11 03:57:49:677 UTC 2026  Error when attempting to get CCSID from server.
+java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.connect0(Native Method)
+	at java.base/sun.nio.ch.Net.connect(Net.java:601)
+	at java.base/sun.nio.ch.Net.connect(Net.java:590)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:583)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at com.ibm.as400.access.PortMapper.getSocketConnection(PortMapper.java:280)
+	at com.ibm.as400.access.PortMapper.getServerSocket(PortMapper.java:213)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1503)
+	at com.ibm.as400.access.AS400ImplRemote.getConnection(AS400ImplRemote.java:1431)
+	at com.ibm.as400.access.NLSImplRemote.connect(NLSImplRemote.java:38)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsidFromServer(AS400ImplRemote.java:1324)
+	at com.ibm.as400.access.AS400ImplRemote.getCcsid(AS400ImplRemote.java:1266)
+	at com.ibm.as400.access.DBBaseReplyDS.parse(DBBaseReplyDS.java:774)
+	at com.ibm.as400.access.AS400JDBCConnectionImpl.sendAndReceive(AS400JDBCConnectionImpl.java:3149)
+	at com.ibm.as400.access.JDPackageManager.cache(JDPackageManager.java:145)
+	at com.ibm.as400.access.JDPackageManager.create(JDPackageManager.java:228)
+	at com.ibm.as400.access.AS400JDBCStatement.commonPrepare(AS400JDBCStatement.java:1457)
+	at com.ibm.as400.access.AS400JDBCStatement.executeQuery(AS400JDBCStatement.java:2602)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1561)
+	at com.ibm.as400.access.AS400JDBCDriver.prepareConnection(AS400JDBCDriver.java:1447)
+	at com.ibm.as400.access.AS400JDBCDriver.initializeConnection(AS400JDBCDriver.java:1370)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:517)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:322)
+	at com.ibm.as400.access.AS400JDBCDriver.connect(AS400JDBCDriver.java:295)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:683)
+	at java.sql/java.sql.DriverManager.getConnection(DriverManager.java:191)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.openConnection(Capture.java:271)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.runCase(Capture.java:183)
+	at io.github.complacentsee.gojtopen.fixtures.Capture.main(Capture.java:78)
+Mon May 11 03:57:49:678 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 5C 00 00 E0 04 00 00 00 00 00 00 00 05 
+00 14 1D 00 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 03 00 00 00 12 38 06 00 25 
+00 08 E2 E3 D4 E3 F0 F0 F0 F1 00 00 00 12 38 0B 
+00 25 00 08 C3 D9 E2 D9 F0 F0 F0 F1 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:57:49:679 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 B5 00 00 E0 04 00 00 00 00 00 00 00 06 
+00 14 18 03 8A 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 04 00 00 00 78 38 31 34 B0 
+00 00 00 6C 00 53 00 45 00 4C 00 45 00 43 00 54 
+00 20 00 4F 00 53 00 5F 00 56 00 45 00 52 00 53 
+00 49 00 4F 00 4E 00 2C 00 4F 00 53 00 5F 00 52 
+00 45 00 4C 00 45 00 41 00 53 00 45 00 20 00 46 
+00 52 00 4F 00 4D 00 20 00 53 00 59 00 53 00 49 
+00 42 00 4D 00 41 00 44 00 4D 00 2E 00 45 00 4E 
+00 56 00 53 00 59 00 53 00 49 00 4E 00 46 00 4F 
+00 00 00 08 38 12 00 02 00 00 00 07 38 08 00 00 
+00 00 06 38 04 
+Mon May 11 03:57:49:759 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 01 50 00 00 E0 04 00 00 00 00 00 00 00 06 
+00 14 28 00 
+Mon May 11 03:57:49:760 UTC 2026  Data stream data received (connID=1836463382) ...
+8A 04 00 00 00 00 00 00 00 01 18 03 18 03 00 00 
+00 00 00 00 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
+40 40 00 00 00 88 00 00 00 00 00 14 00 12 E2 E3 
+D4 E3 F0 F0 F0 F1 40 40 40 40 40 40 40 40 40 40 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 D8 E2 D8 C4 C5 E2 C3 40 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 F7 F9 
+F6 F7 40 40 40 40 40 40 40 40 40 40 40 F0 F0 F0 
+F0 F0 00 00 00 9A 38 12 00 00 00 00 00 00 00 02 
+01 00 FF 00 00 00 02 04 00 30 01 C1 00 00 01 02 
+01 00 00 00 70 25 F0 00 01 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 60 00 00 00 12 
+00 00 00 00 00 00 00 00 00 30 01 C1 00 00 01 02 
+01 00 00 00 70 25 F0 00 01 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 42 00 00 00 12 
+00 00 00 00 00 00 00 00 00 00 00 12 38 40 00 25 
+D6 E2 6D E5 C5 D9 E2 C9 D6 D5 00 00 00 12 38 40 
+00 25 D6 E2 6D D9 C5 D3 C5 C1 E2 C5 
+Mon May 11 03:57:49:760 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 4F 00 00 E0 04 00 00 00 00 00 00 00 07 
+00 14 18 0E 86 04 80 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 05 00 00 00 07 38 09 80 00 
+00 00 07 38 33 E8 00 00 00 0A 38 34 00 00 80 00 
+00 00 00 08 38 0D 00 00 00 00 00 07 38 30 E8 
+Mon May 11 03:58:31:506 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 F6 00 00 E0 04 00 00 00 00 00 00 00 07 
+00 14 28 00 
+Mon May 11 03:58:31:506 UTC 2026  Data stream data received (connID=1836463382) ...
+86 05 80 00 00 00 00 00 00 01 18 0E 18 0E 00 02 
+00 00 02 BC 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
+40 40 00 00 00 88 00 00 00 00 00 1C 00 12 C3 D9 
+E2 D9 F0 F0 F0 F1 40 40 40 40 40 40 40 40 40 40 
+00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 D8 E2 D8 C8 C4 C3 D3 E2 00 00 00 00 00 00 
+00 01 00 00 00 01 00 00 02 04 00 00 00 64 F7 F9 
+F6 F3 40 40 40 40 40 40 40 40 40 40 40 F0 F0 F0 
+F0 F0 00 00 00 10 38 14 F1 F0 F0 F0 F0 00 00 00 
+00 00 00 00 00 30 38 0E 00 00 00 01 00 00 00 01 
+00 02 00 02 00 00 00 00 00 00 02 04 00 00 00 00 
+00 00 00 0E 00 00 00 01 00 01 F7 00 01 F6 00 00 
+00 08 
+Mon May 11 03:58:31:508 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 08 
+00 14 1D 02 80 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 00 
+Mon May 11 03:58:31:542 UTC 2026  Data stream data received (connID=1836463382) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 08 
+00 14 28 00 
+Mon May 11 03:58:31:542 UTC 2026  Data stream data received (connID=1836463382) ...
+80 04 00 00 00 00 00 00 00 01 1D 02 1D 02 00 00 
+00 00 00 00 
+Mon May 11 03:58:31:542 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 09 
+00 14 1F 01 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 00 
+Mon May 11 03:58:31:543 UTC 2026  Data stream sent (connID=1836463382) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 00 
+00 14 1F FF 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 
+Mon May 11 03:58:31:545 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 1C 03 00 E0 04 00 00 00 00 00 00 00 00 
+00 08 70 01 00 00 01 9E 15 2F C0 79 
+Mon May 11 03:58:31:645 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 27 03 04 E0 04 00 00 00 00 00 00 00 00 
+00 0C F0 01 
+Mon May 11 03:58:31:645 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 00 07 F1 97 73 32 DF CD AB 00 00 00 07 
+11 2E 00 
+Mon May 11 03:58:31:702 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 6C 02 00 E0 04 00 00 00 00 00 00 00 00 
+00 02 70 02 07 01 00 00 00 46 11 05 97 1C 94 AA 
+29 69 4D 88 CE 7B E2 0C 34 2D F3 89 EF 80 EB 27 
+2F FC E4 5D 6B BE 89 ED 0A 0A F6 2A E9 12 ED C1 
+51 B5 37 72 86 9F 34 BD 91 CB 08 AD B5 A9 66 B9 
+7F 1A C0 0D D2 42 F4 A3 1F 0D 3A 25 00 00 00 10 
+11 04 C7 D6 E3 C5 E2 E3 40 40 40 40 
+Mon May 11 03:58:31:738 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 3C 02 00 E0 04 00 00 00 00 00 00 00 00 
+00 04 F0 02 
+Mon May 11 03:58:31:739 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 00 00 00 00 24 11 1F 00 00 00 00 F1 F2 
+F7 F0 F6 F1 61 D8 E4 E2 C5 D9 6D D5 C3 61 D8 E9 
+C4 C1 E2 D6 C9 D5 C9 E3 
+Mon May 11 03:58:31:740 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 01 41 00 00 E0 04 00 00 00 00 00 00 00 01 
+00 14 1F 80 81 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 1B 00 00 00 08 38 01 34 B0 
+00 00 00 0C 38 02 00 25 F2 F9 F2 F4 00 00 00 14 
+38 03 00 25 E5 F7 D9 F2 D4 F0 F1 40 40 40 00 00 
+00 00 00 07 38 05 F0 00 00 00 08 38 06 00 01 00 
+00 00 07 38 24 E8 00 00 00 08 38 0E 00 00 00 00 
+00 08 38 07 00 01 00 00 00 08 38 08 00 00 00 00 
+00 08 38 09 00 00 00 00 00 08 38 0A 00 00 00 00 
+00 08 38 0B 00 00 00 00 00 08 38 0C 00 00 00 00 
+00 08 38 23 00 00 00 00 00 10 38 0F 00 25 00 06 
+C7 D6 E3 C5 E2 E3 00 00 00 08 38 12 00 01 00 00 
+00 07 38 21 F2 00 00 00 0A 38 22 00 00 80 00 00 
+00 00 08 38 11 00 01 00 00 00 0A 38 25 F6 00 00 
+00 00 00 00 0C 38 27 00 1F 00 1F 00 00 00 00 00 
+07 38 28 00 00 00 00 08 38 30 00 01 00 00 00 0E 
+38 3C 00 25 00 04 D1 C4 C2 C3 00 00 00 1E 38 3D 
+00 25 00 14 C9 C2 D4 40 E3 96 96 93 82 96 A7 40 
+86 96 99 40 D1 81 A5 81 00 00 00 12 38 3E 00 25 
+00 08 F0 F7 F0 F6 F0 F0 F0 F1 00 00 00 07 38 3F 
+E8 
+Mon May 11 03:58:31:775 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 AA 00 00 E0 04 00 00 00 00 00 00 00 01 
+00 14 28 00 
+Mon May 11 03:58:31:776 UTC 2026  Data stream data received (connID=609962972) ...
+81 04 00 00 00 00 00 00 00 00 1F 80 1F 80 00 00 
+00 00 00 00 00 00 00 82 38 04 00 00 00 01 00 00 
+00 00 00 00 00 00 00 00 00 01 00 00 00 01 F0 00 
+25 00 00 C5 D5 E4 5C C8 C5 E7 40 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 F2 F9 F8 F4 E5 F7 
+D9 F6 D4 F0 F0 F0 F1 F6 E2 C5 D9 C9 C5 E2 40 40 
+40 40 40 40 40 40 40 40 40 40 C7 D6 E3 C5 E2 E3 
+40 40 40 40 D8 E9 C4 C1 E2 D6 C9 D5 C9 E3 D8 E4 
+E2 C5 D9 6D D5 C3 40 40 F1 F2 F7 F0 F6 F1 00 06 
+C7 D6 E3 C5 E2 E3 
+Mon May 11 03:58:31:776 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 3B 00 00 E0 05 00 00 00 00 00 00 00 02 
+00 14 18 0C 80 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 01 00 00 00 13 38 13 00 25 
+00 01 C3 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:58:31:811 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 28 00 00 E0 05 00 00 00 00 00 00 00 02 
+00 14 28 00 
+Mon May 11 03:58:31:812 UTC 2026  Data stream data received (connID=609962972) ...
+80 04 00 00 00 00 00 00 00 00 18 0C 18 0C 00 00 
+00 00 00 00 
+Mon May 11 03:58:31:813 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 4C 00 00 E0 04 00 00 00 00 00 00 00 03 
+00 14 18 0F 80 04 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 02 00 00 00 14 38 04 00 25 
+00 0A C7 D6 D1 E3 D7 D2 F9 F8 F9 F9 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:58:31:848 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 03 
+00 14 28 00 
+Mon May 11 03:58:31:849 UTC 2026  Data stream data received (connID=609962972) ...
+80 04 00 00 00 00 00 00 00 00 18 0F 18 0F 00 01 
+FF FF FD A7 
+Mon May 11 03:58:31:849 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 56 00 00 E0 04 00 00 00 00 00 00 00 04 
+00 14 18 15 80 14 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 03 00 00 00 14 38 04 00 25 
+00 0A C7 D6 D1 E3 D7 D2 F9 F8 F9 F9 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 00 00 00 0A 
+38 15 00 00 00 00 
+Mon May 11 03:58:31:884 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 02 38 00 00 E0 04 00 00 00 00 00 00 00 04 
+00 14 28 00 
+Mon May 11 03:58:31:884 UTC 2026  Data stream data received (connID=609962972) ...
+80 14 00 00 00 00 00 00 00 00 18 15 18 15 00 00 
+00 00 00 00 00 00 02 10 38 0B 00 00 02 0A 34 B0 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 00 01 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 02 D8 E9 C1 C6 F4 F8 F1 F8 F1 
+F5 C5 F8 F0 F2 C5 F0 F0 F1 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 
+00 00 00 B0 00 00 00 70 00 00 00 84 00 00 01 B0 
+00 00 00 60 00 53 00 45 00 4C 00 45 00 43 00 54 
+00 20 00 43 00 55 00 52 00 52 00 45 00 4E 00 54 
+00 5F 00 54 00 49 00 4D 00 45 00 53 00 54 00 41 
+00 4D 00 50 00 2C 00 20 00 43 00 41 00 53 00 54 
+00 28 00 3F 00 20 00 41 00 53 00 20 00 49 00 4E 
+00 54 00 45 00 47 00 45 00 52 00 29 00 20 00 46 
+00 52 00 4F 00 4D 00 20 00 53 00 59 00 53 00 49 
+00 42 00 4D 00 2E 00 53 00 59 00 53 00 44 00 55 
+00 4D 00 4D 00 59 00 31 00 00 00 00 00 00 00 00 
+00 00 00 00 E2 D8 D3 C4 C1 40 40 40 00 00 00 B0 
+00 02 00 02 01 88 00 1A 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 25 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F1 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 01 F1 00 04 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F2 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 E2 D8 D3 C4 C1 40 40 40 00 00 00 60 
+00 01 00 01 01 F1 00 04 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 05 F0 F0 F0 F0 F1 40 40 40 40 40 
+40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 40 
+40 40 40 40 
+Mon May 11 03:58:31:885 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 5C 00 00 E0 04 00 00 00 00 00 00 00 05 
+00 14 1D 00 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 03 00 00 00 12 38 06 00 25 
+00 08 E2 E3 D4 E3 F0 F0 F0 F1 00 00 00 12 38 0B 
+00 25 00 08 C3 D9 E2 D9 F0 F0 F0 F1 00 00 00 10 
+38 01 00 25 00 06 C7 D6 E3 C5 E2 E3 
+Mon May 11 03:58:31:886 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 D9 00 00 E0 04 00 00 00 00 00 00 00 06 
+00 14 18 03 8A 84 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 04 00 00 00 8E 38 31 34 B0 
+00 00 00 82 00 53 00 45 00 4C 00 45 00 43 00 54 
+00 20 00 43 00 55 00 52 00 52 00 45 00 4E 00 54 
+00 5F 00 55 00 53 00 45 00 52 00 2C 00 20 00 43 
+00 41 00 53 00 54 00 28 00 3F 00 20 00 41 00 53 
+00 20 00 56 00 41 00 52 00 43 00 48 00 41 00 52 
+00 28 00 36 00 34 00 29 00 29 00 20 00 46 00 52 
+00 4F 00 4D 00 20 00 53 00 59 00 53 00 49 00 42 
+00 4D 00 2E 00 53 00 59 00 53 00 44 00 55 00 4D 
+00 4D 00 59 00 31 00 00 00 08 38 12 00 02 00 00 
+00 07 38 08 01 00 00 00 14 38 04 00 25 00 0A C7 
+D6 D1 E3 D7 D2 F9 F8 F9 F9 
+Mon May 11 03:58:31:965 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 01 99 00 00 E0 04 00 00 00 00 00 00 00 06 
+00 14 28 00 
+Mon May 11 03:58:31:965 UTC 2026  Data stream data received (connID=609962972) ...
+8A 84 00 00 00 00 00 00 00 01 18 03 18 03 00 00 
+00 00 00 00 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
+40 40 00 00 00 88 00 00 00 00 00 14 00 12 E2 E3 
+D4 E3 F0 F0 F0 F1 40 40 40 40 40 40 40 40 40 40 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 D8 E2 D8 D7 D9 C5 D7 40 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 01 F7 F9 
+F6 F7 40 40 40 40 40 40 40 40 40 40 40 F0 F0 F0 
+F0 F0 00 00 00 90 38 12 00 00 00 00 00 00 00 02 
+01 00 FF 00 00 00 00 C4 00 30 01 C0 00 00 00 82 
+00 80 00 00 00 25 F0 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 60 00 00 00 0D 
+00 00 00 00 00 00 00 00 00 30 01 C1 00 00 00 42 
+00 40 00 00 00 25 F0 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 3D 00 00 00 0D 
+00 00 00 00 00 00 00 00 00 00 00 0D 38 40 FF FF 
+F0 F0 F0 F0 F1 00 00 00 0D 38 40 FF FF F0 F0 F0 
+F0 F2 00 00 00 53 38 13 00 00 00 00 00 00 00 01 
+00 00 00 00 00 00 00 42 00 30 01 C1 00 00 00 42 
+00 40 00 00 00 25 F0 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 30 00 00 00 0D 
+00 00 00 00 00 00 00 00 00 00 00 0D 38 40 00 00 
+F0 F0 F0 F0 F1 
+Mon May 11 03:58:31:966 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 7E 00 00 E0 04 00 00 00 00 00 00 00 07 
+00 14 1E 00 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 01 00 01 00 00 00 56 38 1E 00 00 
+00 01 00 00 00 01 00 00 00 00 00 00 00 42 00 40 
+01 C1 00 00 00 42 00 00 00 40 00 25 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+Mon May 11 03:58:31:967 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 D1 00 00 E0 04 00 00 00 00 00 00 00 08 
+00 14 18 0E 86 04 80 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 01 00 09 00 00 00 07 38 09 80 00 
+00 00 14 38 04 00 25 00 0A C7 D6 D1 E3 D7 D2 F9 
+F8 F9 F9 00 00 00 07 38 33 E8 00 00 00 0A 38 34 
+00 00 80 00 00 00 00 08 38 0D 00 00 00 00 00 07 
+38 30 E8 00 00 00 08 38 12 00 02 00 00 00 5E 38 
+1F 00 00 00 01 00 00 00 01 00 01 00 02 00 00 00 
+00 00 00 00 42 00 00 00 05 88 85 93 93 96 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 08 38 14 00 
+00 
+Mon May 11 03:58:32:045 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 FF 00 00 E0 04 00 00 00 00 00 00 00 08 
+00 14 28 00 
+Mon May 11 03:58:32:046 UTC 2026  Data stream data received (connID=609962972) ...
+86 05 80 00 00 00 00 00 00 01 18 0E 18 0E 00 02 
+00 00 02 BC 00 00 00 8E 38 07 E2 D8 D3 C3 C1 40 
+40 40 00 00 00 88 00 00 00 00 00 1C 00 12 C3 D9 
+E2 D9 F0 F0 F0 F1 40 40 40 40 40 40 40 40 40 40 
+00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 D8 E2 D8 C6 C5 E3 C3 C8 00 00 00 00 00 00 
+00 01 00 00 00 01 00 00 00 C4 00 00 00 64 F7 F9 
+F6 F3 40 40 40 40 40 40 40 40 40 40 40 F0 F0 F0 
+F0 F0 00 00 00 10 38 14 F1 F0 F0 F0 F0 00 00 00 
+00 00 00 00 00 39 38 0E 00 00 00 01 00 00 00 01 
+00 02 00 02 00 00 00 00 00 00 00 C4 00 00 00 00 
+00 00 00 17 00 00 00 01 00 06 C7 D6 E3 C5 E2 E3 
+00 05 88 85 93 93 96 00 00 00 08 
+Mon May 11 03:58:32:047 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 09 
+00 14 1E 01 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 01 00 00 
+Mon May 11 03:58:32:048 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 0A 
+00 14 1D 02 80 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 00 
+Mon May 11 03:58:32:124 UTC 2026  Data stream data received (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 0A 
+00 14 28 00 
+Mon May 11 03:58:32:124 UTC 2026  Data stream data received (connID=609962972) ...
+80 04 00 00 00 00 00 00 00 01 1D 02 1D 02 00 00 
+00 00 00 00 
+Mon May 11 03:58:32:125 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 0B 
+00 14 1F 01 00 04 00 00 00 00 00 00 00 01 00 01 
+00 00 00 01 00 00 00 00 
+Mon May 11 03:58:32:125 UTC 2026  Data stream sent (connID=609962972) ...
+00 00 00 28 00 00 E0 04 00 00 00 00 00 00 00 00 
+00 14 1F FF 00 00 00 00 00 00 00 00 00 00 00 00 
+00 00 00 00 00 00 00 00 

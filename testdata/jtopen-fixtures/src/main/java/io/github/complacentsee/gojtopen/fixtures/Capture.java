@@ -134,10 +134,31 @@ public final class Capture {
         Path tracePath = fixturesDir.resolve(c.name + ".trace");
         Files.deleteIfExists(tracePath);
 
-        try (Connection setupConn = openConnection(cfg)) {
-            // Setup runs untraced.
+        // Setup runs untraced. We give the setup connection the same
+        // extra connection properties as the traced run so cases that
+        // need session-level state (e.g. M10 package fixtures pre-
+        // seeding statements into the same *PGM) can do it through the
+        // standard Connection that the case will see during execute().
+        // Explicitly disable trace categories here in case a prior case
+        // left them on (or JTOpen flipped them on via a system property)
+        // -- otherwise setup datastreams bleed into the trace file once
+        // setFileName below is called.
+        Trace.setTraceOn(false);
+        Trace.setTraceDatastreamOn(false);
+        Trace.setTraceErrorOn(false);
+        Trace.setTraceWarningOn(false);
+        try (Connection setupConn = openConnection(cfg, c.extraConnectionProperties())) {
             c.setup(setupConn);
         }
+        // JTOpen tears down the AS400Server socket asynchronously on
+        // Connection.close() when "thread used" is true (our default
+        // when port is set explicitly). Those teardown bytes are sent
+        // some milliseconds later; if Trace is turned on between the
+        // close() and the actual teardown, the teardown frame lands in
+        // the trace file under the old connID. Force a sync point so
+        // those bytes flush BEFORE the trace file goes live.
+        System.gc();
+        Thread.sleep(200);
 
         GoldenWriter golden = new GoldenWriter(c.name);
 

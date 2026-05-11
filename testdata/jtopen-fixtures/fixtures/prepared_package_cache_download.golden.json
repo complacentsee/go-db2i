@@ -1,0 +1,31 @@
+{
+  "case" : "prepared_package_cache_download",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 128,
+      "precision" : 128,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "00002",
+      "label" : "00002",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 64,
+      "precision" : 64,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "GOTEST", "hello" ] ]
+  } ]
+}

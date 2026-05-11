@@ -8,7 +8,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Declares every fixture case the harness will capture.
@@ -107,6 +109,16 @@ final class Cases {
         cases.add(new CallResultSet());
         cases.add(new CallMultiSet());
         cases.add(new CallInout());
+
+        // Extended-dynamic-package caching (M10). Three captures cover
+        // the cache lifecycle: first PREPARE writing to the *PGM,
+        // in-session cache hit skipping PREPARE, and a fresh-connection
+        // RETURN_PACKAGE download of a pre-populated package. Each case
+        // clears the package in setUp via DLTPGM so re-captures are
+        // deterministic.
+        cases.add(new PackageFirstUse(schema));
+        cases.add(new PackageCacheHit(schema));
+        cases.add(new PackageCacheDownload(schema));
 
         // Negative paths — SQLException to SQLCARD parsing.
         cases.add(new ErrorSyntax());
@@ -881,6 +893,177 @@ final class Cases {
                 cs.registerOutParameter(1, Types.INTEGER);
                 cs.execute();
                 golden.recordOutParam(1, Types.INTEGER, Integer.valueOf(cs.getInt(1)));
+            }
+        }
+    }
+
+    /**
+     * Base class for M10 extended-dynamic-package fixtures. Every case
+     * shares the same package name + library + base SQL; per-case
+     * {@link #extraConnectionProperties()} overrides toggle whether the
+     * traced connection downloads the package on connect
+     * ({@code package cache=true}).
+     *
+     * The plan calls for the package to persist across cases: first_use
+     * starts fresh and populates {@code GOTEST.GOJTPK<suffix>}, and the
+     * later cache_hit / cache_download cases observe the pre-warmed
+     * package without running their own DDL. So setup() here is a
+     * no-op by default; only {@link PackageFirstUse} overrides to wipe
+     * any prior package state.
+     */
+    private static abstract class WithPackage extends Case {
+        protected static final String PACKAGE_NAME = "GOJTPKG";
+        // Parameterised SELECT — qualifies for {@code package
+        // criteria=default} which only caches statements that have
+        // parameter markers. The marker is cast so DB2 has a defined
+        // type to project (otherwise SQL0418 — "Use of parameter
+        // marker, NULL, or UNKNOWN not valid" — fires during commonPrepare
+        // on extended-dynamic connections).
+        protected static final String SAMPLE_SQL =
+                "SELECT CURRENT_TIMESTAMP, CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1";
+
+        protected final String schema;
+
+        WithPackage(String name, String schema) {
+            super(name);
+            this.schema = schema;
+        }
+
+        @Override public Map<String, String> extraConnectionProperties() {
+            Map<String, String> p = new HashMap<>();
+            p.put("extended dynamic", "true");
+            p.put("package", PACKAGE_NAME);
+            p.put("package library", schema);
+            // Subclasses overriding this should call super and then put
+            // their own keys on top.
+            return p;
+        }
+    }
+
+    /**
+     * {@code prepared_package_first_use.trace} — wipe any prior package
+     * via untraced DLTOBJ, then open a fresh connection that does the
+     * extended-dynamic CREATE_PACKAGE + PREPARE_DESCRIBE on the wire.
+     * The traced frames MUST carry CP 0x3804 (package name) and CP
+     * 0x3805 (package library); the reply MUST eventually carry CP
+     * 0x380B with the new entry. After this case the {@code *PGM}
+     * exists on the LPAR, populated with {@link #SAMPLE_SQL} and the
+     * second SQL used by {@link PackageCacheDownload}, so subsequent
+     * cases can observe a pre-warmed package.
+     */
+    private static final class PackageFirstUse extends WithPackage {
+        // Second SQL primed so PackageCacheDownload has at least two
+        // entries to assert on. We bake the second prepare into the
+        // first_use trace rather than its own setup() so the persisted
+        // state across cases is "everything first_use traced", with no
+        // hidden untraced side effects.
+        private static final String SECOND_SQL =
+                "SELECT CURRENT_USER, CAST(? AS VARCHAR(64)) FROM SYSIBM.SYSDUMMY1";
+
+        PackageFirstUse(String schema) { super("prepared_package_first_use", schema); }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            // setupConn here has the same {@code extended dynamic=true}
+            // extras the traced connection will use. JT400 issues
+            // CREATE_PACKAGE on sign-on, so we DLTOBJ AFTER sign-on has
+            // completed (any package the sign-on just minted is the
+            // one we want to drop). Wildcard pattern wipes every
+            // suffix variant in case session options drifted between
+            // captures.
+            try (Statement st = conn.createStatement()) {
+                String cmd = "DLTOBJ OBJ(" + schema + "/" + PACKAGE_NAME + "*) "
+                        + "OBJTYPE(*SQLPKG)";
+                try {
+                    st.execute("CALL QSYS2.QCMDEXC('" + cmd + "')");
+                } catch (SQLException ignored) {
+                    // CPF2105 (object not found) is the expected first-run
+                    // outcome; QCMDEXC wraps it as a SQL error.
+                }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (PreparedStatement ps = conn.prepareStatement(SAMPLE_SQL)) {
+                ps.setInt(1, 42);
+                try (ResultSet rs = ps.executeQuery()) {
+                    golden.recordResultSet(rs);
+                }
+            }
+            // Prime the second SQL in the same traced connection so the
+            // *PGM has two entries by the time cache_download opens.
+            try (PreparedStatement ps = conn.prepareStatement(SECOND_SQL)) {
+                ps.setString(1, "hello");
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) { /* drain — golden was recorded for SAMPLE_SQL only */ }
+                }
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_package_cache_hit.trace} — same connection, two
+     * back-to-back PREPAREs of the SAME SQL. The first PREPARE warms
+     * the client-side statement cache (and round-trips PREPARE_DESCRIBE
+     * + CP 0x3804/0x3805 to the server); the second PREPARE MUST hit
+     * the cache and NOT emit a 0x1803 frame. Verifies JT400's
+     * client-side fast path. Runs after {@link PackageFirstUse} so the
+     * server-side package already exists -- the first PREPARE here
+     * therefore goes through the EXISTING package, not CREATE_PACKAGE.
+     */
+    private static final class PackageCacheHit extends WithPackage {
+        PackageCacheHit(String schema) { super("prepared_package_cache_hit", schema); }
+        @Override public Map<String, String> extraConnectionProperties() {
+            Map<String, String> p = super.extraConnectionProperties();
+            p.put("package cache", "true");
+            return p;
+        }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            // First prepare: round-trips to server, primes client cache.
+            try (PreparedStatement ps = conn.prepareStatement(SAMPLE_SQL)) {
+                ps.setInt(1, 1);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) { /* drain */ }
+                }
+            }
+            // Second prepare of the SAME SQL: must hit the cache. The
+            // verifier asserts no 0x1803 PREPARE_DESCRIBE appears in the
+            // wire bytes AFTER this point in the trace.
+            try (PreparedStatement ps = conn.prepareStatement(SAMPLE_SQL)) {
+                ps.setInt(1, 2);
+                try (ResultSet rs = ps.executeQuery()) {
+                    golden.recordResultSet(rs);
+                }
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_package_cache_download.trace} — fresh connection
+     * with {@code package cache=true} against a package that
+     * {@link PackageFirstUse} primed with two entries. Asserts the
+     * RETURN_PACKAGE (0x1815) request fires on connect and the reply
+     * carries CP 0x380B with TWO statement entries. The execute()
+     * phase runs one of the two cached statements so the golden has
+     * a baseline result.
+     */
+    private static final class PackageCacheDownload extends WithPackage {
+        private static final String SECOND_SQL =
+                "SELECT CURRENT_USER, CAST(? AS VARCHAR(64)) FROM SYSIBM.SYSDUMMY1";
+
+        PackageCacheDownload(String schema) {
+            super("prepared_package_cache_download", schema);
+        }
+        @Override public Map<String, String> extraConnectionProperties() {
+            Map<String, String> p = super.extraConnectionProperties();
+            p.put("package cache", "true");
+            return p;
+        }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (PreparedStatement ps = conn.prepareStatement(SECOND_SQL)) {
+                ps.setString(1, "hello");
+                try (ResultSet rs = ps.executeQuery()) {
+                    golden.recordResultSet(rs);
+                }
             }
         }
     }

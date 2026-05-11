@@ -8,6 +8,39 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
+## [Unreleased]
+
+### Added (M10-0 — package-cache fixtures)
+
+- New fixture cases in `testdata/jtopen-fixtures/src/main/java/.../Cases.java`:
+  - `prepared_package_first_use` — wipes `GOTEST/GOJTPK*` via
+    untraced DLTOBJ, then primes the *PGM with two parameterised
+    SELECTs. Verifies CP 0x3804 (package name) and CP 0x3805
+    (package library) on the wire.
+  - `prepared_package_cache_hit` — back-to-back prepares of the
+    same SQL on one extended-dynamic connection with
+    `package cache=true`. Verifies JT400's client-side fast
+    path: one 0x1803 PREPARE_DESCRIBE on the wire, two EXECUTEs.
+  - `prepared_package_cache_download` — fresh connection with
+    `package cache=true` against the pre-warmed package.
+    Verifies 0x1815 RETURN_PACKAGE on connect with a CP 0x380B
+    reply carrying both seeded entries.
+- Captured `.trace` + `.golden.json` for the three cases against
+  IBM Cloud V7R6M0 (one-CPU LPAR via SSH-tunnelled 8471).
+- `testdata/jtopen-fixtures/src/main/java/.../Capture.java`:
+  setup runs with the same extra connection properties as the
+  traced run so cases needing pre-traced session state (e.g. a
+  case-scoped DLTOBJ via QCMDEXC under extended-dynamic) get a
+  Connection wired the same way as `execute()`.
+
+### Notes
+
+- `prepared_package_overflow` is deferred — server-side package
+  threshold (~1024 entries) makes the trace prohibitively large
+  for the cache-hit suite. Will land before M10-4 closes.
+- M10-1+ work (wire encoder, DSN surface, client cache, error
+  handling) lives in `plans/m10-package-caching.md`.
+
 ## [0.6.0] - 2026-05-11
 
 Second tagged release. M9 stored-procedure support shipped on top
