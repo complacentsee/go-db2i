@@ -385,7 +385,7 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 // matching shape on the server side.
 func ChangeDescriptorRequest(params []PreparedParam) (Header, []byte, error) {
 	tpl := DBRequestTemplate{
-		ORSBitmap:                 0x00040000, // RLE only -- fire and forget like CREATE_RPB
+		ORSBitmap:                 ORSDataCompression, // RLE only -- fire and forget like CREATE_RPB
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -445,7 +445,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	}
 	{
 		tpl := DBRequestTemplate{
-			ORSBitmap:                 0x00040000,
+			ORSBitmap:                 ORSDataCompression,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -469,7 +469,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	stmtBytes := utf16BE(sql)
 	prepCorr := nextCorr()
 	{
-		ors := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | uint32(0x00040000)
+		ors := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSParameterMarkerFmt | ORSDataCompression
 		if opts.extendedMetadata {
 			ors |= ORSExtendedColumnDescrs
 		}
@@ -483,7 +483,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		}
 		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
-			DBParamShort(cpDBStatementType, 2),
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
 			DBParamByte(cpDBPrepareOption, 0x00),
 		}
 		if opts.extendedMetadata {
@@ -556,16 +556,36 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		}
 	}
 
-	// --- 4) OPEN_DESCRIBE_FETCH with input parameters. ---
+	// --- 4) EXECUTE the statement and pull the first row batch.
+	// SELECT/VALUES/WITH use OPEN_DESCRIBE_FETCH (0x180E) which
+	// folds OPEN + DESCRIBE + FETCH into a single round trip --
+	// the server allocates a new cursor for the SELECT result.
+	// CALL takes a different path: the proc body opens its own
+	// DYNAMIC RESULT SETS cursors via DECLARE CURSOR WITH RETURN
+	// during execution, so the client EXECUTEs the proc first
+	// (0x1805) and then attaches to each pre-opened cursor with a
+	// separate OPEN_DESCRIBE (0x1804) + FETCH (0x180B) pair.
+	// Mirrors what JT400 sends in prepared_call_multi_set.trace.
 	dataPayload, err := EncodeDBExtendedData(paramShapes, paramValues)
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode input parameter data: %w", err)
 	}
+	if isCallStmt(sql) {
+		return executeCallAndAttachFirstSet(conn, sql, paramShapes, dataPayload, cols, nextCorr)
+	}
+	return openDescribeFetchSelect(conn, sql, dataPayload, cols, nextCorr)
+}
+
+// openDescribeFetchSelect runs OPEN_DESCRIBE_FETCH (0x180E) for the
+// SELECT / VALUES / WITH path -- the existing behaviour pre-M9-3.
+// Caller has already shipped CREATE_RPB + PREPARE_DESCRIBE +
+// CHANGE_DESCRIPTOR; cols / dataPayload come from those steps.
+func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte, cols []SelectColumn, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	var fetchCorr uint32
 	{
 		tpl := DBRequestTemplate{
-			ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | 0x00040000 | 0x00008000,
+			ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression | ORSCursorAttributes,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -578,7 +598,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 			{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
-			DBParamShort(cpDBStatementType, 2), // SELECT
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
 			{CodePoint: cpDBExtendedData, Data: dataPayload},
 			// 0x3814 is a 2-byte short in JTOpen's prepared
 			// SELECT trailer (LL=8 in the fixture, not LL=7),
@@ -632,7 +652,189 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse row data: %w", err)
 	}
+	// For CALL queries the server stamps SQLERRD(2) with the
+	// dynamic-result-set count (matches JT400's read at
+	// AS400JDBCStatement.java:1213). The cursor consumes this via
+	// MoreResultSets() / AdvanceResultSet() so Rows.NextResultSet
+	// works against multi-set procs.
+	outcome.numberOfResults = findResultSetCount(fetchRep)
 	return cols, rows, outcome, nil
+}
+
+// executeCallAndAttachFirstSet handles the CALL-with-result-sets
+// wire pattern. The caller has already shipped CREATE_RPB +
+// PREPARE_DESCRIBE + CHANGE_DESCRIPTOR. Steps here:
+//
+//  1. EXECUTE (0x1805)        -- runs the proc body; cursors WITH
+//                                 RETURN open server-side. EXECUTE
+//                                 reply's SQLCA SQLERRD(2) carries
+//                                 the dynamic-result-set count.
+//  2. OPEN_DESCRIBE (0x1804) -- attaches the client cursor to the
+//                                 first pre-opened proc cursor and
+//                                 returns its column descriptors.
+//  3. FETCH (0x180B)         -- pulls the first row batch.
+//
+// Mirrors the JT400 wire shape in prepared_call_multi_set.trace
+// sent #14 (CHANGE_DESCRIPTOR + EXECUTE), sent #17 (OPEN_DESCRIBE),
+// sent #18 (FETCH). The Cursor's MoreResultSets / AdvanceResultSet
+// pair drains subsequent result sets through the same OPEN_DESCRIBE
+// + FETCH pattern on later getMoreResults equivalents.
+func executeCallAndAttachFirstSet(conn io.ReadWriter, sql string, paramShapes []PreparedParam, dataPayload []byte, _ []SelectColumn, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
+	// --- a) EXECUTE the CALL.
+	// ORSBitmap exactly matches JT400's EXECUTE for CALL in
+	// prepared_call_multi_set.trace sent #14: RETURN_DATA + SQLCA +
+	// RLE + CURSOR_ATTRIBUTES (0x82048000). The CursorAttributes
+	// bit is what asks the server to set up the cursor handle for
+	// the subsequent OPEN_DESCRIBE attach.
+	execCorr := nextCorr()
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression | ORSCursorAttributes,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 1,
+		}
+		params := []DBParam{
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
+		if err != nil {
+			_ = deleteRPB(conn, nextCorr())
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build EXECUTE for CALL: %w", err)
+		}
+		hdr.CorrelationID = execCorr
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send EXECUTE for CALL: %w", err)
+		}
+	}
+	execRepHdr, execRepPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: read EXECUTE reply for CALL: %w", err)
+	}
+	if execRepHdr.ReqRepID != RepDBReply {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", execRepHdr.ReqRepID, RepDBReply)
+	}
+	execRep, err := ParseDBReply(execRepPayload)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse EXECUTE reply for CALL: %w", err)
+	}
+	if dbErr := makeDb2Error(execRep, "EXECUTE_CALL"); dbErr != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, dbErr
+	}
+	numberOfResults := findResultSetCount(execRep)
+	if numberOfResults <= 0 {
+		// The proc ran but declared no result sets -- typically a
+		// caller mistake (used db.Query on a proc that should be
+		// db.Exec). Surface as an empty cursor rather than failing
+		// outright; the driver-level Rows will simply EOF on Next.
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{exhausted: true, serverClosed: true}, nil
+	}
+
+	// --- b) OPEN_DESCRIBE the first dynamic result set.
+	// ORSBitmap mirrors JT400's OPEN_DESCRIBE for CALL in
+	// prepared_call_multi_set.trace sent #17 (0x8A040000):
+	// RETURN_DATA + DATA_FORMAT + SQLCA + RLE. No CursorAttributes
+	// here -- the attach is implicit, the EXECUTE already allocated
+	// the cursor slot.
+	openCorr := nextCorr()
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | ORSDataCompression,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		params := []DBParam{
+			DBParamByte(cpDBOpenAttributes, 0x80),
+			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribe, tpl, params)
+		if err != nil {
+			_ = deleteRPB(conn, nextCorr())
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build OPEN_DESCRIBE for CALL: %w", err)
+		}
+		hdr.CorrelationID = openCorr
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: send OPEN_DESCRIBE for CALL: %w", err)
+		}
+	}
+	openRepHdr, openRepPayload, err := ReadDBReplyMatching(conn, openCorr, 8)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: read OPEN_DESCRIBE reply for CALL: %w", err)
+	}
+	if openRepHdr.ReqRepID != RepDBReply {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: OPEN_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", openRepHdr.ReqRepID, RepDBReply)
+	}
+	openRep, err := ParseDBReply(openRepPayload)
+	if err != nil {
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse OPEN_DESCRIBE reply for CALL: %w", err)
+	}
+	if dbErr := makeDb2Error(openRep, "OPEN_DESCRIBE_CALL"); dbErr != nil {
+		_ = closeCursor(conn, nextCorr())
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, dbErr
+	}
+	rsCols, err := openRep.findSuperExtendedDataFormat()
+	if err != nil {
+		_ = closeCursor(conn, nextCorr())
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse CALL result-set column descriptors: %w", err)
+	}
+
+	// --- c) FETCH the first row batch using JT400's CALL-cursor
+	// param set (FetchScrollOption + BlockingFactor).
+	rows, fetchOut, err := fetchCallRows(conn, rsCols, nextCorr())
+	if err != nil {
+		_ = closeCursor(conn, nextCorr())
+		_ = deleteRPB(conn, nextCorr())
+		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: FETCH after CALL OPEN_DESCRIBE: %w", err)
+	}
+	fetchOut.numberOfResults = numberOfResults
+	_ = paramShapes // currently unused; future: PMF fixup for CALL with markers
+	return rsCols, rows, fetchOut, nil
+}
+
+// isCallStmt mirrors driver.isCall (kept in sync) -- we duplicate
+// the verb check at the hostserver layer so OpenSelectPrepared can
+// route CALLs to the EXECUTE + OPEN_DESCRIBE + FETCH path without
+// pulling in a driver-layer dependency. Returns true iff the
+// statement's first non-whitespace token is the four characters
+// CALL (case-insensitive) followed by whitespace or '('.
+func isCallStmt(sql string) bool {
+	i := 0
+	for i < len(sql) && (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\n' || sql[i] == '\r') {
+		i++
+	}
+	if i+4 > len(sql) {
+		return false
+	}
+	head := sql[i : i+4]
+	if !(head == "CALL" || head == "call" || head == "Call") {
+		// One more case-folded check for the more general form.
+		for j := 0; j < 4; j++ {
+			c := head[j]
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			want := "CALL"[j]
+			if c != want {
+				return false
+			}
+		}
+	}
+	if i+4 == len(sql) {
+		return true
+	}
+	next := sql[i+4]
+	return next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '('
 }
 
 // toInt32 narrows common Go integer types into int32 for INTEGER

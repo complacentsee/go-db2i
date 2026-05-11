@@ -57,7 +57,7 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 	tpl := DBRequestTemplate{
 		// ORS bitmap: ReturnData + SQLCA + RLE. We don't need
 		// DataFormat (no result columns) or ResultData (no rows).
-		ORSBitmap:                 ORSReturnData | ORSSQLCA | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -143,7 +143,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	}
 	{
 		tpl := DBRequestTemplate{
-			ORSBitmap:                 0x00040000, // RLE only -- fire and forget
+			ORSBitmap:                 ORSDataCompression, // RLE only -- fire and forget
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -173,7 +173,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	prepCorr := corr
 	{
 		tpl := DBRequestTemplate{
-			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSParameterMarkerFmt | 0x00040000,
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSParameterMarkerFmt | ORSDataCompression,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -288,7 +288,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		// commonExecuteAfter -> reply.getResultData()). Without this
 		// bit the server returns SQLCA-only and the OUT values are
 		// silently dropped.
-		ors := ORSReturnData | ORSSQLCA | uint32(0x00040000)
+		ors := ORSReturnData | ORSSQLCA | ORSDataCompression
 		if expectOutput {
 			ors |= ORSResultData
 		}

@@ -1901,6 +1901,80 @@ func TestStoredProcedureOUT(t *testing.T) {
 	}
 }
 
+// TestStoredProcedureMultiResultSet is M9-3's primary live test: a
+// stored procedure that declares DYNAMIC RESULT SETS 2 returns two
+// result sets through Rows + Rows.NextResultSet. P_INVENTORY opens
+// two cursors WITH RETURN: one for rows below the IN min_qty
+// threshold, one for rows at or above. With min_qty=5 the seed data
+// yields {LOW1=2, LOW2=3} in set 1 and {HIGH1=50, HIGH2=100} in set 2.
+func TestStoredProcedureMultiResultSet(t *testing.T) {
+	db := openDB(t)
+	setUpStoredProcs(t, db)
+
+	rows, err := db.Query("CALL "+procLibrary+".P_INVENTORY(?)", 5)
+	if err != nil {
+		t.Fatalf("Query CALL P_INVENTORY: %v", err)
+	}
+	defer rows.Close()
+
+	type entry = struct {
+		code string
+		qty  int
+	}
+	drain := func() []entry {
+		var out []entry
+		for rows.Next() {
+			var e entry
+			if err := rows.Scan(&e.code, &e.qty); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			out = append(out, entry{strings.TrimRight(e.code, " "), e.qty})
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		return out
+	}
+
+	set1 := drain()
+	want1 := []entry{{"LOW1", 2}, {"LOW2", 3}}
+	if !sliceEqualEntries(set1, want1) {
+		t.Errorf("first set = %v, want %v", set1, want1)
+	}
+
+	if !rows.NextResultSet() {
+		t.Fatalf("NextResultSet returned false; expected a second result set (proc declares DYNAMIC RESULT SETS 2)")
+	}
+
+	set2 := drain()
+	want2 := []entry{{"HIGH1", 50}, {"HIGH2", 100}}
+	if !sliceEqualEntries(set2, want2) {
+		t.Errorf("second set = %v, want %v", set2, want2)
+	}
+
+	if rows.NextResultSet() {
+		t.Errorf("NextResultSet returned true after second set drained; expected false")
+	}
+}
+
+// sliceEqualEntries compares two entry slices order-sensitively.
+// Helper for TestStoredProcedureMultiResultSet -- the proc's
+// ORDER BY CODE guarantees deterministic ordering on the wire.
+func sliceEqualEntries(a, b []struct {
+	code string
+	qty  int
+}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].code != b[i].code || a[i].qty != b[i].qty {
+			return false
+		}
+	}
+	return true
+}
+
 // TestStoredProcedureINOUT covers the INOUT direction byte (0xF2)
 // via GOSPROCS.P_ROUNDTRIP, which simply increments its single
 // INOUT INTEGER. Seed value 5 -> proc returns 6. Exercises the IN-

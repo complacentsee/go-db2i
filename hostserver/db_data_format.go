@@ -34,10 +34,17 @@ const (
 
 // findSuperExtendedDataFormat returns the parsed list of column
 // descriptors from the reply, scanning for CP 0x3812. Returns
-// (nil, nil) if the reply doesn't contain the CP.
+// (nil, nil) if the reply doesn't contain the CP, or carries it
+// with a zero-byte payload -- both signal "no result-set columns
+// described yet". The latter is what PREPARE_DESCRIBE replies for
+// CALL statements with DYNAMIC RESULT SETS look like: the proc's
+// declared output isn't known until OPEN_DESCRIBE on EXECUTE.
 func (r *DBReply) findSuperExtendedDataFormat() ([]SelectColumn, error) {
 	for _, p := range r.Params {
 		if p.CodePoint == 0x3812 {
+			if len(p.Data) == 0 {
+				return nil, nil
+			}
 			return parseSuperExtendedDataFormat(p.Data)
 		}
 	}

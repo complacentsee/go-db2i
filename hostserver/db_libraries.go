@@ -55,7 +55,7 @@ func NDBAddLibraryList(conn io.ReadWriter, library string, correlationID uint32)
 	copy(libParam[7:], libBytes)
 
 	tpl := DBRequestTemplate{
-		ORSBitmap: ORSReturnData | 0x00040000, // return data + RLE
+		ORSBitmap: ORSReturnData | ORSDataCompression, // return data + RLE
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBNDBAddLibraryList, tpl, []DBParam{
 		{CodePoint: 0x3813, Data: libParam},

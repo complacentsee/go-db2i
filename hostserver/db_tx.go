@@ -146,7 +146,7 @@ func setSessionMode(conn io.ReadWriter, corr uint32, autoCommitYN byte, isolatio
 // locator-persistence change with errClass=7 RC=-601.
 func sendSessionModeFrame(conn io.ReadWriter, corr uint32, autoCommitYN byte, isolationLevel int16, locatorPersistence *int16) (*DBReply, error) {
 	tpl := DBRequestTemplate{
-		ORSBitmap: ORSReturnData | ORSServerAttributes | 0x00040000,
+		ORSBitmap: ORSReturnData | ORSServerAttributes | ORSDataCompression,
 	}
 	params := []DBParam{
 		DBParamByte(0x3824, autoCommitYN),

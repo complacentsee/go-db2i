@@ -254,7 +254,7 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 	}
 
 	tpl := DBRequestTemplate{
-		ORSBitmap: ORSReturnData | ORSServerAttributes | 0x00040000, // 0x81040000
+		ORSBitmap: ORSReturnData | ORSServerAttributes | ORSDataCompression, // 0x81040000
 	}
 	// Minimum attribute set for V7R5+ -- mirrors what JTOpen
 	// AS400JDBCConnectionImpl sends on connection open. We

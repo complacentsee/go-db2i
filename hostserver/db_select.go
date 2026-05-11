@@ -14,6 +14,7 @@ import (
 // service. We only define the ones we use right now.
 const (
 	ReqDBSQLPrepareDescribe   uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
+	ReqDBSQLOpenDescribe      uint16 = 0x1804 // OPEN + DESCRIBE (no inline FETCH)
 	ReqDBSQLFetch             uint16 = 0x180B // continuation FETCH from existing cursor
 	ReqDBSQLOpenDescribeFetch uint16 = 0x180E // OPEN + DESCRIBE + FETCH
 	ReqDBSQLClose             uint16 = 0x180A // CLOSE cursor
@@ -21,6 +22,42 @@ const (
 	ReqDBSQLRPBDelete         uint16 = 0x1D02 // DELETE RPB (frees RPB slot for next CREATE)
 	ReqDBSQLDeleteResultsSet  uint16 = 0x1F01 // DELETE_RESULTS_SET
 )
+
+// reuseResultSet is the CP 0x3810 (cpDBReuseIndicator) byte that asks
+// the server to close the cursor but PRESERVE the prepared statement
+// so a follow-up OPEN_DESCRIBE on the same RPB can attach to the
+// next dynamic result set the proc returns. Mirrors JT400's
+// JDCursor.REUSE_RESULT_SET (= 0xF2) -- the close JT400 calls before
+// FUNCTIONID_OPEN_DESCRIBE in getMoreResults
+// (AS400JDBCStatement.java:3420).
+const reuseResultSet byte = 0xF2
+
+// findResultSetCount returns the dynamic-result-set count the server
+// advertised in SQLERRD(2) of the EXECUTE / OPEN_DESCRIBE_FETCH
+// reply's SQLCA (CP 0x3807). For SELECT statements ERRD(2) is zero
+// (JT400 explicitly sets numberOfResults_=0 for non-CALL); for CALL
+// procs that declare DYNAMIC RESULT SETS N the server stamps N here.
+// Returns 0 when the SQLCA is absent or too short -- the cursor's
+// state machine treats that as "this is the only result set".
+func findResultSetCount(rep *DBReply) int {
+	for _, p := range rep.Params {
+		if p.CodePoint != cpDBSQLCA {
+			continue
+		}
+		// SQLERRD[2] at SQLCA-internal offset 100 (4 bytes BE int32).
+		// JT400's DBReplySQLCA.locationFromOffset_ = {96, 100, 104, ...}
+		// indexes ERRD(1..6); we read index 2.
+		if len(p.Data) < 104 {
+			return 0
+		}
+		v := int32(binary.BigEndian.Uint32(p.Data[100:104]))
+		if v < 0 {
+			return 0
+		}
+		return int(v)
+	}
+	return 0
+}
 
 // SQLCode constants we treat specially across the result-set
 // parser. JT400 + IBM i return positive SQLCODE values in the
@@ -58,6 +95,15 @@ const (
 type fetchOutcome struct {
 	exhausted    bool // no more rows; don't issue continuation FETCH
 	serverClosed bool // server auto-closed the cursor; skip explicit CLOSE
+
+	// numberOfResults is the dynamic-result-set count the server
+	// stamped in SQLCA SQLERRD(2) on the EXECUTE-bearing reply
+	// (OPEN_DESCRIBE_FETCH for CALL queries through OpenSelectPrepared,
+	// 0 for plain SELECT). Populated by interpretFetchReply via
+	// findResultSetCount; cursors consume it through newCursor.
+	// Zero means "this is the only result set" (or the server didn't
+	// populate it).
+	numberOfResults int
 }
 
 // interpretFetchReply applies JT400's (ErrorClass, ReturnCode)
@@ -102,7 +148,7 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 		// 0x86040000: ReturnData + ResultData + SQLCA + RLE.
 		// (Bit 17 = 0x00008000 from OPEN is "cursor attributes"
 		// which only applies on initial open; FETCH leaves it off.)
-		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -153,6 +199,84 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 	return rows, outcome, nil
 }
 
+// Per-CP semantics for FETCH on a CALL-opened cursor. JT400's
+// getMoreResults flow uses these instead of the BufferSize +
+// VarFieldCompr set we use on SELECT cursors:
+//   - 0x380E Fetch Scroll Option (short; 0 = FETCH_NEXT)
+//   - 0x380C Blocking Factor (uint32; matches JT400's 2048-row
+//     default per JDProperties.BLOCK_SIZE)
+// The CALL cursor needs the BlockingFactor explicitly (the proc-
+// opened cursor's server-side state doesn't carry a default block
+// size like a fresh SELECT cursor does).
+const (
+	cpDBFetchScrollOption uint16 = 0x380E
+	cpDBBlockingFactor    uint16 = 0x380C
+)
+
+// fetchCallRows pulls rows from a cursor JT400 attached via
+// OPEN_DESCRIBE on a CALL-opened dynamic result set. Differs from
+// fetchMoreRows in the param set: the SELECT-cursor path's
+// BufferSize + VarFieldCompr combo doesn't work for CALL cursors
+// (server returns empty batches); JT400's CALL FETCH uses
+// FetchScrollOption + BlockingFactor instead. Mirrors
+// prepared_call_multi_set.trace sent #18 byte-for-byte modulo
+// correlation IDs.
+func fetchCallRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32) (rows []SelectRow, outcome fetchOutcome, err error) {
+	tpl := DBRequestTemplate{
+		// 0x84040000 = ReturnData + ResultData + RLE.
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSDataCompression,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
+	}
+	params := []DBParam{
+		DBParamShort(cpDBFetchScrollOption, 0x0000), // FETCH_NEXT
+		{CodePoint: cpDBBlockingFactor, Data: []byte{0x00, 0x00, 0x08, 0x00}}, // 2048 rows / block
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
+	if err != nil {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: build CALL FETCH: %w", err)
+	}
+	hdr.CorrelationID = nextCorrelation
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: send CALL FETCH: %w", err)
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, nextCorrelation, 4)
+	if err != nil {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: read CALL FETCH reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: CALL FETCH reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: parse CALL FETCH reply: %w", err)
+	}
+	outcome = interpretFetchReply(rep)
+	// CALL-cursor FETCH replies routinely carry rows AND an end-of-
+	// data signal (EC=2 RC=701) when the proc's result set fits in
+	// one block. The SELECT-side fetchMoreRows early-returns on
+	// exhausted without parsing rows, but for CALL cursors we have
+	// to parse the row payload before honouring the exhaustion
+	// flag -- otherwise the rows in CP 0x380E get silently dropped
+	// on the way out and Rows.Next sees an empty result set.
+	// makeDb2Error treats EC=1 RC=100 and EC=2 RC=701 as warnings,
+	// not errors, so we can call it before parsing.
+	if dbErr := makeDb2Error(rep, "CALL FETCH"); dbErr != nil {
+		return nil, fetchOutcome{}, dbErr
+	}
+	rows, err = rep.findExtendedResultData(cols)
+	if err != nil {
+		return nil, fetchOutcome{}, fmt.Errorf("hostserver: parse CALL FETCH row data: %w", err)
+	}
+	if len(rows) == 0 {
+		outcome.exhausted = true
+	}
+	return rows, outcome, nil
+}
+
 // cpDBReuseIndicator is the CP for the close-time "what should the
 // server do with the prepared statement" flag, per JT400's
 // DBSQLRequestDS.setReuseIndicator (offset 0x3810). Values per
@@ -178,9 +302,24 @@ const reuseNo byte = 0xF0
 // server-side state machine sometimes leaves the cursor in a
 // "between batches" state where the next PREPARE on the same RPB
 // would otherwise fail with SQL-519.
+//
+// Uses REUSE_NO (0xF0): close cursor AND drop the prepared statement.
+// For the multi-result-set advance path (M9-3) callers want to
+// preserve the prepared statement -- use closeCursorReuse with
+// reuseResultSet (0xF2) instead.
 func closeCursor(conn io.ReadWriter, nextCorrelation uint32) error {
+	return closeCursorReuse(conn, nextCorrelation, reuseNo)
+}
+
+// closeCursorReuse is the parameterised form of closeCursor. reuse
+// is one of 0xF0 (REUSE_NO -- drop prepared statement), 0xF1
+// (REUSE_YES -- keep prepared statement), or 0xF2 (REUSE_RESULT_SET
+// -- preserve cursor for OPEN_DESCRIBE re-attach). M9-3's multi-
+// result-set advance passes reuseResultSet so the next 0x1804 frame
+// can grab the proc's next dynamic result set on the same RPB.
+func closeCursorReuse(conn io.ReadWriter, nextCorrelation uint32, reuse byte) error {
 	tpl := DBRequestTemplate{
-		ORSBitmap:                 ORSReturnData | ORSSQLCA | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -188,7 +327,7 @@ func closeCursor(conn io.ReadWriter, nextCorrelation uint32) error {
 		ParameterMarkerDescriptor: 0,
 	}
 	params := []DBParam{
-		DBParamByte(cpDBReuseIndicator, reuseNo),
+		DBParamByte(cpDBReuseIndicator, reuse),
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLClose, tpl, params)
 	if err != nil {
@@ -234,7 +373,7 @@ func closeCursor(conn io.ReadWriter, nextCorrelation uint32) error {
 // caller is responsible for advancing its own counter.
 func deleteRPB(conn io.ReadWriter, nextCorrelation uint32) error {
 	tpl := DBRequestTemplate{
-		ORSBitmap:                 ORSReturnData | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -457,7 +596,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			// it. The earlier draft of this code permuted these
 			// handles, which left the server with no RPB at the
 			// expected slot and made PUB400 return SQL -401.
-			ORSBitmap:                 0x00040000,
+			ORSBitmap:                 ORSDataCompression,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -489,7 +628,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 	// (parameter-marker format) describing how to bind. Static
 	// SELECTs leave the bit clear -- live PUB400 confirms; setting
 	// it on a no-marker statement returns malformed SQLDA replies.
-	ors := ORSReturnData | ORSDataFormat | ORSSQLCA | 0x00040000
+	ors := ORSReturnData | ORSDataFormat | ORSSQLCA | ORSDataCompression
 	if strings.ContainsRune(sql, '?') {
 		ors |= ORSParameterMarkerFmt
 	}
@@ -596,7 +735,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			// cursor attributes (bit 17 = 0x00008000). Handle
 			// layout matches PREPARE_DESCRIBE so OPEN reuses the
 			// same RPB (RPBHandle=1).
-			ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | 0x00040000 | 0x00008000,
+			ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression | ORSCursorAttributes,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,

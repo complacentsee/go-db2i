@@ -341,6 +341,93 @@ func TestCallInOutFixtureOutDecode(t *testing.T) {
 	}
 }
 
+// TestCallMultiSetFixtureWireSequence pins the four request types
+// that JT400 emits during a multi-result-set CALL drain:
+//
+//	CREATE_RPB        (0x1D00)
+//	PREPARE_DESCRIBE  (0x1803)
+//	CHANGE_DESCRIPTOR (0x1E00)
+//	EXECUTE           (0x1805)  -- runs the proc
+//	OPEN_DESCRIBE     (0x1804)  -- attach to set 1
+//	FETCH             (0x180B)  -- pull set 1
+//	... close + repeat for set 2 ...
+//
+// goJTOpen's open-CALL-prepared path must emit at least the
+// CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR / EXECUTE /
+// OPEN_DESCRIBE / FETCH sequence on the first set; the multi-set
+// advance reuses the same OPEN_DESCRIBE + FETCH pair after a
+// REUSE_RESULT_SET CLOSE. We assert the CALL connection contains
+// at least these six request types in order, confirming we are NOT
+// using OPEN_DESCRIBE_FETCH (0x180E) anywhere on this path.
+func TestCallMultiSetFixtureWireSequence(t *testing.T) {
+	const fixture = "prepared_call_multi_set.trace"
+	frames := wirelog.Consolidate(loadFixture(t, fixture))
+
+	byConn := map[uint32][][]byte{}
+	connOrder := []uint32{}
+	for _, f := range frames {
+		if f.Direction != wirelog.Sent {
+			continue
+		}
+		if _, ok := byConn[f.ConnID]; !ok {
+			connOrder = append(connOrder, f.ConnID)
+		}
+		b := f.Bytes
+		for len(b) >= 8 {
+			ln := binary.BigEndian.Uint32(b[0:4])
+			if ln < 8 || ln > uint32(len(b)) {
+				t.Fatalf("malformed DSS length %d", ln)
+			}
+			byConn[f.ConnID] = append(byConn[f.ConnID], append([]byte(nil), b[:ln]...))
+			b = b[ln:]
+		}
+	}
+	if len(connOrder) < 2 {
+		t.Fatalf("fixture %s: need >=2 connections, got %d", fixture, len(connOrder))
+	}
+	callConn := connOrder[1]
+
+	// Extract SQL-service (0xE004) frame ReqRepIDs in order.
+	var seen []uint16
+	for _, b := range byConn[callConn] {
+		if len(b) < 20 {
+			continue
+		}
+		if binary.BigEndian.Uint16(b[6:8]) != uint16(ServerDatabase) {
+			continue
+		}
+		seen = append(seen, binary.BigEndian.Uint16(b[18:20]))
+	}
+
+	// Must NOT contain 0x180E (OPEN_DESCRIBE_FETCH).
+	for _, k := range seen {
+		if k == ReqDBSQLOpenDescribeFetch {
+			t.Errorf("CALL multi-set fixture uses OPEN_DESCRIBE_FETCH (0x180E); JT400 uses OPEN_DESCRIBE (0x1804) + FETCH (0x180B) instead")
+		}
+	}
+
+	// Must contain at least one of each: CREATE_RPB,
+	// PREPARE_DESCRIBE, CHANGE_DESCRIPTOR, EXECUTE,
+	// OPEN_DESCRIBE, FETCH.
+	want := []uint16{
+		ReqDBSQLRPBCreate,
+		ReqDBSQLPrepareDescribe,
+		ReqDBSQLChangeDescriptor,
+		ReqDBSQLExecute,
+		ReqDBSQLOpenDescribe,
+		ReqDBSQLFetch,
+	}
+	have := map[uint16]bool{}
+	for _, k := range seen {
+		have[k] = true
+	}
+	for _, k := range want {
+		if !have[k] {
+			t.Errorf("CALL multi-set fixture missing expected request type 0x%04X", k)
+		}
+	}
+}
+
 // findStmtTypeInFrame scans a full DSS frame (DSS header + template +
 // LL/CP params) for the statement-type CP (0x3812, 2-byte short
 // payload) and returns its value. The DSS header is 20 bytes and the

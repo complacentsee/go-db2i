@@ -44,6 +44,8 @@ const (
 	ORSServerAttributes     uint32 = 0x01000000
 	ORSParameterMarkerFmt   uint32 = 0x00800000
 	ORSPackageInfo          uint32 = 0x00100000
+	ORSCursorAttributes     uint32 = 0x00008000 // CursorAttributes in EXECUTE / OPEN
+	ORSDataCompression      uint32 = 0x00040000 // RLE compression on result-data CPs
 	ORSExtendedColumnDescrs uint32 = 0x00020000
 
 	// ORSVarFieldComp asks the server to use variable-length-field

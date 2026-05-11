@@ -170,6 +170,40 @@ func Example_callWithOut() {
 	fmt.Println(counter) // 6
 }
 
+// Example_callMultiResultSet demonstrates draining a stored
+// procedure that declares DYNAMIC RESULT SETS N (multiple cursors
+// opened via DECLARE CURSOR WITH RETURN). goJTOpen drains each set
+// through database/sql's Rows.NextResultSet idiom: the first set
+// is iterated via Rows.Next as usual, then NextResultSet attaches
+// to the next pre-opened cursor on the server side and Rows.Next
+// continues from there. Returns true while more sets remain;
+// false (or io.EOF) when the proc's last set is drained.
+func Example_callMultiResultSet() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	rows, _ := db.Query(`CALL mylib.p_inventory(?)`, 5)
+	defer rows.Close()
+
+	fmt.Println("low-stock items:")
+	for rows.Next() {
+		var code string
+		var qty int
+		_ = rows.Scan(&code, &qty)
+		fmt.Printf("  %s: %d\n", code, qty)
+	}
+
+	if rows.NextResultSet() {
+		fmt.Println("high-stock items:")
+		for rows.Next() {
+			var code string
+			var qty int
+			_ = rows.Scan(&code, &qty)
+			fmt.Printf("  %s: %d\n", code, qty)
+		}
+	}
+}
+
 // Example_db2Error shows the typed-error dispatch pattern. Every
 // server-side SQL error comes through as *hostserver.Db2Error so
 // callers can switch on SQLSTATE / SQLCODE without regexing the

@@ -151,7 +151,7 @@ func RetrieveLOBData(conn io.ReadWriter, handle uint32, offset, size int64, colu
 		//
 		// SQLCA omitted -- locator retrieval is straight wire data,
 		// no statement-level error machinery to surface.
-		ORSBitmap:                 ORSReturnData | ORSResultData | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -955,7 +955,7 @@ func WriteLOBDataCCSID(conn io.ReadWriter, handle uint32, offset int64, requeste
 		// JT400 uses ReturnData + ResultData on writeData; we follow.
 		// SQLCA omitted -- LOB write errors come back via the standard
 		// errorClass/returnCode in the reply template, not a SQLCA CP.
-		ORSBitmap:                 ORSReturnData | ORSResultData | 0x00040000,
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,

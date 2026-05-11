@@ -12,6 +12,92 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M9-3 Multi-result-set stored procedures via
+  `Rows.NextResultSet`. Stored procedures that declare
+  `DYNAMIC RESULT SETS N` cursors WITH RETURN now surface every
+  result set through database/sql's optional `NextResultSet` /
+  `HasNextResultSet` interface on `*Rows`: the first set drains
+  via `Rows.Next` as usual, then `Rows.NextResultSet()` attaches
+  to the proc's next pre-opened cursor and `Rows.Next` continues
+  from there. Returns false (and `Rows.Err()` is nil) when the
+  last set is drained, matching the database/sql contract.
+  Wire-protocol additions:
+    - `Stmt.Query` now routes any CALL through the
+      `OpenSelectPrepared` path; the underlying
+      `openPreparedUntilFirstBatch` dispatches on the verb:
+      SELECT/VALUES/WITH still go through OPEN_DESCRIBE_FETCH
+      (0x180E) one-shot, but CALL takes JT400's
+      CallableStatement wire pattern instead --
+      `executeCallAndAttachFirstSet` sends EXECUTE (0x1805),
+      reads `SQLERRD(2)` out of the EXECUTE reply's SQLCA to
+      learn the dynamic-result-set count, then OPEN_DESCRIBE
+      (0x1804) + FETCH (0x180B) to attach to and prefetch the
+      first set.
+    - `hostserver.findResultSetCount(rep *DBReply) int` extracts
+      SQLERRD(2) from a reply's SQLCA (CP 0x3807, offset 100, BE
+      int32). Mirrors JT400's `firstSqlca.getErrd(2)` read at
+      `AS400JDBCStatement.java:1213`. Zero for SELECT statements.
+    - `Cursor` gains `numberOfResults` / `currentResultSet` /
+      `isCallCursor` state plus public `MoreResultSets() bool`,
+      `AdvanceResultSet() ([]SelectColumn, error)`,
+      `NumberOfResults() int`, `CurrentResultSet() int`.
+      `AdvanceResultSet` closes the current cursor with
+      `REUSE_RESULT_SET` (0xF2, preserving the prepared statement
+      so the next OPEN_DESCRIBE can attach), issues another
+      OPEN_DESCRIBE on the same RPB to attach to the next
+      pre-opened proc cursor, parses its column descriptors,
+      and prefetches the first row batch.
+    - `fetchCallRows` uses JT400's CALL-cursor FETCH param set
+      (CP 0x380E `FetchScrollOption` + CP 0x380C `BlockingFactor`
+      = 2048) instead of the SELECT-cursor `BufferSize` +
+      `VarFieldCompr` set. The proc-opened cursor's server-side
+      state doesn't carry a default block size, so the FETCH has
+      to specify one explicitly. ALSO parses rows BEFORE
+      honouring `interpretFetchReply`'s `exhausted` flag: CALL
+      cursors routinely return EC=2 RC=701 ("end-of-data with
+      rows") in a single batch, and the SELECT-side fetcher
+      would have silently dropped the rows on that path.
+    - `findSuperExtendedDataFormat` (CP 0x3812) now accepts a
+      zero-byte payload as "no columns described yet" -- the
+      shape PREPARE_DESCRIBE replies take for CALL statements
+      whose result-set layout isn't known until OPEN_DESCRIBE.
+    - `closeCursorReuse(conn, corr, reuse byte)` is the new
+      parameterised CLOSE entry point; `closeCursor` is a
+      `closeCursorReuse(... reuseNo)` wrapper preserving the
+      M1-M8 behaviour. The multi-set advance and cursor.Close
+      call paths thread the right indicator through.
+  Driver surface:
+    - `*Rows` implements
+      `database/sql/driver.RowsNextResultSet`:
+      `HasNextResultSet() bool` delegates to
+      `Cursor.MoreResultSets`; `NextResultSet() error` delegates
+      to `Cursor.AdvanceResultSet`, returning `io.EOF` when
+      drained.
+  Wire-bitmap cleanup (in flight with M9-3 work):
+    - New constants `ORSCursorAttributes = 0x00008000` and
+      `ORSDataCompression = 0x00040000` replace the bare hex
+      literals scattered through `hostserver/db_*.go`. Every
+      previously-inlined `0x00040000` / `0x00008000` use site
+      now references the named constant; the only remaining raw
+      `0x00040000` is `signon_errors.go`'s unrelated security
+      error code lookup.
+  Offline coverage: new
+  `hostserver/db_call_test.go::TestCallMultiSetFixtureWireSequence`
+  asserts the CALL connection's request sequence in
+  `prepared_call_multi_set.trace` contains
+  CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR / EXECUTE /
+  OPEN_DESCRIBE / FETCH (each present at least once) and does
+  NOT contain OPEN_DESCRIBE_FETCH -- confirming our M9-3 routing
+  matches JT400 byte-for-byte at the function-code layer.
+  Live evidence: new `TestStoredProcedureMultiResultSet` drives
+  `CALL GOSPROCS.P_INVENTORY(5)` against IBM Cloud V7R6M0,
+  drains both result sets through `Rows.NextResultSet`, asserts
+  the seed data lands in the expected order: set 1 =
+  `[(LOW1, 2), (LOW2, 3)]`, set 2 = `[(HIGH1, 50), (HIGH2, 100)]`.
+  Full M9-1+M9-2+M9-3 conformance run 9.4 s on the 1-CPU LPAR
+  plaintext path.
+  `Example_callMultiResultSet` documents the API.
+
 - M9-2 OUT and INOUT stored-procedure parameters via the
   standard-library `sql.Out` wrapper. Callers pass
   `sql.Out{Dest: &x}` for OUT-only slots and `sql.Out{Dest: &x,

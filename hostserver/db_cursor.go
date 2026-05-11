@@ -49,6 +49,25 @@ type Cursor struct {
 	exhausted    bool // server signaled end-of-data; no more FETCHes needed
 	serverClosed bool // server auto-closed the cursor; skip explicit CLOSE
 	rpbActive    bool // true between OPEN and DELETE; false after Close
+
+	// Multi-result-set state (M9-3). numberOfResults is the count
+	// the server stamped in SQLCA SQLERRD(2) on the EXECUTE reply
+	// when the SQL was a stored-procedure CALL with DYNAMIC RESULT
+	// SETS N declared cursors. currentResultSet is 1-indexed:
+	// initialised to 1 by OpenSelectPrepared / OpenSelectStatic,
+	// bumped to 2, 3, ... as AdvanceResultSet succeeds. For a plain
+	// SELECT the server returns 0 in ERRD(2), so MoreResultSets()
+	// is always false there (1 < 0 is also false).
+	numberOfResults  int
+	currentResultSet int
+
+	// isCallCursor distinguishes a cursor that wraps a CALL-opened
+	// dynamic result set from one that wraps a plain SELECT. The
+	// two require different FETCH parameter sets on the wire:
+	// SELECT uses BufferSize+VarFieldCompr; CALL uses
+	// FetchScrollOption+BlockingFactor per JT400. Next() dispatches
+	// continuation FETCHes accordingly.
+	isCallCursor bool
 }
 
 // Columns returns the result-set descriptor list. Stable for the
@@ -69,8 +88,19 @@ func (c *Cursor) Next() (SelectRow, error) {
 	if c.exhausted {
 		return nil, io.EOF
 	}
-	// Pull another batch.
-	more, outcome, err := fetchMoreRows(c.conn, c.cols, c.nextCorr())
+	// Pull another batch. CALL cursors need JT400's CALL-cursor
+	// FETCH param set (FetchScrollOption + BlockingFactor); plain
+	// SELECT cursors use the BufferSize + VarFieldCompr set.
+	var (
+		more    []SelectRow
+		outcome fetchOutcome
+		err     error
+	)
+	if c.isCallCursor {
+		more, outcome, err = fetchCallRows(c.conn, c.cols, c.nextCorr())
+	} else {
+		more, outcome, err = fetchMoreRows(c.conn, c.cols, c.nextCorr())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +189,7 @@ func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, op
 	if err != nil {
 		return nil, err
 	}
-	return newCursor(conn, cols, firstBatch, outcome, nextCorr), nil
+	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults), nil
 }
 
 // OpenSelectPrepared opens a streaming cursor for a parameterised
@@ -173,20 +203,154 @@ func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	if err != nil {
 		return nil, err
 	}
-	return newCursor(conn, cols, firstBatch, outcome, nextCorr), nil
+	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults), nil
 }
 
-func newCursor(conn io.ReadWriter, cols []SelectColumn, firstBatch []SelectRow, outcome fetchOutcome, nextCorr func() uint32) *Cursor {
+func newCursor(conn io.ReadWriter, cols []SelectColumn, firstBatch []SelectRow, outcome fetchOutcome, nextCorr func() uint32, numberOfResults int) *Cursor {
+	current := 0
+	isCall := false
+	if numberOfResults > 0 {
+		current = 1
+		isCall = true
+	}
 	return &Cursor{
-		conn:         conn,
-		cols:         cols,
-		pending:      firstBatch,
-		nextCorr:     nextCorr,
-		exhausted:    outcome.exhausted,
-		serverClosed: outcome.serverClosed,
-		rpbActive:    true,
+		conn:             conn,
+		cols:             cols,
+		pending:          firstBatch,
+		nextCorr:         nextCorr,
+		exhausted:        outcome.exhausted,
+		serverClosed:     outcome.serverClosed,
+		rpbActive:        true,
+		numberOfResults:  numberOfResults,
+		currentResultSet: current,
+		isCallCursor:     isCall,
 	}
 }
+
+// MoreResultSets reports whether the proc that this cursor was opened
+// against has at least one more dynamic result set to drain. For a
+// plain SELECT (or a CALL with DYNAMIC RESULT SETS 0) the server
+// returns 0 in SQLERRD(2), so MoreResultSets always reports false.
+//
+// Implements the conceptual sibling of database/sql/driver.RowsNextResultSet's
+// HasNextResultSet (the driver wrapper in driver/rows.go calls this).
+// JT400 mirrors this state via numberOfResults_ + getMoreResults()
+// in AS400JDBCStatement.java:3406.
+func (c *Cursor) MoreResultSets() bool {
+	return c.currentResultSet > 0 && c.currentResultSet < c.numberOfResults
+}
+
+// AdvanceResultSet closes the current cursor with REUSE_RESULT_SET
+// (preserving the prepared statement on the RPB), issues a fresh
+// OPEN_DESCRIBE (0x1804) on the same statement to attach to the
+// next dynamic result set the proc declared, parses the new column
+// descriptors out of the reply, and prefetches the first row batch
+// via continuation FETCH (0x180B). Mirrors JT400's getMoreResults
+// flow at AS400JDBCStatement.java:3406-3470.
+//
+// Returns the new column descriptors so the driver-level Rows can
+// refresh its ColumnTypes / Columns view. The cursor's internal
+// pending row buffer is replaced; subsequent Next() calls drain the
+// next set.
+//
+// Caller must check MoreResultSets() before calling. AdvanceResultSet
+// on a cursor with no remaining sets returns io.EOF -- safer than a
+// silent no-op since the caller's intent was to advance.
+func (c *Cursor) AdvanceResultSet() ([]SelectColumn, error) {
+	if !c.MoreResultSets() {
+		return nil, io.EOF
+	}
+
+	// Close the current cursor server-side but preserve the
+	// prepared statement (REUSE_RESULT_SET = 0xF2) so the
+	// subsequent OPEN_DESCRIBE can attach to the next set on the
+	// same RPB. Idempotent against server-already-closed (SQL-501)
+	// per closeCursor's existing handling.
+	if !c.serverClosed {
+		if err := closeCursorReuse(c.conn, c.nextCorr(), reuseResultSet); err != nil {
+			return nil, fmt.Errorf("hostserver: AdvanceResultSet close: %w", err)
+		}
+	}
+	c.serverClosed = false
+
+	// OPEN_DESCRIBE (0x1804) -- ask the server to attach our client
+	// cursor to the proc's next pre-opened dynamic result set and
+	// describe its columns. Per JT400 V6R1+ in
+	// AS400JDBCStatement.java:3433, ORS bits are RETURN_DATA + SQLCA
+	// + DATA_FORMAT + CURSOR_ATTRIBUTES (0x00008000).
+	openCorr := c.nextCorr()
+	{
+		// Match JT400's getMoreResults wire shape: ORSBitmap
+		// 0x8A040000 = RETURN_DATA + DATA_FORMAT + SQLCA + RLE.
+		// No CursorAttributes (0x00008000) -- mirrors the second-
+		// and-later OPEN_DESCRIBE in the multi-set fixture.
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSDataFormat | ORSSQLCA | ORSDataCompression,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		params := []DBParam{
+			DBParamByte(cpDBOpenAttributes, 0x80),
+			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribe, tpl, params)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build OPEN_DESCRIBE: %w", err)
+		}
+		hdr.CorrelationID = openCorr
+		if err := WriteFrame(c.conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send OPEN_DESCRIBE: %w", err)
+		}
+	}
+	repHdr, repPayload, err := ReadDBReplyMatching(c.conn, openCorr, 8)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read OPEN_DESCRIBE reply: %w", err)
+	}
+	if repHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: OPEN_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(repPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse OPEN_DESCRIBE reply: %w", err)
+	}
+	if dbErr := makeDb2Error(rep, "OPEN_DESCRIBE"); dbErr != nil {
+		return nil, dbErr
+	}
+	newCols, err := rep.findSuperExtendedDataFormat()
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse next-set column descriptors: %w", err)
+	}
+
+	// Prefetch the first row batch via FETCH (0x180B). CALL-opened
+	// cursors expect the JT400-style FetchScrollOption +
+	// BlockingFactor params; SELECT cursors don't end up here
+	// (numberOfResults stays 0 for non-CALL).
+	firstBatch, outcome, err := fetchCallRows(c.conn, newCols, c.nextCorr())
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: FETCH after OPEN_DESCRIBE: %w", err)
+	}
+
+	c.cols = newCols
+	c.pending = firstBatch
+	c.pendingIx = 0
+	c.exhausted = outcome.exhausted
+	c.serverClosed = outcome.serverClosed
+	c.currentResultSet++
+
+	return newCols, nil
+}
+
+// NumberOfResults exposes the total result-set count for callers
+// (the driver wrapper) that want to surface metadata before
+// iteration finishes. Returns 0 for plain SELECT.
+func (c *Cursor) NumberOfResults() int { return c.numberOfResults }
+
+// CurrentResultSet reports which result set (1-indexed) the cursor
+// is currently positioned on. Zero when numberOfResults is 0.
+func (c *Cursor) CurrentResultSet() int { return c.currentResultSet }
 
 // drainAll consumes the cursor into a buffered SelectResult. Used by
 // the legacy SelectStaticSQL / SelectPreparedSQL entry points to

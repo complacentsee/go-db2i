@@ -372,6 +372,47 @@ func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 	return 0, 0, false
 }
 
+// HasNextResultSet reports whether the cursor has another dynamic
+// result set to drain (typically a stored-procedure CALL with
+// `DYNAMIC RESULT SETS N` declared cursors). For plain SELECT this
+// always returns false. Implements
+// database/sql/driver.RowsNextResultSet's HasNextResultSet method.
+func (r *Rows) HasNextResultSet() bool {
+	if r == nil || r.cursor == nil || r.closed {
+		return false
+	}
+	return r.cursor.MoreResultSets()
+}
+
+// NextResultSet advances to the next result set. Closes the current
+// server-side cursor with REUSE_RESULT_SET (preserving the prepared
+// statement so the next OPEN_DESCRIBE attaches cleanly to the proc's
+// next pre-opened cursor), issues OPEN_DESCRIBE (0x1804) + FETCH
+// (0x180B), and replaces the cursor's column descriptors + pending
+// row buffer with the new set. Returns io.EOF when no more sets
+// remain, matching database/sql's expected sentinel; other errors
+// surface verbatim. Implements
+// database/sql/driver.RowsNextResultSet.NextResultSet.
+func (r *Rows) NextResultSet() error {
+	if r == nil || r.cursor == nil || r.closed {
+		return io.EOF
+	}
+	if !r.cursor.MoreResultSets() {
+		return io.EOF
+	}
+	_, err := r.cursor.AdvanceResultSet()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return io.EOF
+		}
+		if r.conn != nil {
+			return r.conn.classifyConnErr(err)
+		}
+		return err
+	}
+	return nil
+}
+
 // ColumnTypeScanType returns the Go type Next promotes a column's
 // raw bytes into before exposing it on the driver.Value slot --
 // time.Time for DATE/TIME/TIMESTAMP, []byte for FOR BIT DATA and

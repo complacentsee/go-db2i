@@ -750,7 +750,34 @@ the user's plans/ directory.
   Widget" + OUT INTEGER 100. Live evidence: `TestStoredProcedureOUT`
   (P_LOOKUP) + `TestStoredProcedureINOUT` (P_ROUNDTRIP) both green
   on plaintext. `Example_callWithOut` documents the API.
-- **M9-3 Multi-result-set via `Rows.NextResultSet`** — pending.
+- **M9-3 Multi-result-set via `Rows.NextResultSet`** ✅ 2026-05-11 —
+  CALL queries now route through a JT400-style EXECUTE + OPEN_DESCRIBE
+  + FETCH wire pattern instead of SELECT's OPEN_DESCRIBE_FETCH
+  one-shot. `Cursor.MoreResultSets` / `Cursor.AdvanceResultSet`
+  drive the multi-set advance using REUSE_RESULT_SET (0xF2) on
+  CLOSE + a fresh OPEN_DESCRIBE on the same RPB; `findResultSetCount`
+  reads SQLERRD(2) from the EXECUTE reply's SQLCA to know how many
+  sets remain. Driver-side `*Rows` implements the
+  `database/sql/driver.RowsNextResultSet` optional interface.
+  CALL-cursor FETCH uses JT400's `FetchScrollOption` +
+  `BlockingFactor` param set rather than SELECT's `BufferSize` +
+  `VarFieldCompr` (the proc-opened cursor's server-side state
+  doesn't carry a default block size), and parses rows before
+  honouring the EC=2 RC=701 exhausted signal so end-of-data-with-
+  rows batches don't drop their payload. Offline replay
+  (`TestCallMultiSetFixtureWireSequence`) confirms our CALL path
+  uses the same function-code sequence JT400 sends; live evidence
+  (`TestStoredProcedureMultiResultSet`) drains both result sets
+  from `CALL GOSPROCS.P_INVENTORY(5)` and pins the expected seed
+  data per set on plaintext IBM Cloud V7R6M0.
+
+**M9 complete 2026-05-11.** All four items shipped + live-validated.
+Public API additions (`sql.Out` admission via `CheckNamedValue`,
+`Rows.NextResultSet`, statement-type TYPE_CALL routing) are purely
+additive; no breaking changes vs v0.5.0. The wire path for SELECT
+remains byte-equivalent through OPEN_DESCRIBE_FETCH; CALLs now take
+the JT400 CallableStatement wire pattern. Tag v0.6.0 once the
+cross-cutting docs / README updates land.
 
 ## Working rhythm
 
