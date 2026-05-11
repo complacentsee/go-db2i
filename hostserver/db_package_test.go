@@ -305,10 +305,18 @@ func pickWireParamSection(payload []byte) []byte {
 // TestSelectStaticSQL_ExtendedDynamicAddsMarker confirms the
 // SelectStaticSQL path appends an empty CP 0x3804 marker to its
 // PREPARE_DESCRIBE frame when WithExtendedDynamic(true) is supplied
-// -- and does NOT add it under the default options. The fake conn
-// replays select_dummy.trace replies (the request payload doesn't
-// affect what comes back), so we can drive the prepare path and
-// then inspect what got written.
+// -- and does NOT add it under the default options.
+//
+// Caveat: live testing on IBM Cloud V7R6M0 (2026-05-11) showed the
+// empty-marker wire shape does NOT actually file statements into
+// the *PGM. The full JT400 wire shape includes the package name
+// var-string in CP 0x3804 + the library var-string in CP 0x3801 on
+// CREATE_RPB + prepare-option byte = 0x01, but our experiments
+// with that combination produced SQL-112 / SQL-102 errors from the
+// server (likely because some additional CPs we haven't decoded
+// yet are also required). v0.7.1 keeps the empty-marker behaviour
+// because that's a no-op the server accepts; the real
+// "file into package" fix is deferred to M11.
 func TestSelectStaticSQL_ExtendedDynamicAddsMarker(t *testing.T) {
 	all := allReceivedsFromFixture(t, "select_dummy.trace")
 	var sqlReceiveds [][]byte
@@ -322,9 +330,9 @@ func TestSelectStaticSQL_ExtendedDynamicAddsMarker(t *testing.T) {
 	}
 
 	cases := []struct {
-		name           string
-		opts           []SelectOption
-		wantHasMarker  bool
+		name          string
+		opts          []SelectOption
+		wantHasMarker bool
 	}{
 		{"default off", nil, false},
 		{"dynamic on", []SelectOption{WithExtendedDynamic(true)}, true},

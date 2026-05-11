@@ -151,10 +151,18 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, []DBParam{
-			DBParamVarString(cpDBPrepareStatementName, 273, stmtNameBytes),
-			DBParamVarString(cpDBCursorName, 273, cursorNameBytes),
-		})
+		createParams := []DBParam{
+			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
+		}
+		if o.extendedDynamic && o.packageLibrary != "" {
+			libParam, err := buildPackageLibraryParam(o.packageLibrary)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package library: %w", err)
+			}
+			createParams = append(createParams, libParam)
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
 		if err != nil {
 			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
@@ -184,10 +192,14 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParamByte(cpDBPrepareOption, 0x00),
+			DBParamByte(cpDBPrepareOption, prepareOptionByte(o.extendedDynamic && o.packageName != "")),
 		}
 		if o.extendedDynamic {
-			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
+			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			prepParams = append(prepParams, pkgParam)
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {

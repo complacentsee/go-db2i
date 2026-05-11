@@ -358,13 +358,18 @@ func SendCreatePackage(conn io.ReadWriter, name, library string, ccsid uint16, n
 		return fmt.Errorf("hostserver: parse CREATE_PACKAGE reply: %w", err)
 	}
 	if dbErr := makeDb2Error(rep, "CREATE_PACKAGE"); dbErr != nil {
-		// Common-case "package already exists" comes back as
-		// SQL +20000 / SQLSTATE 01ZZZ in the SQLCA -- a warning,
-		// not an error, and the server has already prepared the
-		// existing *PGM for the rest of this connection. We let
-		// the caller decide what to do with the surface error;
-		// the driver's package-error config handler folds warning
-		// cases into an slog.Warn.
+		// "Package already exists" on V7R6M0 surfaces as
+		// errorClass=1, ReturnCode=-601 (SQLCODE -601, the IBM i
+		// catalog "object exists in QSYS/library" sentinel). JT400
+		// treats this as expected and proceeds to RETURN_PACKAGE
+		// (see JDPackageManager.create() lines 222-225 in the
+		// IBM/JTOpen source). Without this branch the driver's
+		// package-error handler soft-disables the cache on every
+		// reconnect against an existing *PGM, which means the
+		// v0.7.1 cache-hit fast path can never fire.
+		if rep.ErrorClass == 1 && int32(rep.ReturnCode) == -601 {
+			return nil
+		}
 		return dbErr
 	}
 	return nil
@@ -806,6 +811,67 @@ func readSQLDAFieldName(raw []byte, fieldBase int) (string, error) {
 		return "", fmt.Errorf("field name overruns record: start=%d len=%d raw=%d", start, nameLen, len(raw))
 	}
 	return ebcdic.CCSID37.Decode(raw[start : start+nameLen])
+}
+
+// prepareOptionByte returns the value the CP 0x3808
+// (cpDBPrepareOption) byte takes on PREPARE_DESCRIBE. JT400 sends
+// 0x01 ("normal prepare" with extended-dynamic active) when a
+// package is in play and 0x00 otherwise; capturing this against
+// IBM Cloud V7R6M0 showed the server returns SQL-112 errorClass=2
+// when a CP 0x3804 (package name) arrives alongside a 0x00 prepare
+// option, so the two MUST agree.
+func prepareOptionByte(extendedDynamic bool) byte {
+	if extendedDynamic {
+		return 0x01
+	}
+	return 0x00
+}
+
+// buildPackageLibraryParam builds the CP 0x3801 (cpPackageLibrary)
+// var-string param that CREATE_RPB carries when extended-dynamic
+// is on. Tells the server which IBM i library hosts the *PGM
+// referenced by the subsequent PREPARE_DESCRIBE's CP 0x3804. JT400
+// always sends CCSID 37 here, matching IBM i's job CCSID for
+// object-name fields.
+func buildPackageLibraryParam(lib string) (DBParam, error) {
+	bytes, err := ebcdicVarStringBytes(lib, 37)
+	if err != nil {
+		return DBParam{}, fmt.Errorf("package-library encode: %w", err)
+	}
+	return DBParamVarString(cpPackageLibrary, 37, bytes), nil
+}
+
+// buildPackageMarkerParam builds the CP 0x3804 (cpPackageName)
+// parameter PREPARE_DESCRIBE / OPEN_DESCRIBE_FETCH carry when
+// extended-dynamic is on. JT400 emits two wire shapes here,
+// driven by AS400JDBCStatement.commonPrepare's `sqlStatement.
+// isPackaged()` test:
+//
+//   - Packaged statement (the common case: parameterised non-
+//     CURRENT-OF, non-DECLARE SQL): full var-string CCSID(2) +
+//     SL(2) + 10 EBCDIC bytes naming the *PGM. The server files
+//     the prepared statement into the *PGM and the next connection
+//     with package-cache=true downloads it via RETURN_PACKAGE.
+//   - Non-packaged statement (DECLARE / CURRENT OF / etc.): empty
+//     LL=6 marker, no payload. The server accepts it (extended-
+//     dynamic is still in effect for the connection) but doesn't
+//     file the statement.
+//
+// name="" picks the second form. The earlier M10-3 implementation
+// used the empty form unconditionally, which is why *PGMs stayed
+// empty in live testing.
+func buildPackageMarkerParam(name string, ccsid uint16) (DBParam, error) {
+	if name == "" {
+		return DBParam{CodePoint: cpPackageName}, nil
+	}
+	if ccsid == 0 {
+		ccsid = 37 // JT400's V7R6M0 wire default for object names.
+	}
+	bytes, err := ebcdicVarStringBytes(name, ccsid)
+	if err != nil {
+		return DBParam{}, err
+	}
+	return DBParamVarString(cpPackageName, ccsid, bytes), nil
 }
 
 // ebcdicVarStringBytes converts s to EBCDIC bytes for the given

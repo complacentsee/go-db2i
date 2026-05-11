@@ -10,6 +10,34 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Fixed
+
+- **M10 wire-shape bug**: v0.7.0's extended-dynamic + package-cache
+  did NOT actually file prepared statements into the *PGM. The
+  PREPARE_DESCRIBE wire emitted an EMPTY CP 0x3804 marker + prepare-
+  option byte 0x00 -- a wire shape the server tolerates but treats
+  as a no-op for package filing. Live testing against IBM Cloud
+  V7R6M0 (2026-05-11) using fixture-captured JT400 wire bytes
+  showed three additional details that JT400 actually emits and
+  that the server enforces:
+  - PREPARE_DESCRIBE's CP 0x3804 carries the FULL 10-char EBCDIC
+    package name as a CCSID-tagged var-string, not an empty marker.
+  - PREPARE_DESCRIBE's CP 0x3808 (prepare option) byte is 0x01 (not
+    0x00) when extended-dynamic is on.
+  - OPEN_DESCRIBE_FETCH also carries the same CP 0x3804 package-
+    name var-string, alongside the existing buffer/cursor CPs.
+  - CREATE_RPB carries the package library in CP 0x3801.
+  - SendCreatePackage now treats errorClass=1 / SQLCODE -601
+    ("package already exists") as success rather than soft-disable,
+    mirroring JT400's JDPackageManager.create() behaviour.
+
+  With these fixes a fresh package goes from 0 cached statements at
+  connect to N cached statements after N distinct PREPARE_DESCRIBEs
+  on the same library/name; subsequent connects with `package
+  cache=true` then download the populated *PGM via RETURN_PACKAGE
+  and the v0.7.1-A decoder lights up `c.pkg.Cached`. Verified end-
+  to-end against the IBM Cloud V7R6M0 LPAR.
+
 ### Added
 
 - **v0.7.1-C**: driver Stmt cache-hit dispatch. `Stmt.Exec` now

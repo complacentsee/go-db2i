@@ -452,10 +452,18 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, []DBParam{
-			DBParamVarString(cpDBPrepareStatementName, 273, stmtNameBytes),
-			DBParamVarString(cpDBCursorName, 273, cursorNameBytes),
-		})
+		createParams := []DBParam{
+			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
+		}
+		if opts.extendedDynamic && opts.packageLibrary != "" {
+			libParam, err := buildPackageLibraryParam(opts.packageLibrary)
+			if err != nil {
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package library: %w", err)
+			}
+			createParams = append(createParams, libParam)
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
 		if err != nil {
 			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
@@ -484,7 +492,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParamByte(cpDBPrepareOption, 0x00),
+			DBParamByte(cpDBPrepareOption, prepareOptionByte(opts.extendedDynamic && opts.packageName != "")),
 		}
 		if opts.extendedMetadata {
 			// CP 0x3829 = 0xF1 -- without it the server ships
@@ -493,12 +501,11 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 			prepParams = append(prepParams, DBParamByte(0x3829, 0xF1))
 		}
 		if opts.extendedDynamic {
-			// Empty CP 0x3804 marker: server adds the prepared
-			// statement to the package context this connection
-			// established via CREATE_PACKAGE. Matches JT400's
-			// PREPARE_DESCRIBE wire shape captured in
-			// fixtures/prepared_package_first_use.trace.
-			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
+			pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
+			if err != nil {
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			prepParams = append(prepParams, pkgParam)
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {
@@ -582,14 +589,20 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	if isCallStmt(sql) {
 		return executeCallAndAttachFirstSet(conn, sql, paramShapes, dataPayload, cols, nextCorr)
 	}
-	return openDescribeFetchSelect(conn, sql, dataPayload, cols, nextCorr)
+	return openDescribeFetchSelect(conn, sql, dataPayload, cols, nextCorr, opts)
 }
 
 // openDescribeFetchSelect runs OPEN_DESCRIBE_FETCH (0x180E) for the
 // SELECT / VALUES / WITH path -- the existing behaviour pre-M9-3.
 // Caller has already shipped CREATE_RPB + PREPARE_DESCRIBE +
 // CHANGE_DESCRIPTOR; cols / dataPayload come from those steps.
-func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte, cols []SelectColumn, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
+//
+// JT400's OPEN_DESCRIBE_FETCH carries the package-name CP 0x3804
+// in addition to the buffer/cursor CPs whenever extended-dynamic
+// is active; the server needs that on the OPEN frame (not just on
+// PREPARE_DESCRIBE) to actually file the prepared statement into
+// the *PGM. Verified against IBM Cloud V7R6M0 (2026-05-11).
+func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte, cols []SelectColumn, nextCorr func() uint32, opts selectOpts) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	var fetchCorr uint32
 	{
 		tpl := DBRequestTemplate{
@@ -602,17 +615,27 @@ func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte,
 		}
 		params := []DBParam{
 			DBParamByte(cpDBOpenAttributes, 0x80),
+		}
+		if opts.extendedDynamic && opts.packageName != "" {
+			pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
+			if err != nil {
+				_ = deleteRPB(conn, nextCorr())
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			params = append(params, pkgParam)
+		}
+		params = append(params,
 			DBParamByte(cpDBVariableFieldCompr, 0xE8),
-			{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
+			DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
 			// 0x3814 is a 2-byte short in JTOpen's prepared
 			// SELECT trailer (LL=8 in the fixture, not LL=7),
 			// not the 1-byte field its name might imply.
 			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
-		}
+		)
 		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
 		if err != nil {
 			_ = deleteRPB(conn, nextCorr())

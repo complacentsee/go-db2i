@@ -535,16 +535,36 @@ type selectOpts struct {
 	// has been parsed.
 	extendedMetadata bool
 
-	// extendedDynamic, when true, appends an empty CP 0x3804
-	// (cpPackageName) marker to PREPARE_DESCRIBE requests. The
-	// marker tells the server to add the prepared statement to
-	// the package the connection registered via CREATE_PACKAGE
-	// at connect time. Without the marker the prepare runs in
-	// normal (non-package) mode; the wire bytes are unchanged
-	// from the M0..M9 baseline. Mirrors JT400's
-	// "extended dynamic=true" JDBC URL knob.
+	// extendedDynamic, when true, appends a CP 0x3804
+	// (cpPackageName) parameter carrying the package name to
+	// PREPARE_DESCRIBE requests. The parameter tells the server
+	// to add the prepared statement to the package the connection
+	// registered via CREATE_PACKAGE at connect time. Without it
+	// the prepare runs in normal (non-package) mode. Mirrors
+	// JT400's "extended dynamic=true" JDBC URL knob.
+	//
+	// JT400's wire shape (verified against captured fixtures) is
+	// the full 10-char EBCDIC package name as a CCSID-tagged
+	// var-string, NOT an empty marker -- the earlier M10
+	// implementation got this wrong and the server silently failed
+	// to file statements into the *PGM. packageName / packageCCSID
+	// carry the bytes WithPackageName attaches.
 	extendedDynamic bool
+	packageName     string
+	packageCCSID    uint16
+	packageLibrary  string
 }
+
+// rpbStringCCSID returns the CCSID the CREATE_RPB statement-name
+// / cursor-name var-strings are tagged with. Our M0-M9 captures
+// (prepared_int_param.trace, prepared_call_*.trace, etc.) used
+// CCSID 273; JT400's newer extended-dynamic captures (first_use,
+// cache_download, cache_hit) use CCSID 37 throughout. Both work
+// on V7R6M0 because the IBM-i-object-name charset (A-Z + 0-9 + _)
+// round-trips byte-identical between SBCS EBCDIC pages. We keep
+// 273 for back-compat with the older fixtures' byte-level tests;
+// future fixture re-captures may flip this.
+func rpbStringCCSID() uint16 { return 273 }
 
 // WithExtendedMetadata asks the server to ship per-column schema,
 // table, base column name, and label in the PREPARE_DESCRIBE
@@ -560,17 +580,51 @@ func WithExtendedMetadata(b bool) SelectOption {
 
 // WithExtendedDynamic asks the server to file every PREPAREd
 // statement into the SQL package the connection registered at
-// connect time. The on-wire change is an empty CP 0x3804 marker on
-// PREPARE_DESCRIBE; the server-side effect is that repeated PREPAREs
-// of the same SQL (across this and other connections targeting the
-// same *PGM) re-use the cached parse plan instead of re-parsing.
-// Mirrors JT400's "extended dynamic=true" JDBC URL knob.
+// connect time. The on-wire change is a CP 0x3804 parameter on
+// PREPARE_DESCRIBE carrying the 10-char EBCDIC package name as a
+// CCSID-tagged var-string; the server-side effect is that
+// repeated PREPAREs of the same SQL (across this and other
+// connections targeting the same *PGM) re-use the cached parse
+// plan instead of re-parsing. Mirrors JT400's "extended
+// dynamic=true" JDBC URL knob.
 //
-// The caller is responsible for issuing CREATE_PACKAGE on connect
-// (see hostserver.SendCreatePackage); this option only adds the
-// per-PREPARE marker.
+// Callers MUST also call WithPackageName -- without a package
+// name the option has no effect (the wire CP requires the bytes
+// to point the server at the right *PGM).
 func WithExtendedDynamic(b bool) SelectOption {
 	return func(o *selectOpts) { o.extendedDynamic = b }
+}
+
+// WithPackageName supplies the 10-char EBCDIC package name +
+// CCSID the CP 0x3804 parameter carries on PREPARE_DESCRIBE when
+// WithExtendedDynamic is on. ccsid=37 matches JT400's V7R6M0
+// wire (US EBCDIC); other SBCS EBCDIC pages work because the
+// package-name charset (A-Z + 0-9 + _#@$) round-trips identically.
+//
+// Pass-through: the wire encoder lifts `name` via
+// asciiToEBCDIC37 (the same helper CREATE_PACKAGE uses), so the
+// caller passes the same ASCII / Go string that BuildPackageName
+// produced.
+func WithPackageName(name string, ccsid uint16) SelectOption {
+	return func(o *selectOpts) {
+		o.packageName = name
+		o.packageCCSID = ccsid
+	}
+}
+
+// WithPackageLibrary supplies the package library name (CP 0x3801)
+// that CREATE_RPB attaches to the request parameter block when
+// extended-dynamic is on. JT400 sends this so the server knows
+// which library to look in for the *PGM when the per-statement
+// CP 0x3804 arrives on PREPARE_DESCRIBE. Without it the server
+// returns SQL-112 errorClass=2 on PREPARE_DESCRIBE even when the
+// package name CP is correct.
+//
+// Encoded the same way as the package name: ASCII bytes lifted
+// through asciiToEBCDIC37. Most callers pass the connection's
+// Config.PackageLibrary (default "QGPL").
+func WithPackageLibrary(lib string) SelectOption {
+	return func(o *selectOpts) { o.packageLibrary = lib }
 }
 
 func resolveSelectOpts(opts []SelectOption) selectOpts {
@@ -629,8 +683,15 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			ParameterMarkerDescriptor: 0,
 		}
 		params := []DBParam{
-			DBParamVarString(cpDBPrepareStatementName, 273, stmtNameBytes),
-			DBParamVarString(cpDBCursorName, 273, cursorNameBytes),
+			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
+		}
+		if opts.extendedDynamic && opts.packageLibrary != "" {
+			libParam, err := buildPackageLibraryParam(opts.packageLibrary)
+			if err != nil {
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package library: %w", err)
+			}
+			params = append(params, libParam)
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, params)
 		if err != nil {
@@ -675,7 +736,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 		params := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes), // UCS-2 BE
 			DBParamShort(cpDBStatementType, 2),                            // SELECT
-			DBParamByte(cpDBPrepareOption, 0x00),
+			DBParamByte(cpDBPrepareOption, prepareOptionByte(opts.extendedDynamic && opts.packageName != "")),
 		}
 		if opts.extendedMetadata {
 			// CP 0x3829 (ExtendedColumnDescriptorOption) = 0xF1
@@ -687,11 +748,24 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			params = append(params, DBParamByte(0x3829, 0xF1))
 		}
 		if opts.extendedDynamic {
-			// Empty CP 0x3804 marker: file this SELECT into the
-			// session's SQL package (the *PGM CREATE_PACKAGE set up
-			// at connect). Matches JT400's wire shape captured in
-			// fixtures/prepared_package_first_use.trace.
-			params = append(params, DBParam{CodePoint: cpPackageName})
+			// JT400's commonPrepare emits two wire shapes for the
+			// CP 0x3804 package marker:
+			//   - sqlStatement.isPackaged() true  -> full var-string with
+			//     the package name, prepare-option byte = 0x01
+			//   - isPackaged() false              -> empty LL=6 marker,
+			//     prepare-option byte = 0x00
+			// The first form is the one that actually files the
+			// statement into the *PGM (we use sqlStatement.isPackaged
+			// equivalent via WithPackageName being set by the driver
+			// when packageEligibleFor returned true). The empty
+			// marker is a no-op the server tolerates but doesn't
+			// store. See AS400JDBCStatement.java:1955-1965 in the
+			// IBM/JTOpen source for the original conditional.
+			pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
+			if err != nil {
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			params = append(params, pkgParam)
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, params)
 		if err != nil {
@@ -775,12 +849,21 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			ParameterMarkerDescriptor: 0,
 		}
 		params := []DBParam{
-			DBParamByte(cpDBOpenAttributes, 0x80),         // read-only cursor
-			DBParamByte(cpDBVariableFieldCompr, 0xE8),     // VLF compression on
-			DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}}, // 32 KB buffer
+			DBParamByte(cpDBOpenAttributes, 0x80), // read-only cursor
+		}
+		if opts.extendedDynamic && opts.packageName != "" {
+			pkgParam, err := buildPackageMarkerParam(opts.packageName, opts.packageCCSID)
+			if err != nil {
+				return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			params = append(params, pkgParam)
+		}
+		params = append(params,
+			DBParamByte(cpDBVariableFieldCompr, 0xE8),                                  // VLF compression on
+			DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},   // 32 KB buffer
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
-		}
+		)
 		hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
 		if err != nil {
 			return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: build OPEN_DESCRIBE_FETCH: %w", err)

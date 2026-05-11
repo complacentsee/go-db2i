@@ -138,6 +138,12 @@ func ReadFrame(r io.Reader) (Header, []byte, error) {
 			return hdr, nil, err
 		}
 	}
+	if readHook != nil {
+		full := make([]byte, HeaderLength+len(payload))
+		copy(full, headerBuf[:])
+		copy(full[HeaderLength:], payload)
+		readHook(hdr, full)
+	}
 	return hdr, payload, nil
 }
 
@@ -148,6 +154,29 @@ func WriteFrame(w io.Writer, hdr Header, payload []byte) error {
 	buf := make([]byte, hdr.Length)
 	hdr.appendTo(buf[:HeaderLength])
 	copy(buf[HeaderLength:], payload)
+	if wireHook != nil {
+		wireHook(hdr, buf)
+	}
 	_, err := w.Write(buf)
 	return err
 }
+
+// wireHook is a debug-only callback fired on every WriteFrame.
+// Tests use SetWireHook to capture the exact bytes a code path
+// emits; production builds leave it nil so there's zero overhead.
+// NOT thread-safe -- intended for sequential test programs only.
+var wireHook func(hdr Header, full []byte)
+
+// SetWireHook installs a callback fired on every WriteFrame, with
+// the request header + the full frame bytes (header + payload).
+// Pass nil to remove. Intended for live-test debugging of new wire
+// shapes; do not call from concurrent goroutines.
+func SetWireHook(fn func(hdr Header, full []byte)) { wireHook = fn }
+
+// readHook is fired on every ReadFrame return.
+var readHook func(hdr Header, full []byte)
+
+// SetReadHook installs a callback fired on every successful
+// ReadFrame, with the parsed reply header + the full reply bytes.
+// Symmetric to SetWireHook; same caveats.
+func SetReadHook(fn func(hdr Header, full []byte)) { readHook = fn }

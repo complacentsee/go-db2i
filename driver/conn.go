@@ -370,10 +370,17 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 		opts = append(opts, hostserver.WithExtendedMetadata(true))
 	}
 	if c.pkg != nil && c.packageEligibleFor(sql, hasParams) {
-		// Extended-dynamic adds the empty CP 0x3804 marker to
-		// each PREPARE_DESCRIBE so the server files the statement
-		// into the connection's package context.
-		opts = append(opts, hostserver.WithExtendedDynamic(true))
+		// Extended-dynamic + packaged statement: emit CP 0x3804
+		// carrying the full package name + prepare-option=0x01.
+		// That's JT400's wire shape for the "file into *PGM"
+		// path -- the empty-marker variant M10-3 used didn't
+		// populate the package on live IBM Cloud V7R6M0
+		// (verified 2026-05-11).
+		opts = append(opts,
+			hostserver.WithExtendedDynamic(true),
+			hostserver.WithPackageName(c.pkg.Name, 37),
+			hostserver.WithPackageLibrary(c.pkg.Library),
+		)
 	}
 	return opts
 }
