@@ -2,10 +2,12 @@ package driver
 
 import (
 	"context"
+	stdsql "database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"time"
 
@@ -38,16 +40,25 @@ func (s *Stmt) NumInput() int { return -1 }
 func (s *Stmt) Close() error { return nil }
 
 // CheckNamedValue lets database/sql forward our LOB bind type
-// (*LOBValue) through the driver boundary without the default
-// parameter converter rejecting it for not being one of the six
-// driver.Value flavours. Returning nil tells database/sql "leave
-// the value alone, the driver knows what to do with it"; returning
-// driver.ErrSkip tells it to fall back to its default conversion
-// (int -> int64, etc.).
+// (*LOBValue) AND the stdlib sql.Out wrapper (for stored-procedure
+// OUT / INOUT parameters) through the driver boundary without the
+// default parameter converter rejecting them for not being one of
+// the six driver.Value flavours. Returning nil tells database/sql
+// "leave the value alone, the driver knows what to do with it";
+// returning driver.ErrSkip tells it to fall back to its default
+// conversion (int -> int64, etc.).
 //
 // Implements database/sql/driver.NamedValueChecker.
 func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
 	if _, ok := nv.Value.(*LOBValue); ok {
+		return nil
+	}
+	if _, ok := nv.Value.(stdsql.Out); ok {
+		// database/sql passes sql.Out{Dest: &x} through as a value
+		// (not a pointer); the bind path in
+		// bindArgsToPreparedParams reads Dest/In via reflect.
+		// Returning nil here keeps Go's default converter from
+		// rejecting Out with "unsupported type ...struct".
 		return nil
 	}
 	return driver.ErrSkip
@@ -209,7 +220,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		}
 		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 	}
-	shapes, values, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
+	shapes, values, outDests, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +228,9 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
+	}
+	if err := writeBackOutParams(outDests, res.OutValues); err != nil {
+		return nil, err
 	}
 	return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 }
@@ -272,7 +286,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		}
 		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
-	shapes, values, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
+	shapes, values, _, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
 	if err != nil {
 		return nil, err
 	}
@@ -338,13 +352,62 @@ func (s *Stmt) logQuery(op string, paramCount int, start time.Time, err error) {
 // The nullable flavour (odd SQL type) is used for every bind so a
 // future caller can pass NULL through the same shape without changing
 // the request frame; the indicator block decides null vs not-null.
-func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostserver.PreparedParam, []any, error) {
+// bindArgsToPreparedParams produces the wire shapes + bind values
+// AND returns a parallel slice of OUT-destination pointers (one per
+// arg slot; nil for non-OUT slots). For stored-procedure OUT / INOUT
+// parameters callers wrap their destination in `sql.Out{Dest: &x,
+// In: bool}`; the bind layer translates that into a PreparedParam
+// with ParamType=0xF1 (OUT) or 0xF2 (INOUT), and the caller hangs
+// onto the returned outDests so the EXECUTE reply's OUT row can be
+// reflect-assigned back to the user's variables.
+//
+// The OUT shapes here are placeholders: the proc's declared parameter
+// types come from the server in the PREPARE_DESCRIBE reply
+// (CP 0x3813), and hostserver.ExecutePreparedSQL fixes up the
+// OUT-slot shapes from that PMF before sending CHANGE_DESCRIPTOR.
+// The placeholder still needs a sensible default so paramShapes
+// passes the shape-count validation in EncodeDBExtendedDataFormat.
+func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostserver.PreparedParam, []any, []*stdsql.Out, error) {
 	if stringCCSID == 0 {
 		stringCCSID = 37
 	}
 	shapes := make([]hostserver.PreparedParam, len(args))
 	values := make([]any, len(args))
+	outDests := make([]*stdsql.Out, len(args))
 	for i, a := range args {
+		// Stored-procedure OUT / INOUT parameter. CheckNamedValue
+		// admits sql.Out (value type) through the boundary; here we
+		// set the direction byte and stash a pointer to the original
+		// (so the wrapper's Dest pointer is reachable from the
+		// post-EXECUTE write-back path). INOUT (In=true) carries an
+		// IN value derived from the current value of *Dest;
+		// OUT-only (In=false) sends a zero placeholder since the
+		// server ignores the bind value for that direction.
+		if out, ok := a.(stdsql.Out); ok {
+			if out.Dest == nil {
+				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: sql.Out.Dest must not be nil", i)
+			}
+			// Heap-allocate so the write-back path has a stable
+			// pointer (the loop variable `out` goes out of scope
+			// after this iteration; we need it to outlive the
+			// loop). Dest is itself a pointer to the caller's
+			// variable, so even if `out` itself was copied
+			// elsewhere, the write through Dest still hits the
+			// original.
+			outCopy := out
+			outDests[i] = &outCopy
+			direction := byte(0xF1) // PARAMETER_TYPE_OUTPUT
+			if out.In {
+				direction = 0xF2 // PARAMETER_TYPE_INPUT_OUTPUT
+			}
+			placeholderShape, placeholderValue, err := outBindShape(&out, stringCCSID, direction)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
+			}
+			shapes[i] = placeholderShape
+			values[i] = placeholderValue
+			continue
+		}
 		switch v := a.(type) {
 		case int64:
 			shapes[i] = hostserver.PreparedParam{SQLType: 493, FieldLength: 8}
@@ -392,7 +455,7 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			// the override runs.
 			rv, err := resolveLOBValue(v)
 			if err != nil {
-				return nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
+				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
 			}
 			shapes[i] = hostserver.PreparedParam{
 				SQLType:     961, // BLOB locator NN; bindLOBParameters fixes up SQLType + CCSID
@@ -429,10 +492,223 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			shapes[i] = hostserver.PreparedParam{SQLType: 497, FieldLength: 4}
 			values[i] = nil
 		default:
-			return nil, nil, fmt.Errorf("gojtopen: param %d: unsupported Go type %T (driver.Value union: int64/float64/bool/[]byte/string/time.Time/nil)", i, a)
+			return nil, nil, nil, fmt.Errorf("gojtopen: param %d: unsupported Go type %T (driver.Value union: int64/float64/bool/[]byte/string/time.Time/nil)", i, a)
 		}
 	}
-	return shapes, values, nil
+	return shapes, values, outDests, nil
+}
+
+// outBindShape returns a placeholder PreparedParam + bind value for
+// a stored-procedure OUT / INOUT slot. The shape is derived from the
+// Go type of out.Dest -- it's a best-effort starting point;
+// hostserver.ExecutePreparedSQL overrides every OUT/INOUT slot's
+// SQL type / length / CCSID with the server's declared types from
+// the PREPARE_DESCRIBE reply's parameter-marker format (CP 0x3813)
+// before the descriptor goes out on the wire. The placeholder still
+// has to (a) carry the direction byte and (b) supply a non-zero
+// FieldLength so EncodeDBExtendedDataFormat's row-size accumulator
+// doesn't underflow.
+//
+// For INOUT (direction 0xF2), the IN side of the bind value is the
+// dereferenced *Dest. For OUT-only (0xF1) the bind value is irrelevant
+// per JT400's behaviour -- the server ignores it -- but we send a
+// type-appropriate zero so EncodeDBExtendedData doesn't trip on a
+// nil where it expects a typed value.
+func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserver.PreparedParam, any, error) {
+	destVal := reflect.ValueOf(out.Dest)
+	if destVal.Kind() != reflect.Pointer {
+		return hostserver.PreparedParam{}, nil, fmt.Errorf("sql.Out.Dest must be a pointer, got %T", out.Dest)
+	}
+	elem := destVal.Elem()
+	// IN side of an INOUT binds the current value at the destination.
+	var inValue any
+	if out.In {
+		inValue = elem.Interface()
+	}
+	switch elem.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
+		shape := hostserver.PreparedParam{
+			SQLType:     497, // INTEGER nullable; PMF fixup overrides
+			FieldLength: 4,
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = int32Of(elem)
+		} else {
+			inValue = int32(0)
+		}
+		return shape, inValue, nil
+	case reflect.Int64:
+		shape := hostserver.PreparedParam{
+			SQLType:     493, // BIGINT nullable
+			FieldLength: 8,
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = elem.Int()
+		} else {
+			inValue = int64(0)
+		}
+		return shape, inValue, nil
+	case reflect.Float32, reflect.Float64:
+		shape := hostserver.PreparedParam{
+			SQLType:     481, // DOUBLE nullable
+			FieldLength: 8,
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = elem.Float()
+		} else {
+			inValue = float64(0)
+		}
+		return shape, inValue, nil
+	case reflect.String:
+		// VARCHAR(2000) placeholder. The PMF fixup sets the real
+		// CCSID + length from the proc's declared parameter type;
+		// here we just need a non-zero FieldLength so the row-size
+		// accumulator in EncodeDBExtendedDataFormat is correct
+		// before fixup.
+		shape := hostserver.PreparedParam{
+			SQLType:     449,
+			FieldLength: 2002, // 2-byte SL + 2000 max bytes
+			Precision:   2000,
+			CCSID:       stringCCSID,
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = elem.String()
+		} else {
+			inValue = ""
+		}
+		return shape, inValue, nil
+	case reflect.Bool:
+		shape := hostserver.PreparedParam{
+			SQLType:     501, // SMALLINT nullable
+			FieldLength: 2,
+			ParamType:   direction,
+		}
+		if out.In && elem.Bool() {
+			inValue = int32(1)
+		} else {
+			inValue = int32(0)
+		}
+		return shape, inValue, nil
+	default:
+		return hostserver.PreparedParam{}, nil, fmt.Errorf("sql.Out.Dest unsupported type *%s", elem.Type().String())
+	}
+}
+
+// int32Of narrows the reflect.Value of any int/int8/int16/int32 to
+// the int32 the wire encoder for INTEGER expects.
+func int32Of(v reflect.Value) int32 {
+	switch v.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
+		return int32(v.Int())
+	}
+	return 0
+}
+
+// writeBackOutParams reflect-assigns each decoded OUT value into the
+// caller's *sql.Out.Dest. Called after ExecutePreparedSQL with
+// outDests[i] = the original *sql.Out for slot i (nil if slot i was
+// IN-only) and outValues[i] = the decoded value from the EXECUTE
+// reply's result-data row (nil if slot i wasn't OUT/INOUT, or the
+// server returned no row).
+//
+// Conversion follows the same conventions database/sql.Rows.Scan
+// uses, but limited to the destination kinds outBindShape accepts:
+//
+//	*string                      <- string / []byte
+//	*int / *int8 / *int16 / *int32 <- int32 / int64 (narrow with range check)
+//	*int64                       <- int32 / int64
+//	*float32 / *float64          <- float32 / float64
+//	*bool                        <- non-zero int32 / bool
+//
+// Mismatches surface as gojtopen errors with the param index so the
+// caller knows which slot misaligned.
+func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
+	if outDests == nil {
+		return nil
+	}
+	for i, out := range outDests {
+		if out == nil {
+			continue
+		}
+		if i >= len(outValues) {
+			return fmt.Errorf("gojtopen: OUT param %d: EXECUTE reply had no value (got %d slots)", i, len(outValues))
+		}
+		v := outValues[i]
+		// Nil from the server means a SQL NULL came back for the
+		// OUT slot. database/sql's Scan rejects nil into a non-
+		// pointer-pointer; we mirror that by treating it as the
+		// zero value of the destination type.
+		destVal := reflect.ValueOf(out.Dest).Elem()
+		if v == nil {
+			destVal.SetZero()
+			continue
+		}
+		if err := assignOutParam(destVal, v); err != nil {
+			return fmt.Errorf("gojtopen: OUT param %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// assignOutParam handles the type coercion from the server-decoded
+// value (int32 / int64 / float64 / string / []byte / bool /
+// time.Time) into the destination's Kind. Out of scope for M9-2:
+// time.Time, DECIMAL, []byte; those need separate decoder paths.
+func assignOutParam(dest reflect.Value, v any) error {
+	switch dest.Kind() {
+	case reflect.String:
+		switch x := v.(type) {
+		case string:
+			dest.SetString(x)
+			return nil
+		case []byte:
+			dest.SetString(string(x))
+			return nil
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		switch x := v.(type) {
+		case int32:
+			dest.SetInt(int64(x))
+			return nil
+		case int64:
+			if dest.Kind() != reflect.Int64 && dest.Kind() != reflect.Int {
+				// Range-check before narrowing.
+				bits := dest.Type().Bits()
+				if bits < 64 {
+					lo := int64(-1) << (bits - 1)
+					hi := int64(1)<<(bits-1) - 1
+					if x < lo || x > hi {
+						return fmt.Errorf("int64 value %d overflows %s", x, dest.Type().String())
+					}
+				}
+			}
+			dest.SetInt(x)
+			return nil
+		}
+	case reflect.Float32, reflect.Float64:
+		switch x := v.(type) {
+		case float64:
+			dest.SetFloat(x)
+			return nil
+		case float32:
+			dest.SetFloat(float64(x))
+			return nil
+		}
+	case reflect.Bool:
+		switch x := v.(type) {
+		case bool:
+			dest.SetBool(x)
+			return nil
+		case int32:
+			dest.SetBool(x != 0)
+			return nil
+		}
+	}
+	return fmt.Errorf("cannot assign %T into *%s", v, dest.Type().String())
 }
 
 // isSelect returns true iff the SQL begins with SELECT, VALUES, WITH,

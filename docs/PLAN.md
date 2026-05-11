@@ -734,7 +734,22 @@ the user's plans/ directory.
   and confirms `db.Exec("CALL GOSPROCS.P_INS(?, ?)", "M9_INONLY", 7)`
   lands a row in the proc-body's INSERT target. Plaintext live
   green (2.6 s).
-- **M9-2 OUT and INOUT via `sql.Out`** — pending.
+- **M9-2 OUT and INOUT via `sql.Out`** ✅ 2026-05-11 —
+  `Stmt.CheckNamedValue` accepts `sql.Out` (value type, not pointer
+  -- the shape `database/sql` passes through); bind-path produces
+  `PreparedParam` with direction byte 0xF1 / 0xF2 + INOUT IN value
+  derived from `*Dest`; `hostserver.ExecutePreparedSQL` overrides
+  the OUT slot shapes from the server's parameter-marker format
+  (CP 0x3813) post-PREPARE; EXECUTE ORS bitmap ORs in `ORSResultData`
+  to ask for the OUT row; `parseOutParameterRow` reuses
+  `findExtendedResultData` with synthetic SelectColumn entries to
+  decode the synthetic 0x380E single-row reply; driver-side
+  `writeBackOutParams` reflect-assigns into `*Dest`. Offline replay
+  (`TestCallInOutFixtureOutDecode`) pins the decode against
+  `prepared_call_in_out.trace`'s EXECUTE reply: OUT VARCHAR "Acme
+  Widget" + OUT INTEGER 100. Live evidence: `TestStoredProcedureOUT`
+  (P_LOOKUP) + `TestStoredProcedureINOUT` (P_ROUNDTRIP) both green
+  on plaintext. `Example_callWithOut` documents the API.
 - **M9-3 Multi-result-set via `Rows.NextResultSet`** — pending.
 
 ## Working rhythm

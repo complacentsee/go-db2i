@@ -21,11 +21,22 @@ const ReqDBSQLExecuteImmediate uint16 = 0x1806
 // values arrive via CP 0x381F just like the prepared SELECT path.
 const ReqDBSQLExecute uint16 = 0x1805
 
-// ExecResult is what ExecuteImmediate returns -- just a
-// rows-affected count for now (decoded from SQLCA when present;
-// 0 if the SQLCA didn't carry one).
+// ExecResult is what ExecuteImmediate / ExecutePreparedSQL returns.
+// RowsAffected is decoded from SQLCA when present (0 if absent or
+// for statement kinds that don't carry it like DDL).
+//
+// OutValues is populated when the statement carried OUT or INOUT
+// parameters (stored-procedure CALLs via M9-2's sql.Out path) and
+// the server returned a synthetic single-row result-data CP in the
+// EXECUTE reply. Each entry is the typed decoded value from the
+// corresponding parameter slot's PreparedParam shape; slots whose
+// PreparedParam.ParamType was 0xF0 (IN-only) are left nil since the
+// reply row still includes them (IN values echoed back) but the
+// caller has no destination to write to. OutValues is nil for any
+// EXECUTE whose paramShapes had no OUT/INOUT direction byte.
 type ExecResult struct {
 	RowsAffected int64
+	OutValues    []any
 }
 
 // ExecuteImmediate runs INSERT / UPDATE / DELETE / DDL against conn
@@ -224,6 +235,30 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		return nil, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
+	// Stored-procedure OUT / INOUT shape fixup. For each slot whose
+	// caller-supplied PreparedParam.ParamType is 0xF1 (OUT) or 0xF2
+	// (INOUT), substitute the server's declared SQL type / length /
+	// CCSID from the PREPARE_DESCRIBE reply's parameter-marker format
+	// (PMF, CP 0x3813). The driver's bind path can't know the proc's
+	// declared signature, so it sends a placeholder shape (e.g.
+	// VARCHAR(2000) for *string OUT). The fixup brings the descriptor
+	// in line with what the server expects.
+	expectOutput := false
+	for i := range paramShapes {
+		switch paramShapes[i].ParamType {
+		case 0xF1, 0xF2:
+			expectOutput = true
+			if i < len(pmf) {
+				p := pmf[i]
+				paramShapes[i].SQLType = p.SQLType
+				paramShapes[i].FieldLength = p.FieldLength
+				paramShapes[i].Precision = p.Precision
+				paramShapes[i].Scale = p.Scale
+				paramShapes[i].CCSID = p.CCSID
+			}
+		}
+	}
+
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
 	// round trip for callers that pass through ExecutePreparedSQL
 	// for symmetry but happen to bind zero arguments.
@@ -246,9 +281,19 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	}
 	execCorr := corr
 	{
+		// When the statement carries OUT / INOUT params we additionally
+		// ask the server for ORSResultData so the reply ships a CP
+		// 0x380E synthetic single-row data block carrying the OUT
+		// values (JT400's AS400JDBCPreparedStatementImpl.java:723
+		// commonExecuteAfter -> reply.getResultData()). Without this
+		// bit the server returns SQLCA-only and the OUT values are
+		// silently dropped.
+		ors := ORSReturnData | ORSSQLCA | uint32(0x00040000)
+		if expectOutput {
+			ors |= ORSResultData
+		}
 		tpl := DBRequestTemplate{
-			// SQLCA only -- INSERT/UPDATE/DELETE returns no rows.
-			ORSBitmap:                 ORSReturnData | ORSSQLCA | 0x00040000,
+			ORSBitmap:                 ors,
 			ReturnORSHandle:           1,
 			FillORSHandle:             1,
 			BasedOnORSHandle:          0,
@@ -304,11 +349,71 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		_ = cleanup()
 		return nil, dbErr
 	}
+
+	// Decode OUT / INOUT values from the synthetic result-data CP
+	// (0x380E). The row's column count matches paramShapes; field
+	// types come from the (post-fixup) shapes. IN-only slots are
+	// echoed back in the row too -- we surface them so callers can
+	// see them but typically only OUT/INOUT slots are interesting.
+	var outValues []any
+	if expectOutput {
+		outValues, err = parseOutParameterRow(rep, paramShapes)
+		if err != nil {
+			_ = cleanup()
+			return nil, fmt.Errorf("hostserver: parse OUT-parameter row: %w", err)
+		}
+	}
+
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)
 	}
 	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA SQLERRD[2]).
-	return &ExecResult{}, nil
+	return &ExecResult{OutValues: outValues}, nil
+}
+
+// parseOutParameterRow finds the EXECUTE reply's result-data CP and
+// decodes its single row into one Go value per paramShape slot. The
+// server's row layout mirrors the CHANGE_DESCRIPTOR descriptor we
+// sent (same column shapes in declaration order), so we reuse the
+// SELECT-side row parser by synthesising a SelectColumn list from
+// the shapes.
+//
+// JT400's AS400JDBCPreparedStatementImpl.java:722-729 calls
+// `reply.getResultData()` then `parameterRow_.setServerData()` --
+// goJTOpen mirrors this end-to-end via the same parseExtendedResultData
+// path used for SELECT rows.
+func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, error) {
+	cols := make([]SelectColumn, len(shapes))
+	for i, p := range shapes {
+		cols[i] = SelectColumn{
+			SQLType:   p.SQLType,
+			Length:    p.FieldLength,
+			Scale:     p.Scale,
+			Precision: p.Precision,
+			CCSID:     p.CCSID,
+		}
+	}
+	rows, err := rep.findExtendedResultData(cols)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if len(rows) > 1 {
+		// JT400's CallableStatement only consumes parameterRow_[0]
+		// (setRowIndex(0)); subsequent rows would be a server-side
+		// oddity we'd want to surface rather than silently drop.
+		return nil, fmt.Errorf("OUT-parameter row count %d > 1", len(rows))
+	}
+	row := rows[0]
+	out := make([]any, len(shapes))
+	for i := range shapes {
+		if i < len(row) {
+			out[i] = row[i]
+		}
+	}
+	return out, nil
 }
 
 // statementTypeForSQL picks the SQL statement-type code (CP 0x3812

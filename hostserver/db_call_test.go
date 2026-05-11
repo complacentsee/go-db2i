@@ -3,6 +3,7 @@ package hostserver
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/complacentsee/goJTOpen/internal/wirelog"
@@ -239,6 +240,104 @@ func TestCallInOnlyFixtureWireShape(t *testing.T) {
 	}
 	if got, ok := findStmtTypeInFrame(gotExecute); !ok || got != 3 {
 		t.Errorf("goJTOpen EXECUTE statement-type CP 0x3812 = %d ok=%v, want 3 (TYPE_CALL)", got, ok)
+	}
+}
+
+// TestCallInOutFixtureOutDecode replays the EXECUTE reply from
+// prepared_call_in_out.trace (CALL P_LOOKUP('WIDGET', ?, ?) with two
+// OUT registrations) and confirms goJTOpen's parseOutParameterRow
+// decodes the synthetic single-row CP 0x380E into the same values
+// the Java golden file pins: OUT VARCHAR(64) "Acme Widget" + OUT
+// INTEGER 100.
+//
+// The shapes used here mirror what the OUT-shape PMF-fixup step
+// would produce at runtime: PMF[0] = IN VARCHAR(10) WIDGET (echoed
+// back in the row), PMF[1] = OUT VARCHAR(64), PMF[2] = OUT INTEGER.
+// We skip the IN-only slot in the decoded-value assertion since
+// only the OUT slots are interesting downstream.
+func TestCallInOutFixtureOutDecode(t *testing.T) {
+	const fixture = "prepared_call_in_out.trace"
+	frames := wirelog.Consolidate(loadFixture(t, fixture))
+
+	// Find the EXECUTE reply on the second connection. The reply
+	// flavour is RepDBReply (0x2800) -- universal SQL-reply
+	// header -- and EXECUTE is the second-to-last SQL reply on the
+	// CALL connection (PREPARE_DESCRIBE / EXECUTE / RPB_DELETE).
+	byConn := map[uint32][][]byte{}
+	connOrder := []uint32{}
+	for _, f := range frames {
+		if f.Direction != wirelog.Received {
+			continue
+		}
+		if _, ok := byConn[f.ConnID]; !ok {
+			connOrder = append(connOrder, f.ConnID)
+		}
+		b := f.Bytes
+		for len(b) >= 8 {
+			ln := binary.BigEndian.Uint32(b[0:4])
+			if ln < 8 || ln > uint32(len(b)) {
+				break
+			}
+			byConn[f.ConnID] = append(byConn[f.ConnID], append([]byte(nil), b[:ln]...))
+			b = b[ln:]
+		}
+	}
+	if len(connOrder) < 2 {
+		t.Fatalf("fixture %s: need >=2 connections (VRM detect + CALL), got %d", fixture, len(connOrder))
+	}
+	var sqlReplies [][]byte
+	for _, b := range byConn[connOrder[1]] {
+		if len(b) >= 20 &&
+			binary.BigEndian.Uint16(b[6:8]) == uint16(ServerDatabase) &&
+			binary.BigEndian.Uint16(b[18:20]) == RepDBReply {
+			sqlReplies = append(sqlReplies, b)
+		}
+	}
+	if len(sqlReplies) < 3 {
+		t.Fatalf("need >=3 SQL replies on CALL connection; got %d", len(sqlReplies))
+	}
+	// Index from the tail: [-1]=RPB_DELETE, [-2]=EXECUTE, [-3]=PREPARE.
+	executeReply := sqlReplies[len(sqlReplies)-2]
+
+	// Parse the EXECUTE reply through the usual reply parser, then
+	// drive parseOutParameterRow with the (post-fixup) shapes the
+	// proc declared.
+	hdr, payload := executeReply[:20], executeReply[20:]
+	_ = hdr
+	rep, err := ParseDBReply(payload)
+	if err != nil {
+		t.Fatalf("ParseDBReply: %v", err)
+	}
+	// P_LOOKUP signature: IN VARCHAR(10), OUT VARCHAR(64), OUT INT.
+	shapes := []PreparedParam{
+		{SQLType: 448, FieldLength: 12, Precision: 10, CCSID: 37, ParamType: 0xF0},
+		{SQLType: 448, FieldLength: 66, Precision: 64, CCSID: 37, ParamType: 0xF1},
+		{SQLType: 496, FieldLength: 4, Precision: 10, CCSID: 0, ParamType: 0xF1},
+	}
+	out, err := parseOutParameterRow(rep, shapes)
+	if err != nil {
+		t.Fatalf("parseOutParameterRow: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("OUT slots = %d, want 3 (IN echoed + 2 OUT)", len(out))
+	}
+	// Slot 1 = OUT VARCHAR -> "Acme Widget" (padded; trim trailing
+	// spaces for the assertion since IBM i blank-pads CHAR/VARCHAR
+	// per the column declared length).
+	gotName, ok := out[1].(string)
+	if !ok {
+		t.Fatalf("OUT slot 1 type = %T, want string", out[1])
+	}
+	if trimmed := strings.TrimRight(gotName, " "); trimmed != "Acme Widget" {
+		t.Errorf("OUT name = %q, want %q (trimmed)", trimmed, "Acme Widget")
+	}
+	// Slot 2 = OUT INTEGER -> 100.
+	gotQty, ok := out[2].(int32)
+	if !ok {
+		t.Fatalf("OUT slot 2 type = %T, want int32", out[2])
+	}
+	if gotQty != 100 {
+		t.Errorf("OUT qty = %d, want 100", gotQty)
 	}
 }
 

@@ -1872,3 +1872,51 @@ func TestStoredProcedureINOnly(t *testing.T) {
 		t.Logf("cleanup: %v", err)
 	}
 }
+
+// TestStoredProcedureOUT is M9-2's primary live test: invoke
+// GOSPROCS.P_LOOKUP via db.Exec with one IN VARCHAR + two
+// sql.Out destinations (VARCHAR + INTEGER) and confirm both OUT
+// values come back populated. Exercises the OUT-shape PMF fixup,
+// the EXECUTE ORSResultData bit, the synthetic single-row 0x380E
+// decode against synthetic SelectColumn entries, and reflect-based
+// write-back into *string / *int.
+func TestStoredProcedureOUT(t *testing.T) {
+	db := openDB(t)
+	setUpStoredProcs(t, db)
+
+	var name string
+	var qty int
+	if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		"WIDGET",
+		sql.Out{Dest: &name},
+		sql.Out{Dest: &qty},
+	); err != nil {
+		t.Fatalf("CALL P_LOOKUP: %v", err)
+	}
+	if strings.TrimRight(name, " ") != "Acme Widget" {
+		t.Errorf("OUT name = %q, want %q", name, "Acme Widget")
+	}
+	if qty != 100 {
+		t.Errorf("OUT qty = %d, want 100", qty)
+	}
+}
+
+// TestStoredProcedureINOUT covers the INOUT direction byte (0xF2)
+// via GOSPROCS.P_ROUNDTRIP, which simply increments its single
+// INOUT INTEGER. Seed value 5 -> proc returns 6. Exercises the IN-
+// side bind path (deref *Dest for the bind value) plus the OUT-side
+// write-back through the same slot.
+func TestStoredProcedureINOUT(t *testing.T) {
+	db := openDB(t)
+	setUpStoredProcs(t, db)
+
+	counter := 5
+	if _, err := db.Exec("CALL "+procLibrary+".P_ROUNDTRIP(?)",
+		sql.Out{Dest: &counter, In: true},
+	); err != nil {
+		t.Fatalf("CALL P_ROUNDTRIP: %v", err)
+	}
+	if counter != 6 {
+		t.Errorf("INOUT counter = %d, want 6 (seed 5 + 1)", counter)
+	}
+}

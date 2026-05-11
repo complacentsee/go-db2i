@@ -37,7 +37,7 @@ func TestBindArgsToPreparedParams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shapes, values, err := bindArgsToPreparedParams([]driver.Value{tc.in}, tc.ccsid)
+			shapes, values, _, err := bindArgsToPreparedParams([]driver.Value{tc.in}, tc.ccsid)
 			if err != nil {
 				t.Fatalf("bindArgsToPreparedParams: %v", err)
 			}
@@ -73,7 +73,7 @@ func TestBindArgsToPreparedParams(t *testing.T) {
 // trying to push an *int through a NamedValueChecker before
 // CheckValue normalises it).
 func TestBindArgsToPreparedParamsRejectsUnsupportedType(t *testing.T) {
-	_, _, err := bindArgsToPreparedParams([]driver.Value{struct{}{}}, 37)
+	_, _, _, err := bindArgsToPreparedParams([]driver.Value{struct{}{}}, 37)
 	if err == nil {
 		t.Fatal("expected error for unsupported type, got nil")
 	}
@@ -83,7 +83,7 @@ func TestBindArgsToPreparedParamsRejectsUnsupportedType(t *testing.T) {
 // row: int64 + string + nil. Confirms shapes line up positionally and
 // that one bad arg in the middle of the row doesn't poison the others.
 func TestBindArgsToPreparedParamsMixedRow(t *testing.T) {
-	shapes, values, err := bindArgsToPreparedParams([]driver.Value{
+	shapes, values, _, err := bindArgsToPreparedParams([]driver.Value{
 		int64(7), "abc", nil,
 	}, 37)
 	if err != nil {

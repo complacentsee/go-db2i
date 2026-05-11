@@ -133,6 +133,43 @@ func Example_call() {
 	}
 }
 
+// Example_callWithOut demonstrates OUT and INOUT parameter handling
+// via the database/sql sql.Out wrapper. goJTOpen sets the
+// JT400-compatible direction byte (0xF1 for OUT, 0xF2 for INOUT) at
+// descriptor offset 30, ORs the ORS_RESULT_DATA bit into the EXECUTE
+// request so the server ships a synthetic single-row CP 0x380E
+// reply, and reflect-assigns the decoded values back to the caller's
+// destinations after EXECUTE returns. Go 1.21+ is required for the
+// sql.Out.In INOUT field; goJTOpen's go.mod floor is 1.23 so this
+// is always available.
+func Example_callWithOut() {
+	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	// IN VARCHAR + OUT VARCHAR + OUT INTEGER (e.g. a P_LOOKUP proc
+	// that SELECTs the matching row into the OUT params).
+	var name string
+	var qty int
+	if _, err := db.Exec(`CALL mylib.p_lookup(?, ?, ?)`,
+		"WIDGET",
+		sql.Out{Dest: &name},
+		sql.Out{Dest: &qty},
+	); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(name, qty) // "Acme Widget 100"
+
+	// INOUT INTEGER: bind value flows in via *Dest, server-returned
+	// value flows back to the same destination on the OUT side.
+	counter := 5
+	if _, err := db.Exec(`CALL mylib.p_increment(?)`,
+		sql.Out{Dest: &counter, In: true},
+	); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(counter) // 6
+}
+
 // Example_db2Error shows the typed-error dispatch pattern. Every
 // server-side SQL error comes through as *hostserver.Db2Error so
 // callers can switch on SQLSTATE / SQLCODE without regexing the

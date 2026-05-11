@@ -12,6 +12,66 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M9-2 OUT and INOUT stored-procedure parameters via the
+  standard-library `sql.Out` wrapper. Callers pass
+  `sql.Out{Dest: &x}` for OUT-only slots and `sql.Out{Dest: &x,
+  In: true}` for INOUT slots; the driver populates the right
+  destinations after EXECUTE returns. Go 1.21+ required for
+  `sql.Out.In` (goJTOpen's go.mod floor is 1.23 so this is always
+  available).
+  Wire-protocol additions:
+    - `Stmt.CheckNamedValue` now accepts `sql.Out` (value type, the
+      shape `database/sql` passes through) so Go's default parameter
+      converter doesn't reject it with "unsupported type sql.Out, a
+      struct".
+    - `bindArgsToPreparedParams` returns a parallel
+      `[]*sql.Out` for OUT-bearing slots so the post-EXECUTE
+      write-back path has stable pointers, builds a placeholder
+      `PreparedParam` shape (SQL type derived from the destination's
+      reflect.Kind) with direction byte `0xF1` (PARAMETER_TYPE_OUTPUT)
+      or `0xF2` (PARAMETER_TYPE_INPUT_OUTPUT), and either binds the
+      INOUT IN-side value (deref of *Dest) or a typed zero
+      placeholder.
+    - `hostserver.ExecutePreparedSQL` runs an OUT-shape fixup
+      between PREPARE_DESCRIBE and CHANGE_DESCRIPTOR: for each
+      OUT/INOUT slot it overrides the caller's placeholder shape
+      with the SQL type / length / CCSID the server declared in
+      the parameter-marker format (CP 0x3813). That brings the
+      descriptor byte-for-byte in line with what the server expects.
+    - The EXECUTE ORS bitmap now ORs in `ORSResultData`
+      (0x04000000) whenever any param is OUT/INOUT, asking the
+      server to ship a synthetic single-row CP 0x380E carrying the
+      OUT values (mirrors JT400's
+      `AS400JDBCPreparedStatementImpl.java:723` `outputParametersExpected_`
+      path). The reply parser reuses `findExtendedResultData` with
+      synthetic SelectColumn entries derived from the PreparedParam
+      shapes -- the OUT row's wire layout is identical to a one-row
+      SELECT result.
+    - `ExecResult.OutValues []any` carries the decoded row up to the
+      driver, which reflect-assigns each non-nil entry into the
+      matching `sql.Out.Dest`. Conversion follows database/sql Scan
+      conventions for the M9-2 destination types: `*string`
+      (string / []byte), `*int / *int8 / *int16 / *int32` (int32 /
+      int64 with range-check), `*int64`, `*float32 / *float64`,
+      `*bool` (bool / non-zero int32).
+  Offline coverage: new
+  `hostserver/db_call_test.go::TestCallInOutFixtureOutDecode`
+  replays the EXECUTE reply from
+  `prepared_call_in_out.trace`, drives the new
+  `parseOutParameterRow` against post-fixup shapes mirroring
+  P_LOOKUP's IN VARCHAR(10) + OUT VARCHAR(64) + OUT INTEGER
+  signature, asserts the decoded OUT slots are `"Acme Widget"`
+  and `100` -- byte-equivalent to the JT400 golden recorded by
+  `recordOutParam` during fixture capture.
+  Live evidence: new `TestStoredProcedureOUT` calls
+  `CALL GOSPROCS.P_LOOKUP('WIDGET', sql.Out{&name}, sql.Out{&qty})`
+  against IBM Cloud V7R6M0 and asserts the OUT scalars land in the
+  caller's variables. New `TestStoredProcedureINOUT` covers the
+  INOUT direction via `P_ROUNDTRIP`: seed value 5 round-trips to 6
+  through one `sql.Out{Dest: &counter, In: true}` slot.
+  Plaintext live green; total M9-1+M9-2 conformance run 7.0 s.
+  `Example_callWithOut` documents the OUT and INOUT idioms.
+
 - M9-1 CALL routing for stored procedures with IN-only parameters.
   `db.Exec("CALL <schema>.<proc>(?, ?)", in1, in2)` now flows through
   the same CREATE_RPB + PREPARE_DESCRIBE + EXECUTE sequence JT400
