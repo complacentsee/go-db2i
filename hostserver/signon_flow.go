@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/complacentsee/goJTOpen/auth"
+	"github.com/complacentsee/go-db2i/auth"
 )
 
 // SignOn runs the as-signon service handshake on conn and returns

@@ -3,7 +3,7 @@
 //
 // The server announces a [password level] in its
 // SignonExchangeAttributesReply (see
-// [github.com/complacentsee/goJTOpen/hostserver]); each level selects a
+// [github.com/complacentsee/go-db2i/hostserver]); each level selects a
 // different algorithm:
 //
 //	Level 0, 1: DES-CBC  (legacy; not implemented yet)

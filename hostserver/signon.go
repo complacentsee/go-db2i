@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // Sign-on service request/reply identifiers (DSS Header.ReqRepID).

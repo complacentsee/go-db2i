@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // SQL type codes from JTOpen's SQLData / DBSQLDescriptorDS. Only the

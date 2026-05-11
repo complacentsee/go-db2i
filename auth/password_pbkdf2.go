@@ -11,7 +11,7 @@ import (
 )
 
 // EncryptPasswordPBKDF2 returns the 64-byte encrypted password the
-// goJTOpen client sends in a SignonInfoRequest when the server's
+// go-db2i client sends in a SignonInfoRequest when the server's
 // password level is 4 (QPWDLVL=4, V7R1+).
 //
 // Algorithm (mirrors AS400ImplRemote.generatePwdTokenForPasswordLevel4 +

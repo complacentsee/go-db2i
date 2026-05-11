@@ -1,12 +1,12 @@
 //go:build conformance
 
 // Package conformance ports bradfitz/go-sql-test's database/sql
-// integration tests onto goJTOpen. Gated by a build tag because they
+// integration tests onto go-db2i. Gated by a build tag because they
 // require a live IBM i target -- see the package doc for env vars.
 //
 // Run with:
 //
-//	GOJTOPEN_DSN="gojtopen://USER:PWD@host:8471/?library=GOSQLTEST" \
+//	DB2I_DSN="db2i://USER:PWD@host:8471/?library=GOSQLTEST" \
 //	  go test -tags=conformance ./test/conformance/...
 //
 // Tests adapted from github.com/bradfitz/go-sql-test (Apache-2.0
@@ -31,26 +31,26 @@ import (
 	"time"
 	"unicode/utf16"
 
-	gojtopen "github.com/complacentsee/goJTOpen/driver"
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	db2i "github.com/complacentsee/go-db2i/driver"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
-// dsn returns the connection string from GOJTOPEN_DSN, skipping the
+// dsn returns the connection string from DB2I_DSN, skipping the
 // test if not set. Tests that mutate schema/data drop their own
 // tables on entry to keep the target idempotent.
 func dsn(t *testing.T) string {
 	t.Helper()
-	v := os.Getenv("GOJTOPEN_DSN")
+	v := os.Getenv("DB2I_DSN")
 	if v == "" {
-		t.Skip("GOJTOPEN_DSN not set; skipping live conformance test")
+		t.Skip("DB2I_DSN not set; skipping live conformance test")
 	}
 	return v
 }
 
 // schema returns the schema name to use for test tables; defaults to
-// GOTEST. Override via GOJTOPEN_SCHEMA if your library list differs.
+// GOTEST. Override via DB2I_SCHEMA if your library list differs.
 func schema() string {
-	if v := os.Getenv("GOJTOPEN_SCHEMA"); v != "" {
+	if v := os.Getenv("DB2I_SCHEMA"); v != "" {
 		return v
 	}
 	return "GOTEST"
@@ -60,7 +60,7 @@ const tablePrefix = "GOSQL_"
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("gojtopen", dsn(t))
+	db, err := sql.Open("db2i", dsn(t))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestLOBBlob(t *testing.T) {
 	})
 
 	t.Run("LOBValue Bytes", func(t *testing.T) {
-		val := &gojtopen.LOBValue{Bytes: small}
+		val := &db2i.LOBValue{Bytes: small}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 2, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -227,7 +227,7 @@ func TestLOBBlob(t *testing.T) {
 		for i := range want {
 			want[i] = byte((i * 7) & 0xFF)
 		}
-		val := &gojtopen.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
+		val := &db2i.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 3, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -260,7 +260,7 @@ func TestLOBBlob(t *testing.T) {
 	})
 
 	t.Run("empty LOBValue Bytes", func(t *testing.T) {
-		val := &gojtopen.LOBValue{Bytes: []byte{}}
+		val := &db2i.LOBValue{Bytes: []byte{}}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 91, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -274,7 +274,7 @@ func TestLOBBlob(t *testing.T) {
 	})
 
 	t.Run("empty LOBValue Reader", func(t *testing.T) {
-		val := &gojtopen.LOBValue{Reader: bytes.NewReader(nil), Length: 0}
+		val := &db2i.LOBValue{Reader: bytes.NewReader(nil), Length: 0}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 92, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -306,7 +306,7 @@ func TestLOBBlob(t *testing.T) {
 
 	t.Run("nil typed pointer bind", func(t *testing.T) {
 		// (*LOBValue)(nil) should also resolve to NULL, not panic.
-		var val *gojtopen.LOBValue
+		var val *db2i.LOBValue
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 94, val); err != nil {
 			t.Fatalf("insert *LOBValue(nil): %v", err)
 		}
@@ -326,7 +326,7 @@ func TestLOBBlob(t *testing.T) {
 		for i := range want {
 			want[i] = byte((i * 13) & 0xFF)
 		}
-		val := &gojtopen.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
+		val := &db2i.LOBValue{Reader: bytes.NewReader(want), Length: int64(total)}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, b) VALUES (?, ?)`, tbl), 4, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -424,7 +424,7 @@ func TestLOBDBClob(t *testing.T) {
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, dc) VALUES (?, ?)`, tbl), 50, want); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		streamDB, err := sql.Open("gojtopen", dsn(t)+"&lob=stream")
+		streamDB, err := sql.Open("db2i", dsn(t)+"&lob=stream")
 		if err != nil {
 			t.Fatalf("open stream db: %v", err)
 		}
@@ -441,7 +441,7 @@ func TestLOBDBClob(t *testing.T) {
 		if !rows.Next() {
 			t.Fatalf("no rows")
 		}
-		var r *gojtopen.LOBReader
+		var r *db2i.LOBReader
 		if err := rows.Scan(&r); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
@@ -503,16 +503,16 @@ func TestLOBDBClob(t *testing.T) {
 // U+003F; this test confirms both the BMP round-trip and the
 // substitute fallback against a live target.
 //
-// Gated on GOJTOPEN_TEST_CCSID13488_TABLE because PUB400 V7R5M0
+// Gated on DB2I_TEST_CCSID13488_TABLE because PUB400 V7R5M0
 // (the typical free-tier target) does not readily expose a
 // CCSID-13488 table, so most live runs cannot exercise this path.
 // The env var should be set to a fully-qualified table name
 // ("SCHEMA.NAME") that the test owns; the test recreates the table
 // on every entry.
 func TestLOBDBClobCCSID13488(t *testing.T) {
-	tbl := os.Getenv("GOJTOPEN_TEST_CCSID13488_TABLE")
+	tbl := os.Getenv("DB2I_TEST_CCSID13488_TABLE")
 	if tbl == "" {
-		t.Skip("GOJTOPEN_TEST_CCSID13488_TABLE not set; skipping CCSID 13488 live test (no widely-available target)")
+		t.Skip("DB2I_TEST_CCSID13488_TABLE not set; skipping CCSID 13488 live test (no widely-available target)")
 	}
 	db := openDB(t)
 
@@ -837,7 +837,7 @@ func TestLOBClob(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
-		val := &gojtopen.LOBValue{Reader: bytes.NewReader(ebc), Length: int64(len(ebc))}
+		val := &db2i.LOBValue{Reader: bytes.NewReader(ebc), Length: int64(len(ebc))}
 		if _, err := db.Exec(fmt.Sprintf(`INSERT INTO %s (id, c) VALUES (?, ?)`, tbl), 3, val); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -858,7 +858,7 @@ func TestLOBClob(t *testing.T) {
 // Originally bradfitz/go-sql-test's testManyQueryRow scaled to 10k;
 // we cut to 1k by default since each round trip to IBM Cloud Power
 // VS over an SSH tunnel is ~5-10ms and the full 10k takes ~90s.
-// Bump GOJTOPEN_MANY_QUERY_ROW_N for stress testing.
+// Bump DB2I_MANY_QUERY_ROW_N for stress testing.
 func TestManyQueryRow(t *testing.T) {
 	db := openDB(t)
 	dropTestTables(t, db)
@@ -878,7 +878,7 @@ func TestManyQueryRow(t *testing.T) {
 	if testing.Short() {
 		n = 100
 	}
-	if v := os.Getenv("GOJTOPEN_MANY_QUERY_ROW_N"); v != "" {
+	if v := os.Getenv("DB2I_MANY_QUERY_ROW_N"); v != "" {
 		fmt.Sscanf(v, "%d", &n)
 	}
 
@@ -1268,25 +1268,25 @@ func TestRowsCloseIdempotent(t *testing.T) {
 // prepare, execute, fetch) over a crypto/tls-wrapped connection to the
 // IBM i SSL host-server ports (9476 / 9471).
 //
-// Gated on GOJTOPEN_TLS_TARGET so it skips on plaintext-only targets
+// Gated on DB2I_TLS_TARGET so it skips on plaintext-only targets
 // (PUB400, any LPAR where DCM hasn't assigned a cert to the
 // QIBM_OS400_QZBS_SVR_DATABASE / _SIGNON / _CENTRAL application IDs).
 // The env var holds a full DSN with tls=true set, e.g.:
 //
-//	GOJTOPEN_TLS_TARGET="gojtopen://USER:PWD@host:9471/?signon-port=9476&tls=true&tls-insecure-skip-verify=true"
+//	DB2I_TLS_TARGET="db2i://USER:PWD@host:9471/?signon-port=9476&tls=true&tls-insecure-skip-verify=true"
 //
-// When GOJTOPEN_DSN is *also* set (plaintext counterpart against the
+// When DB2I_DSN is *also* set (plaintext counterpart against the
 // same LPAR), the test additionally diffs a multi-row result against
 // the plaintext result to prove the protocol above the TLS layer is
 // byte-identical -- a regression where TLS sign-on negotiated a
 // different attribute set than plaintext would surface here.
 func TestTLSConnectivity(t *testing.T) {
-	tlsDSN := os.Getenv("GOJTOPEN_TLS_TARGET")
+	tlsDSN := os.Getenv("DB2I_TLS_TARGET")
 	if tlsDSN == "" {
-		t.Skip("GOJTOPEN_TLS_TARGET not set; skipping live TLS conformance test")
+		t.Skip("DB2I_TLS_TARGET not set; skipping live TLS conformance test")
 	}
 
-	tlsDB, err := sql.Open("gojtopen", tlsDSN)
+	tlsDB, err := sql.Open("db2i", tlsDSN)
 	if err != nil {
 		t.Fatalf("sql.Open(tls): %v", err)
 	}
@@ -1369,15 +1369,15 @@ func TestTLSConnectivity(t *testing.T) {
 			}
 		}
 
-		// Plaintext byte-equivalence diff. Only runs when GOJTOPEN_DSN
+		// Plaintext byte-equivalence diff. Only runs when DB2I_DSN
 		// is also set and points at the same LPAR -- the comparison is
 		// only meaningful if both DSNs reach the same catalog.
-		plainDSN := os.Getenv("GOJTOPEN_DSN")
+		plainDSN := os.Getenv("DB2I_DSN")
 		if plainDSN == "" {
-			t.Log("GOJTOPEN_DSN not set; skipping plaintext equivalence diff")
+			t.Log("DB2I_DSN not set; skipping plaintext equivalence diff")
 			return
 		}
-		plainDB, err := sql.Open("gojtopen", plainDSN)
+		plainDB, err := sql.Open("db2i", plainDSN)
 		if err != nil {
 			t.Logf("plaintext open failed (skipping diff): %v", err)
 			return
@@ -1415,7 +1415,7 @@ func TestTLSConnectivity(t *testing.T) {
 // TestExtendedMetadata exercises the M4 ?extended-metadata=true
 // knob: when set, the driver requests CP 0x3811 from the server
 // and surfaces per-column schema name, base table name, and base
-// column name through goJTOpen-specific Rows accessors. Closes the
+// column name through go-db2i-specific Rows accessors. Closes the
 // M4 "deferred: schema/table column metadata" gap from PLAN.md.
 //
 // Without the flag the same accessors return empty strings (the
@@ -1426,7 +1426,7 @@ func TestTLSConnectivity(t *testing.T) {
 // Reaches the driver-level Rows via sql.Conn.Raw + driver.Stmt
 // directly because database/sql.Rows hides driver methods that
 // aren't part of its frozen interface set. Bracketed by ConnRaw
-// so the underlying goJTOpen connection is the same one that
+// so the underlying go-db2i connection is the same one that
 // supplied the driver.Rows.
 func TestExtendedMetadata(t *testing.T) {
 	tbl := schema() + "." + tablePrefix + "extmeta"
@@ -1453,7 +1453,7 @@ func TestExtendedMetadata(t *testing.T) {
 	if strings.Contains(extDSN, "?") {
 		sep = "&"
 	}
-	extDB, err := sql.Open("gojtopen", extDSN+sep+"extended-metadata=true")
+	extDB, err := sql.Open("db2i", extDSN+sep+"extended-metadata=true")
 	if err != nil {
 		t.Fatalf("sql.Open(ext): %v", err)
 	}
@@ -1832,7 +1832,7 @@ func setUpStoredProcs(t *testing.T, db *sql.DB) {
 // TestStoredProcedureINOnly is M9-1's live-evidence test: invoke
 // GOSPROCS.P_INS via db.Exec with parameter markers and confirm the
 // proc body's INSERT landed a matching row in INS_AUDIT. Exercises
-// the goJTOpen CALL routing (db.Exec + isCall) + statement-type
+// the go-db2i CALL routing (db.Exec + isCall) + statement-type
 // TYPE_CALL=3 + ExecutePreparedSQL flow end-to-end against the LPAR.
 func TestStoredProcedureINOnly(t *testing.T) {
 	db := openDB(t)

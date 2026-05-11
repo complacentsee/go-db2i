@@ -12,7 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // Connect implements driver.Connector. Opens both as-signon (8476)
@@ -34,20 +34,20 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	// the same pool entry will show as distinct logical conns when
 	// the underlying socket is recycled.
 	log := resolveLogger(c.cfg.Logger).With(
-		slog.String("driver", "gojtopen"),
+		slog.String("driver", "db2i"),
 		slog.String("dsn_host", c.cfg.Host),
 	)
 
 	// Sign-on phase: open as-signon, perform encrypted handshake.
 	signon, err := dialHostServer(c.cfg, c.cfg.SignonPort, deadline)
 	if err != nil {
-		return nil, fmt.Errorf("gojtopen: dial as-signon: %w", err)
+		return nil, fmt.Errorf("db2i: dial as-signon: %w", err)
 	}
 	signon.SetDeadline(deadline)
 	xs, _, err := hostserver.SignOn(signon, c.cfg.User, c.cfg.Password)
 	if err != nil {
 		signon.Close()
-		return nil, fmt.Errorf("gojtopen: as-signon: %w", err)
+		return nil, fmt.Errorf("db2i: as-signon: %w", err)
 	}
 	signon.Close()
 	serverVRM := uint32(0)
@@ -59,12 +59,12 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	// life of the Conn.
 	db, err := dialHostServer(c.cfg, c.cfg.DBPort, deadline)
 	if err != nil {
-		return nil, fmt.Errorf("gojtopen: dial as-database: %w", err)
+		return nil, fmt.Errorf("db2i: dial as-database: %w", err)
 	}
 	db.SetDeadline(time.Time{}) // clear; per-statement deadlines are managed by callers
 	if _, _, err := hostserver.StartDatabaseService(db, c.cfg.User, c.cfg.Password); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("gojtopen: as-database start: %w", err)
+		return nil, fmt.Errorf("db2i: as-database start: %w", err)
 	}
 
 	opts := hostserver.DefaultDBAttributesOptions()
@@ -89,7 +89,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 	if _, err := hostserver.SetSQLAttributes(db, opts); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("gojtopen: set sql attributes: %w", err)
+		return nil, fmt.Errorf("db2i: set sql attributes: %w", err)
 	}
 	if c.cfg.Library != "" {
 		// NDB ADD_LIBRARY_LIST is treated as a session-init
@@ -97,7 +97,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		// a library to set so PREPARE doesn't get -401.
 		if err := hostserver.NDBAddLibraryList(db, c.cfg.Library, 2); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("gojtopen: add library list: %w", err)
+			return nil, fmt.Errorf("db2i: add library list: %w", err)
 		}
 	}
 
@@ -121,7 +121,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 			// return nil to soft-fail with the package disabled.
 			if fatal := conn.handlePackageError(ctx, "init", err); fatal != nil {
 				db.Close()
-				return nil, fmt.Errorf("gojtopen: init package: %w", fatal)
+				return nil, fmt.Errorf("db2i: init package: %w", fatal)
 			}
 			// Non-fatal: clear pkg so PREPARE_DESCRIBE goes
 			// through the plain path.
@@ -129,7 +129,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		}
 	}
 
-	conn.log.LogAttrs(ctx, slog.LevelInfo, "gojtopen: connected",
+	conn.log.LogAttrs(ctx, slog.LevelInfo, "db2i: connected",
 		slog.String("user", c.cfg.User),
 		slog.Int("db_port", c.cfg.DBPort),
 		slog.Int("signon_port", c.cfg.SignonPort),
@@ -182,7 +182,7 @@ func (c *Conn) initPackage(ctx context.Context) error {
 		// CP 0x380B detailed parser is deferred. We log the byte
 		// count so operators can see RETURN_PACKAGE worked even
 		// before the cache-hit fast path lights up.
-		c.log.LogAttrs(ctx, slog.LevelDebug, "gojtopen: RETURN_PACKAGE",
+		c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: RETURN_PACKAGE",
 			slog.String("package", wireName),
 			slog.String("library", c.cfg.PackageLibrary),
 			slog.Int("info_bytes", len(body)),
@@ -199,10 +199,10 @@ func (c *Conn) initPackage(ctx context.Context) error {
 // Config keys; the remaining option ints stay zero. The result is
 // byte-equal to the suffix JT400 computes from the same DSN -- the
 // load-bearing rule lives in
-// project_gojtopen_m10_jt400_interop.md.
+// project_db2i_m10_jt400_interop.md.
 func (c *Conn) packageOptions() hostserver.PackageOptions {
 	opts := hostserver.PackageOptions{
-		// Naming defaults to 0 (sql); goJTOpen's hostserver layer
+		// Naming defaults to 0 (sql); go-db2i's hostserver layer
 		// uses period-qualified SQL identifiers, which is JT400's
 		// "naming=sql" enum value. There is no separate Config
 		// knob for system naming today.
@@ -212,7 +212,7 @@ func (c *Conn) packageOptions() hostserver.PackageOptions {
 	case hostserver.DateFormatJOB:
 		// JT400 default index for date-format is 1 (mdy) when no
 		// session date-format is in force. We mirror that here so
-		// goJTOpen's GOJTPK9899 derivation matches JT400's wire
+		// go-db2i's GOJTPK9899 derivation matches JT400's wire
 		// output (asserted by hostserver.TestSuffixFromOptions_FixtureMatch).
 		opts.DateFormat = 1
 	case hostserver.DateFormatISO:
@@ -241,7 +241,7 @@ func (c *Conn) packageOptions() hostserver.PackageOptions {
 func (c *Conn) handlePackageError(ctx context.Context, op string, err error) error {
 	switch c.cfg.PackageError {
 	case "exception":
-		c.log.LogAttrs(ctx, slog.LevelError, "gojtopen: package "+op+" failed",
+		c.log.LogAttrs(ctx, slog.LevelError, "db2i: package "+op+" failed",
 			slog.String("err", err.Error()),
 		)
 		return err
@@ -249,7 +249,7 @@ func (c *Conn) handlePackageError(ctx context.Context, op string, err error) err
 		// Silent drop; package soft-disabled.
 		return nil
 	default: // "warning"
-		c.log.LogAttrs(ctx, slog.LevelWarn, "gojtopen: package "+op+" failed; continuing without package",
+		c.log.LogAttrs(ctx, slog.LevelWarn, "db2i: package "+op+" failed; continuing without package",
 			slog.String("err", err.Error()),
 		)
 		return nil
@@ -273,7 +273,7 @@ type Conn struct {
 
 	// log is the per-conn child logger. Always non-nil (silent
 	// fallback when Config.Logger is nil). Tagged with
-	// driver=gojtopen, dsn_host=<host>, server_vrm=<vrm>.
+	// driver=db2i, dsn_host=<host>, server_vrm=<vrm>.
 	log *slog.Logger
 
 	// tracer is the resolved OTel trace.Tracer. Always non-nil
@@ -528,7 +528,7 @@ func (c *Conn) Close() error {
 	c.closed = true
 	err := c.conn.Close()
 	if c.log != nil {
-		c.log.LogAttrs(context.Background(), slog.LevelInfo, "gojtopen: connection closed")
+		c.log.LogAttrs(context.Background(), slog.LevelInfo, "db2i: connection closed")
 	}
 	return err
 }
@@ -544,7 +544,7 @@ func (c *Conn) Begin() (driver.Tx, error) {
 		return nil, driver.ErrBadConn
 	}
 	if err := hostserver.AutocommitOff(c.conn, c.nextCorr()); err != nil {
-		return nil, c.classifyConnErr(fmt.Errorf("gojtopen: autocommit off: %w", err))
+		return nil, c.classifyConnErr(fmt.Errorf("db2i: autocommit off: %w", err))
 	}
 	return &Tx{conn: c}, nil
 }

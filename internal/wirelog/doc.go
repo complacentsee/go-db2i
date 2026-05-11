@@ -1,5 +1,5 @@
 // Package wirelog parses captured wire-protocol logs into a sequence of
-// direction-tagged frames the rest of goJTOpen can replay.
+// direction-tagged frames the rest of go-db2i can replay.
 //
 // JTOpen's [com.ibm.as400.access.Trace] DATASTREAM category emits one
 // header line per frame --

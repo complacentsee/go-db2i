@@ -3,7 +3,7 @@
 // 9470-9476).
 //
 // This package is the wire-format layer underneath the database/sql
-// driver in github.com/complacentsee/goJTOpen/driver. Most application
+// driver in github.com/complacentsee/go-db2i/driver. Most application
 // code should import the driver package and use the standard
 // database/sql APIs instead of calling into hostserver directly. The
 // types and functions exposed here are public so advanced callers can

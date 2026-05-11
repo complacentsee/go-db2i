@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // SQL function IDs sent over the as-database (server ID 0xE004)

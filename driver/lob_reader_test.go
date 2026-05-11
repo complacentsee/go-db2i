@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // fakeNetConn satisfies net.Conn with Read/Write backed by a queue

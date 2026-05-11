@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // goldenJSON is just enough of select_dummy.golden.json to extract

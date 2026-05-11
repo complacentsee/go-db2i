@@ -1,5 +1,5 @@
-// Package driver registers goJTOpen as a database/sql driver under
-// the name "gojtopen", letting Go applications talk to IBM i (Db2
+// Package driver registers go-db2i as a database/sql driver under
+// the name "db2i", letting Go applications talk to IBM i (Db2
 // for i) over the host-server datastream protocol on ports 8471
 // (as-database) and 8476 (as-signon) -- no CGo, no Java sidecar,
 // no IBM client libraries.
@@ -8,16 +8,16 @@
 //
 // Anonymous import wires up the registration:
 //
-//	import _ "github.com/complacentsee/goJTOpen/driver"
+//	import _ "github.com/complacentsee/go-db2i/driver"
 //
 // Then use the standard database/sql APIs:
 //
-//	db, err := sql.Open("gojtopen", "gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso")
+//	db, err := sql.Open("db2i", "db2i://USER:PWD@host:8471/?library=MYLIB&date=iso")
 //	rows, err := db.Query("SELECT id, name FROM mylib.mytable WHERE status = ?", "OPEN")
 //
 // # DSN syntax
 //
-//	gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
+//	db2i://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
 //
 // PORT defaults to 8471 (as-database). Recognised query-string keys:
 //
@@ -36,7 +36,7 @@
 //	lob          BLOB / CLOB / DBCLOB scan mode. One of materialise
 //	             (default; full content into []byte / string at Scan
 //	             time, fits the small-to-medium LOB common case) or
-//	             stream (returns *gojtopen.LOBReader -- an io.Reader
+//	             stream (returns *db2i.LOBReader -- an io.Reader
 //	             + io.Closer the caller drives via successive
 //	             RETRIEVE_LOB_DATA chunks). Stream mode is the only
 //	             way to handle multi-GB LOBs without exhausting Go
@@ -139,19 +139,19 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
-// Driver registered as "gojtopen" via sql.Register at init time.
+// Driver registered as "db2i" via sql.Register at init time.
 type Driver struct{}
 
 // registeredDriver is the singleton sql.Register handed out under
-// the "gojtopen" name. NewConnector hands this same pointer back so
+// the "db2i" name. NewConnector hands this same pointer back so
 // db.Driver() and sql.Open share identity.
 var registeredDriver = &Driver{}
 
 func init() {
-	sql.Register("gojtopen", registeredDriver)
+	sql.Register("db2i", registeredDriver)
 }
 
 // Open implements driver.Driver. database/sql calls it with the DSN
@@ -171,7 +171,7 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 func (d *Driver) OpenConnector(dsn string) (driver.Connector, error) {
 	cfg, err := parseDSN(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("gojtopen: parse DSN: %w", err)
+		return nil, fmt.Errorf("db2i: parse DSN: %w", err)
 	}
 	return &Connector{cfg: cfg, drv: d}, nil
 }
@@ -189,29 +189,29 @@ type Connector struct {
 // the main ones today. Pass the returned Connector to sql.OpenDB to
 // get a *sql.DB:
 //
-//	cfg := gojtopen.DefaultConfig()
+//	cfg := db2i.DefaultConfig()
 //	cfg.User, cfg.Password, cfg.Host = "USR", "PWD", "host.example.com"
 //	cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
-//	connector, err := gojtopen.NewConnector(&cfg)
+//	connector, err := db2i.NewConnector(&cfg)
 //	db := sql.OpenDB(connector)
 //
 // Returns an error if cfg lacks the minimum required fields
 // (User, Host, DBPort, SignonPort).
 func NewConnector(cfg *Config) (*Connector, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("gojtopen: NewConnector requires a non-nil Config")
+		return nil, fmt.Errorf("db2i: NewConnector requires a non-nil Config")
 	}
 	if cfg.User == "" {
-		return nil, fmt.Errorf("gojtopen: NewConnector: Config.User is empty")
+		return nil, fmt.Errorf("db2i: NewConnector: Config.User is empty")
 	}
 	if cfg.Host == "" {
-		return nil, fmt.Errorf("gojtopen: NewConnector: Config.Host is empty")
+		return nil, fmt.Errorf("db2i: NewConnector: Config.Host is empty")
 	}
 	if cfg.DBPort <= 0 || cfg.DBPort > 65535 {
-		return nil, fmt.Errorf("gojtopen: NewConnector: Config.DBPort %d out of range (1..65535)", cfg.DBPort)
+		return nil, fmt.Errorf("db2i: NewConnector: Config.DBPort %d out of range (1..65535)", cfg.DBPort)
 	}
 	if cfg.SignonPort <= 0 || cfg.SignonPort > 65535 {
-		return nil, fmt.Errorf("gojtopen: NewConnector: Config.SignonPort %d out of range (1..65535)", cfg.SignonPort)
+		return nil, fmt.Errorf("db2i: NewConnector: Config.SignonPort %d out of range (1..65535)", cfg.SignonPort)
 	}
 	return &Connector{cfg: cfg, drv: registeredDriver}, nil
 }
@@ -221,7 +221,7 @@ func NewConnector(cfg *Config) (*Connector, error) {
 // database/sql/driver.Connector.Driver.
 func (c *Connector) Driver() driver.Driver { return c.drv }
 
-// Config is the parsed form of a gojtopen DSN. Public so tests can
+// Config is the parsed form of a go-db2i DSN. Public so tests can
 // build connections without round-tripping through the URL parser.
 type Config struct {
 	User       string
@@ -257,7 +257,7 @@ type Config struct {
 	// default "materialise on Scan" behaviour to the streaming
 	// LOBReader API. When true, Rows.Next writes a *LOBReader into
 	// the destination slot for LOB columns; callers must scan into
-	// **gojtopen.LOBReader and Read / Close it before advancing
+	// **db2i.LOBReader and Read / Close it before advancing
 	// the row. The materialise default keeps existing callers
 	// working unchanged.
 	LOBStream bool
@@ -363,7 +363,7 @@ type Config struct {
 	// reply by ORing the ORSExtendedColumnDescrs (0x00020000) bit
 	// into the request ORS bitmap. The driver then surfaces the
 	// per-column schema name, base table name, base column name,
-	// and column label through goJTOpen-specific Rows methods
+	// and column label through go-db2i-specific Rows methods
 	// (Rows.ColumnTypeSchemaName / Rows.ColumnTypeTableName etc.).
 	// Mirrors JT400's "extended metadata=true" JDBC URL knob;
 	// configured via the DSN "extended-metadata=true" query key.
@@ -376,7 +376,7 @@ type Config struct {
 	// no-op handler so call sites never have to nil-check.
 	//
 	// At connect time the driver derives a child logger that carries
-	// the attrs `driver=gojtopen`, `conn_id=<corr-base>`, and
+	// the attrs `driver=db2i`, `conn_id=<corr-base>`, and
 	// `dsn_host=<host>`, so every line a single connection emits is
 	// pre-tagged. Levels used:
 	//   DEBUG  Per wire-level operation (PREPARE+EXECUTE,
@@ -471,7 +471,7 @@ func resolveLogger(l *slog.Logger) *slog.Logger {
 // noopTracer is the no-op trace.Tracer the driver substitutes when
 // Config.Tracer is nil. Spans started on it are valid but record
 // nothing.
-var noopTracer = noop.NewTracerProvider().Tracer("gojtopen")
+var noopTracer = noop.NewTracerProvider().Tracer("db2i")
 
 // resolveTracer returns the caller-supplied tracer or the no-op
 // fallback. Always non-nil so call sites can skip the nil check.
@@ -487,11 +487,11 @@ func parseDSN(dsn string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if u.Scheme != "gojtopen" {
-		return nil, fmt.Errorf("scheme %q not recognised (want gojtopen)", u.Scheme)
+	if u.Scheme != "db2i" {
+		return nil, fmt.Errorf("scheme %q not recognised (want db2i)", u.Scheme)
 	}
 	if u.User == nil || u.User.Username() == "" {
-		return nil, fmt.Errorf("DSN missing user info -- expected gojtopen://USER:PWD@HOST/...")
+		return nil, fmt.Errorf("DSN missing user info -- expected db2i://USER:PWD@HOST/...")
 	}
 	cfg := DefaultConfig()
 	cfg.User = u.User.Username()
@@ -696,16 +696,16 @@ func parseDSN(dsn string) (*Config, error) {
 		}
 	}
 	// `package-add` is a JT400 knob whose only documented value is
-	// "true" (statements get added to the package). goJTOpen always
+	// "true" (statements get added to the package). go-db2i always
 	// adds. Accept it for DSN-migration friendliness; reject other
 	// values so a typo doesn't silently no-op.
 	if v := q.Get("package-add"); v != "" {
 		b, err := parseBool(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid package-add %q (want true|false; goJTOpen always adds when extended-dynamic is on): %w", v, err)
+			return nil, fmt.Errorf("invalid package-add %q (want true|false; go-db2i always adds when extended-dynamic is on): %w", v, err)
 		}
 		if !b {
-			return nil, fmt.Errorf("package-add=false is not supported (goJTOpen always adds when extended-dynamic is on)")
+			return nil, fmt.Errorf("package-add=false is not supported (go-db2i always adds when extended-dynamic is on)")
 		}
 	}
 	// `package-clear` is another JT400 migration knob; the server now
@@ -714,7 +714,7 @@ func parseDSN(dsn string) (*Config, error) {
 	// opens. Doing nothing else for now.
 	if v := q.Get("package-clear"); v != "" {
 		if _, err := parseBool(v); err != nil {
-			return nil, fmt.Errorf("invalid package-clear %q (want true|false; server-managed in goJTOpen): %w", v, err)
+			return nil, fmt.Errorf("invalid package-clear %q (want true|false; server-managed in go-db2i): %w", v, err)
 		}
 		// The actual warn is emitted by the connect path so it
 		// rides on the Conn-scoped logger (with conn_id attrs);

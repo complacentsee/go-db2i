@@ -6,7 +6,7 @@ import (
 	"math"
 	"unicode/utf16"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // decodeGraphicLOB renders a UCS-2 BE / UTF-16 BE byte slice as a

@@ -9,7 +9,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // TestIsConnLevelErr classifies the error types our wrappers detect

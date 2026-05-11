@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **goJTOpen** are documented here. Format
+All notable changes to **go-db2i** are documented here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
@@ -10,14 +10,36 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [0.7.0] - 2026-05-11
 
-Third tagged release. M10 extended-dynamic-package caching shipped on
-top of the v0.6.0 base. All five M10 sub-items (fixtures, wire
-encoder, DSN surface, connect-time wiring, criteria filter) are
-live-validated against IBM Cloud V7R6M0 on plaintext (8471); the
-full conformance suite is green (~162 s on the 1-CPU LPAR). The
-M0-M9 surface is unchanged.
+Third tagged release. **Renamed from goJTOpen to go-db2i.** M10
+extended-dynamic-package caching shipped on top of the v0.6.0 base.
+All five M10 sub-items (fixtures, wire encoder, DSN surface, connect-
+time wiring, criteria filter) are live-validated against IBM Cloud
+V7R6M0 on plaintext (8471); the full conformance suite is green
+(~162 s on the 1-CPU LPAR). The M0-M9 wire surface is unchanged.
 
-Added public API is purely additive vs v0.6.0 -- no breaking changes:
+### BREAKING CHANGE — rename
+
+The project moved from `goJTOpen` to `go-db2i` to reflect its actual
+scope (a DB2 for i driver, not a JT400 fork). Operators upgrading
+from v0.6.0 must update three things:
+
+- Module import path: `github.com/complacentsee/goJTOpen/...` →
+  `github.com/complacentsee/go-db2i/...`
+- Driver registration: `sql.Open("gojtopen", ...)` →
+  `sql.Open("db2i", ...)`
+- DSN scheme: `gojtopen://user:pwd@host/...` →
+  `db2i://user:pwd@host/...`
+
+There is no compatibility shim — old DSNs return a clear
+`scheme %q not recognised (want db2i)` error from `parseDSN`. The
+Maven fixture-harness artifact (`testdata/jtopen-fixtures/`) was
+renamed too: artifactId `gojtopen-fixtures` → `db2i-fixtures`,
+Java package `io.github.complacentsee.gojtopen.fixtures` →
+`io.github.complacentsee.db2i.fixtures`. The `testdata/jtopen-fixtures/`
+*directory* keeps its name because the fixtures are captured via
+JTOpen (the Java toolbox) — that source attribution stays.
+
+### Added (M10) — public API additive vs v0.6.0
 
 - `Config.ExtendedDynamic`, `Config.PackageName`,
   `Config.PackageLibrary`, `Config.PackageCache`,
@@ -364,7 +386,7 @@ Documented out-of-scope (use the JTOpen jar):
   `sql.Out{Dest: &x}` for OUT-only slots and `sql.Out{Dest: &x,
   In: true}` for INOUT slots; the driver populates the right
   destinations after EXECUTE returns. Go 1.21+ required for
-  `sql.Out.In` (goJTOpen's go.mod floor is 1.23 so this is always
+  `sql.Out.In` (go-db2i's go.mod floor is 1.23 so this is always
   available).
   Wire-protocol additions:
     - `Stmt.CheckNamedValue` now accepts `sql.Out` (value type, the
@@ -451,7 +473,7 @@ Documented out-of-scope (use the JTOpen jar):
   sequence (no EXECUTE_IMMEDIATE, no CHANGE_DESCRIPTOR), asserts
   statement-type CP 0x3812 carries value 3 on both PREPARE and
   EXECUTE, then drives `ExecutePreparedSQL` against a fakeConn
-  serving the captured replies and asserts goJTOpen emits the
+  serving the captured replies and asserts go-db2i emits the
   same 4-frame shape with statement-type 3.
   Live evidence: new `TestStoredProcedureINOnly` conformance test
   bootstraps the GOSPROCS schema (idempotent via CREATE OR REPLACE
@@ -551,16 +573,16 @@ diffrunner) drives a breaking call.
   Side-by-side table covers every JT400 JDBC URL property (~70
   distinct keys cross-referenced against JT400's
   [JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
-  enumeration of 109 attributes). For each: the goJTOpen DSN
+  enumeration of 109 attributes). For each: the go-db2i DSN
   equivalent or "deferred / out of scope" with the reason. Groups
   by topic (auth + host, TLS, session attributes, CCSID, LOB,
   performance, reroute, diagnostics, behaviour overrides). Includes
   a migration recipe converting a typical jt400 URL into a
-  `gojtopen://...` DSN + programmatic `gojtopen.NewConnector`
+  `db2i://...` DSN + programmatic `db2i.NewConnector`
   Config for the slog / OTel paths. Honest about the coverage gap:
-  goJTOpen ships 12 DSN keys plus three programmatic Config fields;
+  go-db2i ships 12 DSN keys plus three programmatic Config fields;
   JT400 ships ~109 properties, most of them either toolbox-side
-  features (BiDi reordering, proxy server) or features goJTOpen
+  features (BiDi reordering, proxy server) or features go-db2i
   intentionally defers (extended-dynamic-package caching,
   client-reroute / seamless failover).
 
@@ -606,7 +628,7 @@ diffrunner) drives a breaking call.
   field hands the driver a caller-controlled logging sink; nil (the
   default) silences all driver-side logging via an internal
   discard-handler fallback so call sites never need a nil check.
-  Per-Conn child logger carries the attrs `driver=gojtopen`,
+  Per-Conn child logger carries the attrs `driver=db2i`,
   `dsn_host=<host>`, `server_vrm=<vrm>` so every line a single
   connection emits is pre-attributed. Levels:
     - INFO  on connect (with user/db_port/signon_port/tls/library
@@ -628,7 +650,7 @@ diffrunner) drives a breaking call.
   attached to Exec / Query DEBUG attrs (off by default; SQL text
   often carries customer identifiers). Parameter counts are always
   attached; parameter values never are. New
-  `gojtopen.NewConnector(*Config) (*Connector, error)` constructor
+  `db2i.NewConnector(*Config) (*Connector, error)` constructor
   lets callers wire a programmatic Logger that can't be expressed
   in a DSN string -- pass the Connector to `sql.OpenDB` to get a
   `*sql.DB`. `cmd/smoketest -log-debug` exercises the driver path
@@ -636,17 +658,17 @@ diffrunner) drives a breaking call.
   Sample run against IBM Cloud V7R6M0:
 
   ```
-  time=2026-05-11T00:14:31Z level=INFO msg="gojtopen: connected" \
-      driver=gojtopen dsn_host=localhost server_vrm=460288 user=GOTEST \
+  time=2026-05-11T00:14:31Z level=INFO msg="db2i: connected" \
+      driver=db2i dsn_host=localhost server_vrm=460288 user=GOTEST \
       db_port=8471 signon_port=8476 tls=false library=""
-  time=2026-05-11T00:14:31Z level=DEBUG msg="gojtopen: query" \
-      driver=gojtopen dsn_host=localhost server_vrm=460288 \
+  time=2026-05-11T00:14:31Z level=DEBUG msg="db2i: query" \
+      driver=db2i dsn_host=localhost server_vrm=460288 \
       op=OPEN_SELECT_STATIC params=0 elapsed=71.954ms
-  time=2026-05-11T00:14:31Z level=INFO msg="gojtopen: connection closed" \
-      driver=gojtopen dsn_host=localhost server_vrm=460288
+  time=2026-05-11T00:14:31Z level=INFO msg="db2i: connection closed" \
+      driver=db2i dsn_host=localhost server_vrm=460288
   ```
 
-  Full plaintext conformance suite (`GOJTOPEN_DSN`, ~151 s)
+  Full plaintext conformance suite (`DB2I_DSN`, ~151 s)
   remains green; the silent-handler fallback path adds < 1 ns of
   overhead per logging call site under the default nil-Logger
   configuration.
@@ -691,7 +713,7 @@ diffrunner) drives a breaking call.
   trusting the JVM to raise OutOfMemoryError; Go callers don't have
   that safety net. The 64 MiB cap is two orders of magnitude above
   the LOB block size (1 MiB) and well above any host-server reply
-  goJTOpen has captured. Pinned via
+  go-db2i has captured. Pinned via
   `TestParseDBReplyCompressedLengthCapped`; surfaced by
   `FuzzParseDBReply`.
 - `ParseDBReply` always returns a non-nil `DBParam.Data` slice, even
@@ -705,13 +727,13 @@ diffrunner) drives a breaking call.
   Pinned via the regression seed at
   `hostserver/testdata/fuzz/FuzzParseDBReply/5c5762c2c1a948f8`.
 - `parseDSN` rejects port 0 / port > 65535 (for both the URL `:port`
-  and `?signon-port=N`) and an empty username (e.g. `gojtopen://@h/`)
+  and `?signon-port=N`) and an empty username (e.g. `db2i://@h/`)
   at parse time rather than letting the failure surface as an
   opaque "signon rejected" error from the host server later. New
   negative cases pinned in `TestParseDSNRejectsBadInputs/{empty_user,
   port_zero, port_over_65535, signon-port_zero}`; surfaced by
   `FuzzParseDSN`. Live-validated: plaintext conformance suite
-  (`GOJTOPEN_DSN` against IBM Cloud V7R6M0, ~151 s, full pass) still
+  (`DB2I_DSN` against IBM Cloud V7R6M0, ~151 s, full pass) still
   green after the parser tightenings.
 
 ### Added
@@ -724,7 +746,7 @@ diffrunner) drives a breaking call.
   Parameter Marker Format), uploads the bytes in one or more
   frames, and EXECUTE carries the 4-byte locator handle in the
   SQLDA value slot. `[]byte` and `string` work directly for
-  materialised binds; the new `*gojtopen.LOBValue` type adds an
+  materialised binds; the new `*db2i.LOBValue` type adds an
   explicit form (`Bytes` for materialised, `Reader` + `Length` for
   streamed binds that chunk across multiple `WRITE_LOB_DATA` frames
   at advancing offsets). CLOB strings are pre-encoded via the
@@ -734,7 +756,7 @@ diffrunner) drives a breaking call.
   PUB400 V7R5M0: 8 KiB BLOB byte-equal byte-equal, 80 KiB streamed
   BLOB across three chunks, 1 MiB streamed BLOB across 32 chunks,
   ~8 KiB CLOB EBCDIC round-trip.
-- `*gojtopen.LOBValue` public type (`driver/lob_value.go`) for
+- `*db2i.LOBValue` public type (`driver/lob_value.go`) for
   callers who want explicit LOB-intent at the call site or need
   the streaming form (`Reader` + `Length`).
 - Wire-protocol reference doc at `docs/lob-bind-wire-protocol.md`
@@ -742,7 +764,7 @@ diffrunner) drives a breaking call.
   → WRITE_LOB_DATA × N → EXECUTE) plus the corrected CP map for
   any future re-derivation: LOB Data is `0x381D`, truncation is
   `0x3822`, locator handles are server-allocated (not client).
-- LOB streaming via `*gojtopen.LOBReader`. Opt in with the DSN
+- LOB streaming via `*db2i.LOBReader`. Opt in with the DSN
   option `?lob=stream`; the default `materialise` mode (full LOB
   into `[]byte` / `string` at Scan time) stays unchanged. `LOBReader`
   satisfies `io.Reader` + `io.Closer` and pulls 32 KB chunks per
@@ -818,7 +840,7 @@ diffrunner) drives a breaking call.
   records 0x3900 base column / 0x3901 base table / 0x3902 label
   with CCSID prefix / 0x3904 schema name). New `SelectColumn`
   fields `Schema`, `Table`, `BaseColumnName`, `Label`; driver
-  surfaces them via goJTOpen-specific `Rows.ColumnTypeSchemaName`
+  surfaces them via go-db2i-specific `Rows.ColumnTypeSchemaName`
   / `ColumnTypeTableName` / `ColumnTypeBaseColumnName` /
   `ColumnTypeLabel` methods (callers reach them via the driver-
   level Rows; `database/sql.Rows` hides them). Offline coverage:
@@ -865,7 +887,7 @@ diffrunner) drives a breaking call.
   compared to **2 + 4** without the threshold -- the server inlines
   both LOB columns in the SELECT-back row data, and JT400 inlines one
   of the two on EXECUTE. The inline-vs-locator decision is driven
-  by the `PREPARE_DESCRIBE` reply's SQL type code; goJTOpen already
+  by the `PREPARE_DESCRIBE` reply's SQL type code; go-db2i already
   followed that shape on bind so this commit only needed to add the
   CP `0x3822` plumbing on the request side.
 
@@ -930,9 +952,9 @@ diffrunner) drives a breaking call.
   begin listening on ports 9470-9476 alongside the existing
   8470-8476 plaintext pair -- no `STRHOSTSVR SSL(*YES)` switch
   exists on V7R6. New `TestTLSConnectivity` in
-  `test/conformance/`, gated on `GOJTOPEN_TLS_TARGET`, exercises
+  `test/conformance/`, gated on `DB2I_TLS_TARGET`, exercises
   sign-on + start-database + PREPARE + EXECUTE + multi-row FETCH
-  through TLS and (when `GOJTOPEN_DSN` is also set against the
+  through TLS and (when `DB2I_DSN` is also set against the
   same LPAR) byte-diffs the result against the plaintext path.
   Both subtests PASS on V7R6M0:
   `TestTLSConnectivity/smoketest` (single-row CURRENT_TIMESTAMP /
@@ -968,7 +990,7 @@ diffrunner) drives a breaking call.
   RowCount=5.** Per row the wire shows a fixed pattern of
   `WRITE_LOB_DATA` × K (one per LOB marker) + `RETRIEVE_LOB_DATA`
   (re-allocates the per-marker locator handles) + `EXECUTE_IMMEDIATE`.
-  goJTOpen's existing per-`Exec` round trip is therefore wire-
+  go-db2i's existing per-`Exec` round trip is therefore wire-
   equivalent to JT400's `executeBatch` for LOB columns; no
   multi-row code path to mirror. Doc-only resolution closes
   `docs/lob-known-gaps.md` §2; full walkthrough lives in
@@ -1048,7 +1070,7 @@ diffrunner) drives a breaking call.
   substitute (no DSN flag wires this in yet — follow-up).
   Offline-tested via `TestEncodeUCS2BE_*`; live-validated against
   the IBM Cloud Power VS V7R6M0 LPAR with
-  `GOJTOPEN_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`
+  `DB2I_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`
   (BMP round-trip + non-BMP substitute both PASS). PUB400 V7R5M0
   does not expose a CCSID-13488 target so the test skips there.
   Closes `docs/lob-known-gaps.md` §1.
@@ -1079,7 +1101,7 @@ diffrunner) drives a breaking call.
   the server allocated a buffer twice as large as needed
   (sometimes triggering SQL-302 downstream); post-fix, byte-for-
   byte round-trips on PUB400 V7R5M0.
-- DBCLOB streamed read (`*gojtopen.LOBReader`) halves offset and
+- DBCLOB streamed read (`*db2i.LOBReader`) halves offset and
   size at the wire boundary so the per-Read RETRIEVE_LOB_DATA
   request for graphic LOBs sends character counts. Pre-fix, the
   reader bailed mid-stream with SQL-401 once the byte offset
@@ -1200,8 +1222,8 @@ diffrunner) drives a breaking call.
 - Connection lifecycle: signon (password levels 2, 3 SHA-1; level 4
   PBKDF2-HMAC-SHA-512), as-database start, SET_SQL_ATTRIBUTES
   (date format, isolation, default library), NDB ADD_LIBRARY_LIST.
-- `database/sql.Driver` registration as `"gojtopen"` with DSN syntax
-  `gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value`.
+- `database/sql.Driver` registration as `"db2i"` with DSN syntax
+  `db2i://USER:PASSWORD@HOST[:PORT]/?key=value`.
 
 ### Server compatibility
 

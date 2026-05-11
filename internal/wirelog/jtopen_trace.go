@@ -57,7 +57,7 @@ var headerRE = regexp.MustCompile(`Data stream (sent|data received) \(connID=(\d
 // follow a frame header are decoded. Hex tokens must be exactly two
 // characters; anything else terminates the current frame.
 //
-// The function is tolerant of the trace categories that goJTOpen's
+// The function is tolerant of the trace categories that go-db2i's
 // fixture harness leaves enabled (DATASTREAM + ERROR + WARNING) and the
 // fuller diagnostic dumps from running with DIAGNOSTIC enabled.
 func ParseJTOpenTrace(r io.Reader) ([]Frame, error) {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // TestSignOnUppercasesUserID confirms SignOn normalises the userID

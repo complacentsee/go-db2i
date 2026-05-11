@@ -6,11 +6,11 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // EncryptPasswordSHA1 returns the 20-byte encrypted password the
-// goJTOpen client sends in a SignonInfoRequest when the server's
+// go-db2i client sends in a SignonInfoRequest when the server's
 // password level is 2 or 3.
 //
 // Algorithm (mirrors com.ibm.as400.access.AS400ImplRemote in JTOpen):

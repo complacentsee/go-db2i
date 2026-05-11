@@ -7,7 +7,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // SQL function IDs in the descriptor (0x1E__) family. JTOpen splits

@@ -1,13 +1,13 @@
-# goJTOpen configuration
+# go-db2i configuration
 
 DSN reference + the LPAR-side setup needed to make each feature work.
 For day-to-day usage examples, see the package doc on
-`pkg.go.dev/github.com/complacentsee/goJTOpen/driver`.
+`pkg.go.dev/github.com/complacentsee/go-db2i/driver`.
 
 ## DSN
 
 ```
-gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
+db2i://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
 ```
 
 PORT defaults to **8471** (as-database) for plaintext, **9471** when
@@ -20,7 +20,7 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `signon-port`                | 8476 / 9476  | Override the as-signon port.                                          |
 | `date`                       | `job`        | One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`.        |
 | `isolation`                  | `none`       | One of `none`, `cs`, `all`, `rs`, `rr`. `db.Begin()` flips to `cs`.   |
-| `lob`                        | `materialise`| Or `stream` to get `*gojtopen.LOBReader`.                             |
+| `lob`                        | `materialise`| Or `stream` to get `*db2i.LOBReader`.                             |
 | `ccsid`                      | `0` (auto)   | Override the connection-level application-data CCSID.                 |
 | `tls`                        | `false`      | Wraps both sockets in `crypto/tls`. Flips default ports to 9471/9476. |
 | `tls-insecure-skip-verify`   | `false`      | Disable cert verification (self-signed certs without SANs).           |
@@ -33,8 +33,8 @@ when `tls=true`. The host-server protocol above the TLS layer is
 byte-identical to the plaintext flow.
 
 ```
-db, _ := sql.Open("gojtopen",
-    "gojtopen://USER:PWD@host/?tls=true&tls-insecure-skip-verify=true")
+db, _ := sql.Open("db2i",
+    "db2i://USER:PWD@host/?tls=true&tls-insecure-skip-verify=true")
 ```
 
 ### IBM i side
@@ -105,20 +105,20 @@ self-signed or SAN-light cert is in use:
 
 ### Validation recipe
 
-The repo ships a live conformance test gated on `GOJTOPEN_TLS_TARGET`:
+The repo ships a live conformance test gated on `DB2I_TLS_TARGET`:
 
 ```sh
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=conformance \
     -o gosqltest ./test/conformance/
-GOJTOPEN_TLS_TARGET="gojtopen://USER:PWD@host:9471/?signon-port=9476&tls=true&tls-insecure-skip-verify=true" \
-GOJTOPEN_DSN="gojtopen://USER:PWD@host:8471/?signon-port=8476" \
+DB2I_TLS_TARGET="db2i://USER:PWD@host:9471/?signon-port=9476&tls=true&tls-insecure-skip-verify=true" \
+DB2I_DSN="db2i://USER:PWD@host:8471/?signon-port=8476" \
   ./gosqltest -test.run TestTLSConnectivity -test.v
 ```
 
 `TestTLSConnectivity/smoketest` confirms the full sign-on +
 start-database + PREPARE / EXECUTE / FETCH path runs over TLS.
 `TestTLSConnectivity/multi-row` byte-diffs a 5-row result against the
-plaintext counterpart (when `GOJTOPEN_DSN` is also set) to prove the
+plaintext counterpart (when `DB2I_DSN` is also set) to prove the
 protocol above the TLS layer is unchanged. Both subtests skip when
-`GOJTOPEN_TLS_TARGET` is empty, so the suite is safe to run against
+`DB2I_TLS_TARGET` is empty, so the suite is safe to run against
 any IBM i target.

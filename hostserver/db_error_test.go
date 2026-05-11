@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // buildSQLCA assembles a CP 0x3807 SQLCA payload at JT400's offsets.

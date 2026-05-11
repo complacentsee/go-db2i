@@ -1,4 +1,4 @@
-package io.github.complacentsee.gojtopen.fixtures;
+package io.github.complacentsee.db2i.fixtures;
 
 import java.sql.Connection;
 import java.sql.SQLException;

@@ -74,7 +74,7 @@ const (
 // suffix derivation reads. Each field maps to a JT400 JDProperties
 // entry; the integer values MUST match JT400's enum positions
 // (JDProperties.java) for the byte-for-byte interop rule to hold.
-// See memory file `project_gojtopen_m10_jt400_interop.md`.
+// See memory file `project_db2i_m10_jt400_interop.md`.
 type PackageOptions struct {
 	// TranslateHex: 0 = binary (default), 1 = character.
 	TranslateHex int

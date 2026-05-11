@@ -4,11 +4,11 @@ import (
 	"crypto/des"
 	"fmt"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // EncryptPasswordDES returns the 8-byte encrypted password the
-// goJTOpen client sends in a SignonInfoRequest when the server's
+// go-db2i client sends in a SignonInfoRequest when the server's
 // password level is 0 or 1 (QPWDLVL=0 or 1, pre-V5R1 IBM i and
 // modern systems running in legacy-compatible mode).
 //

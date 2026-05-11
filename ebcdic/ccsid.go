@@ -62,7 +62,7 @@ var CCSID37 Codec = charmapCodec{
 // dedicated CodePage273, so this wraps CodePage037 (US English).
 // For the ASCII printable subset (digits, A-Z, a-z, common
 // punctuation) the two CCSIDs produce identical bytes, which is
-// enough for current goJTOpen tests + PUB400 metadata strings.
+// enough for current go-db2i tests + PUB400 metadata strings.
 // Characters that diverge between the two pages -- e.g. '@' (0x7C
 // in 37 vs 0xB5 in 273) and accented vowels -- will round-trip
 // incorrectly. A proper 273 mapping table lands with M4 when

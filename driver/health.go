@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"net"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // markDead flags the connection as unusable. Subsequent Prepare /
@@ -66,7 +66,7 @@ func (c *Conn) classifyConnErr(err error) error {
 	if isConnLevelErr(err) {
 		c.markDead()
 		if c.log != nil {
-			c.log.LogAttrs(context.Background(), slog.LevelWarn, "gojtopen: classified as ErrBadConn (pool will retire conn)",
+			c.log.LogAttrs(context.Background(), slog.LevelWarn, "db2i: classified as ErrBadConn (pool will retire conn)",
 				slog.String("err", err.Error()),
 			)
 		}
@@ -77,7 +77,7 @@ func (c *Conn) classifyConnErr(err error) error {
 	// constraint violations / syntax errors / etc. when their logging
 	// pipeline filters by level.
 	if c.log != nil {
-		c.log.LogAttrs(context.Background(), slog.LevelError, "gojtopen: operation failed",
+		c.log.LogAttrs(context.Background(), slog.LevelError, "db2i: operation failed",
 			slog.String("err", err.Error()),
 		)
 	}

@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // TestCallInOnlyFixtureWireShape replays the database-side request
 // flow that JT400 21.0.4 generates for `CALL GOSPROCS.P_INS('A', 10)`
-// (no parameter markers, IN-only literal args) and confirms goJTOpen
+// (no parameter markers, IN-only literal args) and confirms go-db2i
 // produces the same three-frame shape with statement-type
 // TYPE_CALL=3.
 //
@@ -193,7 +193,7 @@ func TestCallInOnlyFixtureWireShape(t *testing.T) {
 		t.Fatalf("ExecutePreparedSQL(CALL): %v", err)
 	}
 
-	// Walk goJTOpen's emitted frames; assert the same 4-frame shape
+	// Walk go-db2i's emitted frames; assert the same 4-frame shape
 	// (CREATE_RPB, PREPARE_DESCRIBE, EXECUTE, RPB_DELETE) and the same
 	// statement-type=3 invariant. No CHANGE_DESCRIPTOR -- the CALL
 	// has no parameter markers so paramShapes is empty.
@@ -226,26 +226,26 @@ func TestCallInOnlyFixtureWireShape(t *testing.T) {
 	_ = wantKinds // silence unused
 	wantSeqDriver := []uint16{ReqDBSQLRPBCreate, ReqDBSQLPrepareDescribe, ReqDBSQLExecute, ReqDBSQLRPBDelete}
 	if len(gotKinds) != len(wantSeqDriver) {
-		t.Fatalf("goJTOpen emitted %d frames; want 4 (CREATE_RPB / PREPARE_DESCRIBE / EXECUTE / RPB_DELETE) -- got kinds=%v",
+		t.Fatalf("go-db2i emitted %d frames; want 4 (CREATE_RPB / PREPARE_DESCRIBE / EXECUTE / RPB_DELETE) -- got kinds=%v",
 			len(gotKinds), gotKinds)
 	}
 	for i, w := range wantSeqDriver {
 		if gotKinds[i] != w {
-			t.Errorf("goJTOpen frame[%d] = 0x%04X, want 0x%04X (%s)",
+			t.Errorf("go-db2i frame[%d] = 0x%04X, want 0x%04X (%s)",
 				i, gotKinds[i], w, wantedKinds[w])
 		}
 	}
 	if got, ok := findStmtTypeInFrame(gotPrepare); !ok || got != 3 {
-		t.Errorf("goJTOpen PREPARE_DESCRIBE statement-type CP 0x3812 = %d ok=%v, want 3 (TYPE_CALL)", got, ok)
+		t.Errorf("go-db2i PREPARE_DESCRIBE statement-type CP 0x3812 = %d ok=%v, want 3 (TYPE_CALL)", got, ok)
 	}
 	if got, ok := findStmtTypeInFrame(gotExecute); !ok || got != 3 {
-		t.Errorf("goJTOpen EXECUTE statement-type CP 0x3812 = %d ok=%v, want 3 (TYPE_CALL)", got, ok)
+		t.Errorf("go-db2i EXECUTE statement-type CP 0x3812 = %d ok=%v, want 3 (TYPE_CALL)", got, ok)
 	}
 }
 
 // TestCallInOutFixtureOutDecode replays the EXECUTE reply from
 // prepared_call_in_out.trace (CALL P_LOOKUP('WIDGET', ?, ?) with two
-// OUT registrations) and confirms goJTOpen's parseOutParameterRow
+// OUT registrations) and confirms go-db2i's parseOutParameterRow
 // decodes the synthetic single-row CP 0x380E into the same values
 // the Java golden file pins: OUT VARCHAR(64) "Acme Widget" + OUT
 // INTEGER 100.
@@ -352,7 +352,7 @@ func TestCallInOutFixtureOutDecode(t *testing.T) {
 //	FETCH             (0x180B)  -- pull set 1
 //	... close + repeat for set 2 ...
 //
-// goJTOpen's open-CALL-prepared path must emit at least the
+// go-db2i's open-CALL-prepared path must emit at least the
 // CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR / EXECUTE /
 // OPEN_DESCRIBE / FETCH sequence on the first set; the multi-set
 // advance reuses the same OPEN_DESCRIBE + FETCH pair after a

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/complacentsee/goJTOpen/auth"
+	"github.com/complacentsee/go-db2i/auth"
 )
 
 // StartDatabaseService runs the as-database (port 8471) handshake on

@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // TestParseDBReplyServerAttributesAgainstFixture decodes recv #5
 // (the 174-byte 0x2800 reply that PUB400 returns to the
 // SET_SQL_ATTRIBUTES request) and validates every field that
-// goJTOpen surfaces.
+// go-db2i surfaces.
 //
 // The fixture's expected values were captured at the same time as
 // the smoketest run that passed sign-on -- they're tied to

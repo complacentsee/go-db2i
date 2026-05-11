@@ -10,16 +10,16 @@ import (
 	"os"
 	"time"
 
-	gojtopen "github.com/complacentsee/goJTOpen/driver"
-	"github.com/complacentsee/goJTOpen/hostserver"
+	db2i "github.com/complacentsee/go-db2i/driver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // Example shows the typical sql.Open + db.Query path. The driver
-// registers itself as "gojtopen" via init() so anonymous import is
-// enough to make sql.Open accept the gojtopen:// DSN scheme.
+// registers itself as "db2i" via init() so anonymous import is
+// enough to make sql.Open accept the db2i:// DSN scheme.
 func Example() {
-	dsn := "gojtopen://USER:PASSWORD@host.example.com:8471/?library=MYLIB"
-	db, err := sql.Open("gojtopen", dsn)
+	dsn := "db2i://USER:PASSWORD@host.example.com:8471/?library=MYLIB"
+	db, err := sql.Open("db2i", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func Example() {
 // (~32 KB) at a time via continuation FETCH instead of buffering
 // everything. The caller's loop drives the wire round-trips.
 func Example_largeResult() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	rows, _ := db.Query(`SELECT TABLE_NAME, COLUMN_NAME FROM QSYS2.SYSCOLUMNS`)
@@ -69,7 +69,7 @@ func Example_largeResult() {
 // statements, and tx.Commit / tx.Rollback restore the autocommit-
 // permissive baseline.
 func Example_transaction() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB&isolation=cs")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&isolation=cs")
 	defer db.Close()
 
 	tx, err := db.Begin()
@@ -91,7 +91,7 @@ func Example_transaction() {
 // round trip. The first call hits the wire; subsequent calls return
 // the cached value.
 func Example_lastInsertId() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	res, err := db.Exec(`INSERT INTO mylib.things (label) VALUES (?)`, "new thing")
@@ -108,7 +108,7 @@ func Example_lastInsertId() {
 }
 
 // Example_call demonstrates calling a stored procedure with IN-only
-// parameters. goJTOpen routes any SQL starting with "CALL " through
+// parameters. go-db2i routes any SQL starting with "CALL " through
 // the same CREATE_RPB + PREPARE_DESCRIBE + EXECUTE flow JT400 uses
 // for CallableStatement, with statement type 3 (TYPE_CALL) on both
 // PREPARE and EXECUTE. M9-1 covers IN-only; OUT / INOUT via sql.Out
@@ -122,7 +122,7 @@ func Example_lastInsertId() {
 // PREPARE. This is required for correct SQLERRD(2) population when
 // the proc returns dynamic result sets.
 func Example_call() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	// IN-only stored procedure: arguments flow through driver.Value
@@ -134,16 +134,16 @@ func Example_call() {
 }
 
 // Example_callWithOut demonstrates OUT and INOUT parameter handling
-// via the database/sql sql.Out wrapper. goJTOpen sets the
+// via the database/sql sql.Out wrapper. go-db2i sets the
 // JT400-compatible direction byte (0xF1 for OUT, 0xF2 for INOUT) at
 // descriptor offset 30, ORs the ORS_RESULT_DATA bit into the EXECUTE
 // request so the server ships a synthetic single-row CP 0x380E
 // reply, and reflect-assigns the decoded values back to the caller's
 // destinations after EXECUTE returns. Go 1.21+ is required for the
-// sql.Out.In INOUT field; goJTOpen's go.mod floor is 1.23 so this
+// sql.Out.In INOUT field; go-db2i's go.mod floor is 1.23 so this
 // is always available.
 func Example_callWithOut() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	// IN VARCHAR + OUT VARCHAR + OUT INTEGER (e.g. a P_LOOKUP proc
@@ -172,14 +172,14 @@ func Example_callWithOut() {
 
 // Example_callMultiResultSet demonstrates draining a stored
 // procedure that declares DYNAMIC RESULT SETS N (multiple cursors
-// opened via DECLARE CURSOR WITH RETURN). goJTOpen drains each set
+// opened via DECLARE CURSOR WITH RETURN). go-db2i drains each set
 // through database/sql's Rows.NextResultSet idiom: the first set
 // is iterated via Rows.Next as usual, then NextResultSet attaches
 // to the next pre-opened cursor on the server side and Rows.Next
 // continues from there. Returns true while more sets remain;
 // false (or io.EOF) when the proc's last set is drained.
 func Example_callMultiResultSet() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	rows, _ := db.Query(`CALL mylib.p_inventory(?)`, 5)
@@ -209,7 +209,7 @@ func Example_callMultiResultSet() {
 // callers can switch on SQLSTATE / SQLCODE without regexing the
 // formatted message.
 func Example_db2Error() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	_, err := db.Exec(`INSERT INTO mylib.things (id) VALUES (?)`, 42)
@@ -241,7 +241,7 @@ func Example_db2Error() {
 // the bytes through a single WRITE_LOB_DATA frame, then EXECUTE
 // carries the locator handle in the SQLDA value slot.
 func Example_blobInsert() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	payload := []byte{0xCA, 0xFE, 0xBA, 0xBE} // up to a few KB; bigger uses LOBValue
@@ -259,7 +259,7 @@ func Example_blobInsert() {
 // known up front because the IBM i host server allocates locator
 // buffers based on the declared size.
 func Example_lobValueStream() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	f, err := os.Open("backup.tar.gz")
@@ -272,7 +272,7 @@ func Example_lobValueStream() {
 		log.Fatal(err)
 	}
 
-	val := &gojtopen.LOBValue{Reader: f, Length: stat.Size()}
+	val := &db2i.LOBValue{Reader: f, Length: stat.Size()}
 	if _, err := db.Exec(
 		`INSERT INTO mylib.archives (id, blob) VALUES (?, ?)`, 1, val,
 	); err != nil {
@@ -287,7 +287,7 @@ func Example_lobValueStream() {
 // code-point quirks ("!" = 0x5A in CCSID 37 but 0x4F in CCSID 273)
 // round-trip cleanly through the matching read decoder.
 func Example_clobInsert() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	doc := "Lorem ipsum dolor sit amet, consectetur adipiscing elit. " +
@@ -305,11 +305,11 @@ func Example_clobInsert() {
 // reader satisfies io.Reader+io.Closer and pulls 32 KiB chunks per
 // Read call. Pair with Example_lobValueStream for the bind side.
 func Example_lobReader() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB&lob=stream")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&lob=stream")
 	defer db.Close()
 
 	row := db.QueryRow(`SELECT content FROM mylib.images WHERE id = ?`, 42)
-	var r *gojtopen.LOBReader
+	var r *db2i.LOBReader
 	if err := row.Scan(&r); err != nil {
 		log.Fatal(err)
 	}
@@ -330,13 +330,13 @@ func Example_lobReader() {
 // 9476 / 9471). The keys are independent -- mix and match per
 // deployment.
 func Example_dsnKnobs() {
-	dsn := "gojtopen://USER:PASSWORD@host.example.com/" +
+	dsn := "db2i://USER:PASSWORD@host.example.com/" +
 		"?library=MYLIB" +
 		"&lob-threshold=8192" +
 		"&ccsid=1208" +
 		"&tls=true" +
 		"&tls-server-name=host.example.com"
-	db, err := sql.Open("gojtopen", dsn)
+	db, err := sql.Open("db2i", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func Example_dsnKnobs() {
 // context.DeadlineExceeded / context.Canceled regardless of which
 // I/O step bailed.
 func Example_contextTimeout() {
-	db, _ := sql.Open("gojtopen", "gojtopen://u:p@host/?library=MYLIB")
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

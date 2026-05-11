@@ -5,10 +5,10 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.github.complacentsee</groupId>
-    <artifactId>gojtopen-fixtures</artifactId>
+    <artifactId>db2i-fixtures</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
-    <name>goJTOpen fixture-capture harness</name>
+    <name>go-db2i fixture-capture harness</name>
     <description>Captures JTOpen wire datastreams and JDBC ground-truth JSON for the goJTOpen Go driver's replay tests.</description>
 
     <properties>
@@ -17,7 +17,7 @@
         <maven.compiler.target>8</maven.compiler.target>
         <jt400.version>21.0.4</jt400.version>
         <jackson.version>2.17.2</jackson.version>
-        <main.class>io.github.complacentsee.gojtopen.fixtures.Capture</main.class>
+        <main.class>io.github.complacentsee.db2i.fixtures.Capture</main.class>
     </properties>
 
     <dependencies>

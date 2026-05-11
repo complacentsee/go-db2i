@@ -10,7 +10,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // TestResolveTracerNilReturnsNoop confirms a nil Config.Tracer
@@ -44,7 +44,7 @@ func TestStmtStartSpanEmitsConventionalAttrs(t *testing.T) {
 	cfg.SignonPort = 8476
 	cfg.Library = "MYLIB"
 	cfg.LogSQL = true
-	cfg.Tracer = tp.Tracer("gojtopen-test")
+	cfg.Tracer = tp.Tracer("db2i-test")
 
 	conn := &Conn{cfg: &cfg, tracer: resolveTracer(cfg.Tracer)}
 	stmt := &Stmt{conn: conn, query: "SELECT 1 FROM SYSIBM.SYSDUMMY1"}
@@ -98,7 +98,7 @@ func TestStmtStartSpanOmitsSQLWhenLogSQLFalse(t *testing.T) {
 	cfg.DBPort = 8471
 	cfg.SignonPort = 8476
 	cfg.LogSQL = false
-	cfg.Tracer = tp.Tracer("gojtopen-test")
+	cfg.Tracer = tp.Tracer("db2i-test")
 	conn := &Conn{cfg: &cfg, tracer: resolveTracer(cfg.Tracer)}
 	stmt := &Stmt{conn: conn, query: "SELECT * FROM secret.pii_view"}
 	_, span := stmt.startSpan(context.Background(), "QUERY", 2)
@@ -122,7 +122,7 @@ func TestRecordSpanErrorAttachesDb2ErrorAttrs(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
-	conn := &Conn{cfg: &Config{User: "U", Host: "h", DBPort: 8471, SignonPort: 8476}, tracer: tp.Tracer("gojtopen-test")}
+	conn := &Conn{cfg: &Config{User: "U", Host: "h", DBPort: 8471, SignonPort: 8476}, tracer: tp.Tracer("db2i-test")}
 	stmt := &Stmt{conn: conn, query: ""}
 	_, span := stmt.startSpan(context.Background(), "EXEC", 1)
 	dbErr := &hostserver.Db2Error{
@@ -158,7 +158,7 @@ func TestRecordSpanErrorNonDb2ErrorStillSetsStatus(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
-	conn := &Conn{cfg: &Config{User: "U", Host: "h", DBPort: 8471, SignonPort: 8476}, tracer: tp.Tracer("gojtopen-test")}
+	conn := &Conn{cfg: &Config{User: "U", Host: "h", DBPort: 8471, SignonPort: 8476}, tracer: tp.Tracer("db2i-test")}
 	stmt := &Stmt{conn: conn}
 	_, span := stmt.startSpan(context.Background(), "QUERY", 0)
 	stmt.recordSpanError(span, errors.New("read tcp: connection reset by peer"))

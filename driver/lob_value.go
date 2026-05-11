@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // LOBValue is the bind-side counterpart of *LOBReader. Pass one to
@@ -18,7 +18,7 @@ import (
 //	// frame. Equivalent to passing []byte directly except that
 //	// LOBValue makes the LOB intent explicit at the call site.
 //	db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
-//	    &gojtopen.LOBValue{Bytes: payload})
+//	    &db2i.LOBValue{Bytes: payload})
 //
 //	// Streamed — driver chunks the Reader into LOBStreamChunkSize
 //	// (32 KiB by default) frames at advancing offsets. Length is
@@ -29,7 +29,7 @@ import (
 //	f, _ := os.Open("video.mp4")
 //	stat, _ := f.Stat()
 //	db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
-//	    &gojtopen.LOBValue{Reader: f, Length: stat.Size()})
+//	    &db2i.LOBValue{Reader: f, Length: stat.Size()})
 //
 // Bytes and Reader are mutually exclusive. If both are set Bytes
 // wins (the streamed path is opt-in).
@@ -113,10 +113,10 @@ func resolveLOBValue(v *LOBValue) (any, error) {
 		return v.Bytes, nil
 	}
 	if v.Reader == nil {
-		return nil, fmt.Errorf("gojtopen.LOBValue: neither Bytes nor Reader is set")
+		return nil, fmt.Errorf("db2i.LOBValue: neither Bytes nor Reader is set")
 	}
 	if v.Length < 0 {
-		return nil, fmt.Errorf("gojtopen.LOBValue: Length must be non-negative when Reader is set, got %d", v.Length)
+		return nil, fmt.Errorf("db2i.LOBValue: Length must be non-negative when Reader is set, got %d", v.Length)
 	}
 	return hostserver.LOBStream(v), nil
 }

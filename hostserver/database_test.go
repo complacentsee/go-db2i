@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // findAsDatabaseConnID picks the trace connID that carries the

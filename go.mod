@@ -1,4 +1,4 @@
-module github.com/complacentsee/goJTOpen
+module github.com/complacentsee/go-db2i
 
 go 1.23.0
 

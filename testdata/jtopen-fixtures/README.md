@@ -1,6 +1,6 @@
 # JTOpen fixture-capture harness
 
-This is the M0 deliverable for goJTOpen — a small Maven project that uses the
+This is the M0 deliverable for go-db2i — a small Maven project that uses the
 [JT400 JDBC driver](https://github.com/IBM/JTOpen) (the JDBC half of
 IBM Toolbox for Java) against a real IBM i to produce two artifacts per
 test case:
@@ -22,11 +22,11 @@ IBM i** — once fixtures land in git, anyone can run `go test ./...`.
   DRDA on port 446. So these fixtures drive the host-server fallback path,
   not the DRDA path. DRDA fixtures need a separate capture (Wireshark
   against an IBM i, or Apache Derby in Docker for spec-only cases). See the
-  goJTOpen plan for details.
+  go-db2i plan for details.
 - PUB400 schema names are user-specific. Fixtures captured from one PUB400
   account may show that account name in some metadata responses (e.g.,
   catalog calls). For the cases declared here we mostly target
-  `SYSIBM.SYSDUMMY1` and use `<schema>.GOJTOPEN_T1` for the few
+  `SYSIBM.SYSDUMMY1` and use `<schema>.GODB2I_T1` for the few
   table-backed cases.
 
 ## Prerequisites
@@ -68,17 +68,17 @@ Or build a fat-jar and run that:
 
 ```sh
 mvn -q package
-java -jar target/gojtopen-fixtures-0.1.0-SNAPSHOT.jar
+java -jar target/db2i-fixtures-0.1.0-SNAPSHOT.jar
 ```
 
 Output:
 
 ```
-goJTOpen fixture capture
+go-db2i fixture capture
   host:     pub400.com
   user:     YOURUSER
   schema:   YOURUSER
-  fixtures: /path/to/goJTOpen/testdata/jtopen-fixtures/fixtures
+  fixtures: /path/to/go-db2i/testdata/jtopen-fixtures/fixtures
   cases:    27
 
 [ connect_only ] ok

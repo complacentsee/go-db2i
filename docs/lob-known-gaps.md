@@ -58,13 +58,13 @@ covered by offline tests in `hostserver/db_lob_ucs2_test.go`
 **Live test escape hatch.** `TestLOBDBClobCCSID13488` in
 `test/conformance/conformance_test.go` exercises the substitute
 path against a real CCSID-13488 column when the
-`GOJTOPEN_TEST_CCSID13488_TABLE` env var is set to a
+`DB2I_TEST_CCSID13488_TABLE` env var is set to a
 fully-qualified table name. The test recreates the table on entry
 (schema is fixed: `id INTEGER` + `dc DBCLOB(64K) CCSID 13488`);
 PUB400 V7R5M0 does not readily expose a target with the right
 NLSS, so the test skips on free-tier targets. The IBM Cloud Power
 VS V7R6M0 LPAR accepts the CREATE; live PASS recorded
-2026-05-10 with `GOJTOPEN_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`.
+2026-05-10 with `DB2I_TEST_CCSID13488_TABLE=GOTEST.GOSQL_DBCLOB13488`.
 
 ## 2. Multi-row batch INSERT via CP 0x381F `RowCount > 1` (CLOSED, M7-6)
 
@@ -92,7 +92,7 @@ handles between rows so each row's `WRITE_LOB_DATA` writes to a
 fresh handle. Without it the second row's writes would overwrite
 the first row's content (locators are per-marker, not per-row).
 
-**Implications for goJTOpen.** Today's per-`Exec` flow is
+**Implications for go-db2i.** Today's per-`Exec` flow is
 wire-equivalent to `JT400.executeBatch` for LOB-column INSERTs —
 there is no special CP `0x381F` multi-row path to mirror. Callers
 wanting N-row LOB batches use `db.Prepare` + N `Stmt.Exec` calls,
@@ -129,7 +129,7 @@ halving the wire-frame count for the read side. The bind-side
 inline shape is driven by the `PREPARE_DESCRIBE` reply (server
 describes the LOB param as inline VARCHAR-shape, type 404/405 for
 BLOB or 408/409 for CLOB, instead of the locator 960..969 types),
-not by client-side size checks. goJTOpen already follows the
+not by client-side size checks. go-db2i already follows the
 server's chosen shape on bind, so wiring `LOBThreshold` through to
 CP `0x3822` was sufficient.
 
@@ -139,7 +139,7 @@ falls back to the historical 32768 default so the wire shape
 matches the pre-M7-5 capture. Set via DSN:
 
 ```
-gojtopen://USER:PWD@host/?lob-threshold=65536
+db2i://USER:PWD@host/?lob-threshold=65536
 ```
 
 Server caps at 15728640 per JT400's

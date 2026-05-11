@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // fakeConn replays a queue of pre-recorded reply bytes on Read while

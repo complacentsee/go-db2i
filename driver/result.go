@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // Result implements driver.Result.
@@ -45,7 +45,7 @@ type Result struct {
 // generic "not supported" error so callers can tell the difference
 // between "the driver doesn't support this" (impossible here) and
 // "this particular table doesn't use it".
-var ErrNoLastInsertId = errors.New("gojtopen: INSERT did not generate an IDENTITY value (table has no IDENTITY column)")
+var ErrNoLastInsertId = errors.New("db2i: INSERT did not generate an IDENTITY value (table has no IDENTITY column)")
 
 // LastInsertId returns the IDENTITY value most recently generated
 // in this session, via a `VALUES IDENTITY_VAL_LOCAL()` round trip.
@@ -123,11 +123,11 @@ func (r *Result) fetchLastInsertId() (int64, error) {
 		}
 		n, perr := strconv.ParseInt(s, 10, 64)
 		if perr != nil {
-			return 0, fmt.Errorf("gojtopen: parse IDENTITY value %q: %w", v, perr)
+			return 0, fmt.Errorf("db2i: parse IDENTITY value %q: %w", v, perr)
 		}
 		return n, nil
 	default:
-		return 0, fmt.Errorf("gojtopen: unexpected IDENTITY_VAL_LOCAL() result type %T (%v)", row[0], row[0])
+		return 0, fmt.Errorf("db2i: unexpected IDENTITY_VAL_LOCAL() result type %T (%v)", row[0], row[0])
 	}
 }
 

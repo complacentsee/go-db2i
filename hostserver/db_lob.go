@@ -627,7 +627,7 @@ func encodeUCS2BE(s string) []byte {
 		if r > 0xFFFF {
 			c = 0x003F
 			ucs2NonBMPWarnOnce.Do(func() {
-				slog.Warn("goJTOpen: non-BMP rune substituted with '?' for CCSID 13488 DBCLOB bind",
+				slog.Warn("go-db2i: non-BMP rune substituted with '?' for CCSID 13488 DBCLOB bind",
 					"ccsid", 13488,
 					"rune", fmt.Sprintf("U+%04X", r),
 					"note", "first occurrence; subsequent substitutions silent",

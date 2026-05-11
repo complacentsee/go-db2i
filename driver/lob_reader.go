@@ -6,7 +6,7 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // DefaultLOBChunkSize is the per-`Read` round-trip size LOBReader
@@ -26,7 +26,7 @@ const DefaultLOBChunkSize = 32 * 1024
 //
 //	rows, err := db.Query("SELECT B FROM T WHERE ID = ?", id)
 //	for rows.Next() {
-//	    var r *gojtopen.LOBReader
+//	    var r *db2i.LOBReader
 //	    rows.Scan(&r)
 //	    defer r.Close()
 //	    io.Copy(dst, r)
@@ -97,7 +97,7 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 		return 0, r.sticky
 	}
 	if r.closed {
-		return 0, fmt.Errorf("gojtopen: LOBReader.Read after Close")
+		return 0, fmt.Errorf("db2i: LOBReader.Read after Close")
 	}
 	if len(p) == 0 {
 		return 0, nil
@@ -144,7 +144,7 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 	wireSize := requestSize
 	if r.loc.SQLType == 968 || r.loc.SQLType == 969 {
 		if wireOffset%2 != 0 {
-			r.sticky = fmt.Errorf("gojtopen: LOBReader: graphic LOB offset %d not 2-byte aligned", wireOffset)
+			r.sticky = fmt.Errorf("db2i: LOBReader: graphic LOB offset %d not 2-byte aligned", wireOffset)
 			return 0, r.sticky
 		}
 		wireOffset /= 2
@@ -172,7 +172,7 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 		return 0, r.sticky
 	}
 	if r.conn.log != nil {
-		r.conn.log.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: RETRIEVE_LOB_DATA",
+		r.conn.log.LogAttrs(context.Background(), slog.LevelDebug, "db2i: RETRIEVE_LOB_DATA",
 			slog.Uint64("handle", uint64(r.loc.Handle)),
 			slog.Int("col", r.colIdx),
 			slog.Int64("offset", r.offset),

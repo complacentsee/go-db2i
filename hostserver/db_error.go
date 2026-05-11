@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // Db2Error is the typed form of a server-side SQL error. Callers can

@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // Database-service request / reply identifiers (DSS Header.ReqRepID).
@@ -15,7 +15,7 @@ import (
 // the server prestart job for this user. Both of these are also used
 // by the other host-server services (rmtcmd, dtaq, file, etc.) -- the
 // constants live here because as-database is the first service in
-// goJTOpen that drives them.
+// go-db2i that drives them.
 const (
 	ReqXChgRandSeed uint16 = 0x7001
 	ReqStartServer  uint16 = 0x7002
@@ -48,7 +48,7 @@ const (
 // port 8471, but the same flow is used by the other services too.
 //
 // clientSeed must be exactly 8 bytes. JTOpen uses the
-// current-millis low/high split as its source of "random"; goJTOpen
+// current-millis low/high split as its source of "random"; go-db2i
 // callers should pass crypto/rand bytes via the orchestrator
 // in [StartDatabaseService].
 func XChgRandSeedRequest(server ServerID, clientSeed []byte) (Header, []byte, error) {

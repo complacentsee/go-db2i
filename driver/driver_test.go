@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 func TestParseDSNBasic(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://USR:PWD@host.example.com:8471/?library=MYLIB")
+	cfg, err := parseDSN("db2i://USR:PWD@host.example.com:8471/?library=MYLIB")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestParseDSNBasic(t *testing.T) {
 }
 
 func TestParseDSNCustomPort(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://u:p@h:9999/?signon-port=18476")
+	cfg, err := parseDSN("db2i://u:p@h:9999/?signon-port=18476")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestParseDSNDateFormats(t *testing.T) {
 		{"ymd", hostserver.DateFormatYMD},
 	}
 	for _, tc := range cases {
-		cfg, err := parseDSN("gojtopen://u:p@h/?date=" + tc.key)
+		cfg, err := parseDSN("db2i://u:p@h/?date=" + tc.key)
 		if err != nil {
 			t.Errorf("date=%s: %v", tc.key, err)
 			continue
@@ -92,7 +92,7 @@ func TestParseDSNIsolations(t *testing.T) {
 		{"rs", hostserver.IsolationSerializable},
 	}
 	for _, tc := range cases {
-		cfg, err := parseDSN("gojtopen://u:p@h/?isolation=" + tc.key)
+		cfg, err := parseDSN("db2i://u:p@h/?isolation=" + tc.key)
 		if err != nil {
 			t.Errorf("isolation=%s: %v", tc.key, err)
 			continue
@@ -106,17 +106,17 @@ func TestParseDSNIsolations(t *testing.T) {
 func TestParseDSNRejectsBadInputs(t *testing.T) {
 	cases := map[string]string{
 		"wrong scheme":      "postgres://u:p@h/db",
-		"missing user":      "gojtopen://h:8471/",
-		"empty user":        "gojtopen://@h:8471/",
-		"missing host":      "gojtopen://u:p@",
-		"bad port":          "gojtopen://u:p@h:notnumeric/",
-		"port zero":         "gojtopen://u:p@h:0/",
-		"port over 65535":   "gojtopen://u:p@h:99999/",
-		"bad date format":   "gojtopen://u:p@h/?date=bogus",
-		"bad isolation":     "gojtopen://u:p@h/?isolation=bogus",
-		"bad signon-port":   "gojtopen://u:p@h/?signon-port=notanumber",
-		"signon-port zero":  "gojtopen://u:p@h/?signon-port=0",
-		"bad lob mode":      "gojtopen://u:p@h/?lob=bogus",
+		"missing user":      "db2i://h:8471/",
+		"empty user":        "db2i://@h:8471/",
+		"missing host":      "db2i://u:p@",
+		"bad port":          "db2i://u:p@h:notnumeric/",
+		"port zero":         "db2i://u:p@h:0/",
+		"port over 65535":   "db2i://u:p@h:99999/",
+		"bad date format":   "db2i://u:p@h/?date=bogus",
+		"bad isolation":     "db2i://u:p@h/?isolation=bogus",
+		"bad signon-port":   "db2i://u:p@h/?signon-port=notanumber",
+		"signon-port zero":  "db2i://u:p@h/?signon-port=0",
+		"bad lob mode":      "db2i://u:p@h/?lob=bogus",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -131,7 +131,7 @@ func TestParseDSNUppercasesLibrary(t *testing.T) {
 	// IBM i schema lookups are case-insensitive but the wire format
 	// expects EBCDIC uppercase. Normalising at the DSN boundary
 	// keeps every downstream caller from doing it.
-	cfg, err := parseDSN("gojtopen://u:p@h/?library=mylib")
+	cfg, err := parseDSN("db2i://u:p@h/?library=mylib")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestParseDSNUppercasesLibrary(t *testing.T) {
 func TestParseDSNErrorWrapped(t *testing.T) {
 	// Confirm errors mention the actual offending value so operators
 	// have something to act on.
-	_, err := parseDSN("gojtopen://u:p@h/?date=fooBAR")
+	_, err := parseDSN("db2i://u:p@h/?date=fooBAR")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -157,7 +157,7 @@ func TestParseDSNErrorWrapped(t *testing.T) {
 // that an explicit URL port / signon-port still wins.
 func TestParseDSNTLSDefaultPorts(t *testing.T) {
 	t.Run("plain DSN keeps 8471/8476", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/?library=MYLIB")
+		cfg, err := parseDSN("db2i://u:p@h/?library=MYLIB")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestParseDSNTLSDefaultPorts(t *testing.T) {
 		}
 	})
 	t.Run("tls=true flips to 9471/9476", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/?tls=true")
+		cfg, err := parseDSN("db2i://u:p@h/?tls=true")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestParseDSNTLSDefaultPorts(t *testing.T) {
 		}
 	})
 	t.Run("tls=true + explicit port wins", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h:13471/?tls=on&signon-port=13476")
+		cfg, err := parseDSN("db2i://u:p@h:13471/?tls=on&signon-port=13476")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -200,7 +200,7 @@ func TestParseDSNTLSDefaultPorts(t *testing.T) {
 // TestParseDSNTLSKnobs covers tls-insecure-skip-verify and
 // tls-server-name parsing.
 func TestParseDSNTLSKnobs(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://u:p@h/?tls=true&tls-insecure-skip-verify=true&tls-server-name=ibmi.internal")
+	cfg, err := parseDSN("db2i://u:p@h/?tls=true&tls-insecure-skip-verify=true&tls-server-name=ibmi.internal")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestParseDSNTLSBoolAliases(t *testing.T) {
 	}
 	for v, want := range cases {
 		t.Run(v, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?tls=" + v)
+			cfg, err := parseDSN("db2i://u:p@h/?tls=" + v)
 			if err != nil {
 				t.Fatalf("parseDSN tls=%s: %v", v, err)
 			}
@@ -247,7 +247,7 @@ func TestParseDSNTLSBoolAliases(t *testing.T) {
 // TestParseDSNTLSRejectsBogus confirms invalid tls values surface
 // a clear error rather than silently defaulting to false.
 func TestParseDSNTLSRejectsBogus(t *testing.T) {
-	if _, err := parseDSN("gojtopen://u:p@h/?tls=notabool"); err == nil {
+	if _, err := parseDSN("db2i://u:p@h/?tls=notabool"); err == nil {
 		t.Fatal("expected error for tls=notabool, got nil")
 	}
 }
@@ -258,7 +258,7 @@ func TestParseDSNTLSRejectsBogus(t *testing.T) {
 // US/UK spelling debates out of failing tests.
 func TestParseDSNLOBMode(t *testing.T) {
 	t.Run("default is materialise", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/")
+		cfg, err := parseDSN("db2i://u:p@h/")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -273,7 +273,7 @@ func TestParseDSNLOBMode(t *testing.T) {
 	}
 	for v, want := range cases {
 		t.Run("lob="+v, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?lob=" + v)
+			cfg, err := parseDSN("db2i://u:p@h/?lob=" + v)
 			if err != nil {
 				t.Fatalf("parseDSN: %v", err)
 			}
@@ -286,7 +286,7 @@ func TestParseDSNLOBMode(t *testing.T) {
 
 func TestParseDSNCCSID(t *testing.T) {
 	t.Run("default zero", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/")
+		cfg, err := parseDSN("db2i://u:p@h/")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -304,7 +304,7 @@ func TestParseDSNCCSID(t *testing.T) {
 		{"65535", 65535},
 	} {
 		t.Run("ccsid="+tc.raw, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?ccsid=" + tc.raw)
+			cfg, err := parseDSN("db2i://u:p@h/?ccsid=" + tc.raw)
 			if err != nil {
 				t.Fatalf("parseDSN: %v", err)
 			}
@@ -316,13 +316,13 @@ func TestParseDSNCCSID(t *testing.T) {
 	t.Run("rejects out-of-range", func(t *testing.T) {
 		// 16-bit max is 65535; anything larger must be rejected so a
 		// typo doesn't silently truncate.
-		_, err := parseDSN("gojtopen://u:p@h/?ccsid=99999")
+		_, err := parseDSN("db2i://u:p@h/?ccsid=99999")
 		if err == nil {
 			t.Errorf("ccsid=99999 should be rejected (overflow uint16)")
 		}
 	})
 	t.Run("rejects non-numeric", func(t *testing.T) {
-		_, err := parseDSN("gojtopen://u:p@h/?ccsid=utf8")
+		_, err := parseDSN("db2i://u:p@h/?ccsid=utf8")
 		if err == nil {
 			t.Errorf("ccsid=utf8 should be rejected (not an integer)")
 		}
@@ -335,7 +335,7 @@ func TestParseDSNCCSID(t *testing.T) {
 // non-numeric / overflowing inputs.
 func TestParseDSNLOBThreshold(t *testing.T) {
 	t.Run("default zero", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/")
+		cfg, err := parseDSN("db2i://u:p@h/")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -354,7 +354,7 @@ func TestParseDSNLOBThreshold(t *testing.T) {
 		{"15728640", 15728640}, // server-documented cap
 	} {
 		t.Run("lob-threshold="+tc.raw, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?lob-threshold=" + tc.raw)
+			cfg, err := parseDSN("db2i://u:p@h/?lob-threshold=" + tc.raw)
 			if err != nil {
 				t.Fatalf("parseDSN: %v", err)
 			}
@@ -365,13 +365,13 @@ func TestParseDSNLOBThreshold(t *testing.T) {
 	}
 	t.Run("rejects out-of-range", func(t *testing.T) {
 		// uint32 max is 4294967295; anything larger must be rejected.
-		_, err := parseDSN("gojtopen://u:p@h/?lob-threshold=4294967296")
+		_, err := parseDSN("db2i://u:p@h/?lob-threshold=4294967296")
 		if err == nil {
 			t.Errorf("lob-threshold=4294967296 should be rejected (overflow uint32)")
 		}
 	})
 	t.Run("rejects non-numeric", func(t *testing.T) {
-		_, err := parseDSN("gojtopen://u:p@h/?lob-threshold=32k")
+		_, err := parseDSN("db2i://u:p@h/?lob-threshold=32k")
 		if err == nil {
 			t.Errorf("lob-threshold=32k should be rejected (not an integer)")
 		}
@@ -383,7 +383,7 @@ func TestParseDSNLOBThreshold(t *testing.T) {
 // rejection of bogus input.
 func TestParseDSNExtendedMetadata(t *testing.T) {
 	t.Run("default false", func(t *testing.T) {
-		cfg, err := parseDSN("gojtopen://u:p@h/")
+		cfg, err := parseDSN("db2i://u:p@h/")
 		if err != nil {
 			t.Fatalf("parseDSN: %v", err)
 		}
@@ -405,7 +405,7 @@ func TestParseDSNExtendedMetadata(t *testing.T) {
 		{"0", false},
 	} {
 		t.Run("extended-metadata="+tc.raw, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?extended-metadata=" + tc.raw)
+			cfg, err := parseDSN("db2i://u:p@h/?extended-metadata=" + tc.raw)
 			if err != nil {
 				t.Fatalf("parseDSN: %v", err)
 			}
@@ -415,7 +415,7 @@ func TestParseDSNExtendedMetadata(t *testing.T) {
 		})
 	}
 	t.Run("rejects bogus", func(t *testing.T) {
-		if _, err := parseDSN("gojtopen://u:p@h/?extended-metadata=maybe"); err == nil {
+		if _, err := parseDSN("db2i://u:p@h/?extended-metadata=maybe"); err == nil {
 			t.Error("extended-metadata=maybe should be rejected")
 		}
 	})
@@ -427,7 +427,7 @@ func TestParseDSNExtendedMetadata(t *testing.T) {
 // These have to match JT400's JDProperties.java defaults or a
 // caller expecting JT400-compatible behaviour will silently drift.
 func TestParseDSN_DefaultsM10(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://u:p@h/")
+	cfg, err := parseDSN("db2i://u:p@h/")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestParseDSN_DefaultsM10(t *testing.T) {
 // TestParseDSN_ExtendedDynamicHappyPath wires the seven main keys
 // together the way an operator who migrated from JT400 would.
 func TestParseDSN_ExtendedDynamicHappyPath(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-library=MYLIB&package-cache=true&package-error=exception&package-criteria=select&package-ccsid=1200")
+	cfg, err := parseDSN("db2i://u:p@h/?extended-dynamic=true&package=APP&package-library=MYLIB&package-cache=true&package-error=exception&package-criteria=select&package-ccsid=1200")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestParseDSN_PackageNameCanon(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
-			cfg, err := parseDSN("gojtopen://u:p@h/?extended-dynamic=true&package=" + tc.raw)
+			cfg, err := parseDSN("db2i://u:p@h/?extended-dynamic=true&package=" + tc.raw)
 			if err != nil {
 				t.Fatalf("parseDSN: %v", err)
 			}
@@ -506,7 +506,7 @@ func TestParseDSN_PackageNameCanon(t *testing.T) {
 }
 
 func TestParseDSN_PackageCCSIDSystem(t *testing.T) {
-	cfg, err := parseDSN("gojtopen://u:p@h/?package-ccsid=system")
+	cfg, err := parseDSN("db2i://u:p@h/?package-ccsid=system")
 	if err != nil {
 		t.Fatalf("parseDSN: %v", err)
 	}
@@ -516,10 +516,10 @@ func TestParseDSN_PackageCCSIDSystem(t *testing.T) {
 }
 
 func TestParseDSN_PackageAddTrueAccepted(t *testing.T) {
-	if _, err := parseDSN("gojtopen://u:p@h/?package-add=true"); err != nil {
+	if _, err := parseDSN("db2i://u:p@h/?package-add=true"); err != nil {
 		t.Errorf("package-add=true should be silently accepted: %v", err)
 	}
-	if _, err := parseDSN("gojtopen://u:p@h/?package-add=false"); err == nil {
+	if _, err := parseDSN("db2i://u:p@h/?package-add=false"); err == nil {
 		t.Error("package-add=false should be rejected (always-add semantics)")
 	}
 }
@@ -528,31 +528,31 @@ func TestParseDSN_PackageClearAccepted(t *testing.T) {
 	// shape-validate only; the connect path emits the warn-log
 	for _, v := range []string{"true", "false"} {
 		t.Run(v, func(t *testing.T) {
-			if _, err := parseDSN("gojtopen://u:p@h/?package-clear=" + v); err != nil {
+			if _, err := parseDSN("db2i://u:p@h/?package-clear=" + v); err != nil {
 				t.Errorf("package-clear=%s should be accepted: %v", v, err)
 			}
 		})
 	}
-	if _, err := parseDSN("gojtopen://u:p@h/?package-clear=maybe"); err == nil {
+	if _, err := parseDSN("db2i://u:p@h/?package-clear=maybe"); err == nil {
 		t.Error("package-clear=maybe should be rejected")
 	}
 }
 
 func TestParseDSN_M10RejectsBadValues(t *testing.T) {
 	cases := map[string]string{
-		"bogus extended-dynamic":  "gojtopen://u:p@h/?extended-dynamic=maybe",
-		"package name >10 chars":  "gojtopen://u:p@h/?extended-dynamic=true&package=ELEVENCHARS",
-		"package bad char dot":    "gojtopen://u:p@h/?extended-dynamic=true&package=A.B",
-		"package bad char slash":  "gojtopen://u:p@h/?extended-dynamic=true&package=A/B",
-		"package empty":           "gojtopen://u:p@h/?extended-dynamic=true&package=",
-		"package-library too lng": "gojtopen://u:p@h/?package-library=ELEVENCHARS",
-		"package-cache bogus":     "gojtopen://u:p@h/?package-cache=maybe",
-		"package-error bogus":     "gojtopen://u:p@h/?package-error=fatal",
-		"package-criteria bogus":  "gojtopen://u:p@h/?package-criteria=all",
-		"package-ccsid 1208":      "gojtopen://u:p@h/?package-ccsid=1208",
-		"package-ccsid -1":        "gojtopen://u:p@h/?package-ccsid=-1",
-		"cache without extended":  "gojtopen://u:p@h/?package-cache=true",
-		"extended-dyn no name":    "gojtopen://u:p@h/?extended-dynamic=true",
+		"bogus extended-dynamic":  "db2i://u:p@h/?extended-dynamic=maybe",
+		"package name >10 chars":  "db2i://u:p@h/?extended-dynamic=true&package=ELEVENCHARS",
+		"package bad char dot":    "db2i://u:p@h/?extended-dynamic=true&package=A.B",
+		"package bad char slash":  "db2i://u:p@h/?extended-dynamic=true&package=A/B",
+		"package empty":           "db2i://u:p@h/?extended-dynamic=true&package=",
+		"package-library too lng": "db2i://u:p@h/?package-library=ELEVENCHARS",
+		"package-cache bogus":     "db2i://u:p@h/?package-cache=maybe",
+		"package-error bogus":     "db2i://u:p@h/?package-error=fatal",
+		"package-criteria bogus":  "db2i://u:p@h/?package-criteria=all",
+		"package-ccsid 1208":      "db2i://u:p@h/?package-ccsid=1208",
+		"package-ccsid -1":        "db2i://u:p@h/?package-ccsid=-1",
+		"cache without extended":  "db2i://u:p@h/?package-cache=true",
+		"extended-dyn no name":    "db2i://u:p@h/?extended-dynamic=true",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -747,7 +747,7 @@ func hasExtendedDynamic(opts []hostserver.SelectOption) bool {
 // deferral, not just "invalid". Future contributors might widen the
 // accepted set; the test pins the message until that lands.
 func TestParseDSN_PackageCCSIDRejectMentionsM11(t *testing.T) {
-	_, err := parseDSN("gojtopen://u:p@h/?package-ccsid=1208")
+	_, err := parseDSN("db2i://u:p@h/?package-ccsid=1208")
 	if err == nil {
 		t.Fatal("expected error for package-ccsid=1208")
 	}

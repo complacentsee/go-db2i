@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // Stmt holds the SQL string for later Exec/Query. We don't currently
@@ -196,7 +196,7 @@ func namedToValues(args []driver.NamedValue) []driver.Value {
 // unchanged as *Db2Error.
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if isSelect(s.query) {
-		return nil, fmt.Errorf("gojtopen: Exec called with SELECT; use Query")
+		return nil, fmt.Errorf("db2i: Exec called with SELECT; use Query")
 	}
 	start := time.Now()
 	logger := s.conn.log
@@ -254,10 +254,10 @@ func (s *Stmt) logExec(logger *slog.Logger, op string, paramCount int, start tim
 	}
 	if err != nil {
 		attrs = append(attrs, slog.String("err", err.Error()))
-		logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: exec failed", attrs...)
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: exec failed", attrs...)
 		return
 	}
-	logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: exec", attrs...)
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: exec", attrs...)
 }
 
 // Query runs a SELECT (or VALUES / WITH / CALL). With no args it
@@ -274,7 +274,7 @@ func (s *Stmt) logExec(logger *slog.Logger, op string, paramCount int, start tim
 // (M9-3 -- pending).
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if !isSelect(s.query) && !isCall(s.query) {
-		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT/CALL; use Exec")
+		return nil, fmt.Errorf("db2i: Query called with non-SELECT/CALL; use Exec")
 	}
 	hasParams := len(args) > 0
 	selectOpts := s.conn.selectOptionsFor(s.query, hasParams)
@@ -316,10 +316,10 @@ func (s *Stmt) logQuery(op string, paramCount int, start time.Time, err error) {
 	}
 	if err != nil {
 		attrs = append(attrs, slog.String("err", err.Error()))
-		logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: query failed", attrs...)
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: query failed", attrs...)
 		return
 	}
-	logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: query", attrs...)
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: query", attrs...)
 }
 
 // bindArgsToPreparedParams maps each driver.Value to a typed
@@ -386,7 +386,7 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 		// server ignores the bind value for that direction.
 		if out, ok := a.(stdsql.Out); ok {
 			if out.Dest == nil {
-				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: sql.Out.Dest must not be nil", i)
+				return nil, nil, nil, fmt.Errorf("db2i: param %d: sql.Out.Dest must not be nil", i)
 			}
 			// Heap-allocate so the write-back path has a stable
 			// pointer (the loop variable `out` goes out of scope
@@ -403,7 +403,7 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			}
 			placeholderShape, placeholderValue, err := outBindShape(&out, stringCCSID, direction)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
+				return nil, nil, nil, fmt.Errorf("db2i: param %d: %w", i, err)
 			}
 			shapes[i] = placeholderShape
 			values[i] = placeholderValue
@@ -456,7 +456,7 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			// the override runs.
 			rv, err := resolveLOBValue(v)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("gojtopen: param %d: %w", i, err)
+				return nil, nil, nil, fmt.Errorf("db2i: param %d: %w", i, err)
 			}
 			shapes[i] = hostserver.PreparedParam{
 				SQLType:     961, // BLOB locator NN; bindLOBParameters fixes up SQLType + CCSID
@@ -493,7 +493,7 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			shapes[i] = hostserver.PreparedParam{SQLType: 497, FieldLength: 4}
 			values[i] = nil
 		default:
-			return nil, nil, nil, fmt.Errorf("gojtopen: param %d: unsupported Go type %T (driver.Value union: int64/float64/bool/[]byte/string/time.Time/nil)", i, a)
+			return nil, nil, nil, fmt.Errorf("db2i: param %d: unsupported Go type %T (driver.Value union: int64/float64/bool/[]byte/string/time.Time/nil)", i, a)
 		}
 	}
 	return shapes, values, outDests, nil
@@ -625,7 +625,7 @@ func int32Of(v reflect.Value) int32 {
 //	*float32 / *float64          <- float32 / float64
 //	*bool                        <- non-zero int32 / bool
 //
-// Mismatches surface as gojtopen errors with the param index so the
+// Mismatches surface as db2i errors with the param index so the
 // caller knows which slot misaligned.
 func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
 	if outDests == nil {
@@ -636,7 +636,7 @@ func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
 			continue
 		}
 		if i >= len(outValues) {
-			return fmt.Errorf("gojtopen: OUT param %d: EXECUTE reply had no value (got %d slots)", i, len(outValues))
+			return fmt.Errorf("db2i: OUT param %d: EXECUTE reply had no value (got %d slots)", i, len(outValues))
 		}
 		v := outValues[i]
 		// Nil from the server means a SQL NULL came back for the
@@ -649,7 +649,7 @@ func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
 			continue
 		}
 		if err := assignOutParam(destVal, v); err != nil {
-			return fmt.Errorf("gojtopen: OUT param %d: %w", i, err)
+			return fmt.Errorf("db2i: OUT param %d: %w", i, err)
 		}
 	}
 	return nil
@@ -744,7 +744,7 @@ func isSelect(sql string) bool {
 // read-only verbs in Query, and by NOT rejecting it in Exec.
 //
 // JDBC escape syntax {call proc(...)} is deferred to M10+ -- JT400
-// strips the braces in JDSQLToken before PREPARE, but goJTOpen
+// strips the braces in JDSQLToken before PREPARE, but go-db2i
 // expects callers to pass the literal CALL statement.
 func isCall(sql string) bool {
 	for i, r := range sql {

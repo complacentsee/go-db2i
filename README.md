@@ -1,11 +1,11 @@
-# goJTOpen
+# go-db2i
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
 sidecar, no IBM client packages — just a Go binary that talks to the
 as-database (8471) and as-signon (8476) services on any IBM i.
 
-> **Scope.** goJTOpen aims to be a drop-in replacement for the
+> **Scope.** go-db2i aims to be a drop-in replacement for the
 > **JT400 JDBC driver** — the `com.ibm.as400.access.AS400JDBCDriver`
 > half of [IBM Toolbox for Java (JTOpen)](https://github.com/IBM/JTOpen) —
 > not the entire JTOpen toolbox. The dozens of non-JDBC services
@@ -16,16 +16,16 @@ as-database (8471) and as-signon (8476) services on any IBM i.
 > JDBC — `db.Query` / `db.Exec` / `tx.Begin` / `CallableStatement` —
 > this driver replaces the JT400 jar one-for-one. If you need
 > `CommandCall.run("WRKACTJOB")` or `IFSFile`, use the JTOpen jar
-> via a JVM sidecar (or fork goJTOpen to add the service you need;
+> via a JVM sidecar (or fork go-db2i to add the service you need;
 > the host-server datastream format is the same).
 
 ```go
 import (
     "database/sql"
-    _ "github.com/complacentsee/goJTOpen/driver"
+    _ "github.com/complacentsee/go-db2i/driver"
 )
 
-db, err := sql.Open("gojtopen", "gojtopen://USER:PWD@host.example.com:8471/?library=MYLIB")
+db, err := sql.Open("db2i", "db2i://USER:PWD@host.example.com:8471/?library=MYLIB")
 ```
 
 ## Status
@@ -99,7 +99,7 @@ Out of scope (use the JTOpen Java jar for these):
 ## Install
 
 ```bash
-go get github.com/complacentsee/goJTOpen
+go get github.com/complacentsee/go-db2i
 ```
 
 Requires **Go 1.23+** (the driver uses `context.AfterFunc` from
@@ -108,7 +108,7 @@ Requires **Go 1.23+** (the driver uses `context.AfterFunc` from
 ## DSN
 
 ```
-gojtopen://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
+db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 ```
 
 | Key                          | Default | Meaning |
@@ -172,7 +172,7 @@ SQLSTATE and IBM message-id metadata. Use `errors.As` plus the
 predicate methods to drive retry / surfacing logic:
 
 ```go
-import "github.com/complacentsee/goJTOpen/hostserver"
+import "github.com/complacentsee/go-db2i/hostserver"
 
 _, err := db.Exec(`INSERT INTO mylib.things (id) VALUES (?)`, 42)
 if err != nil {
@@ -220,7 +220,7 @@ The IBM-supplied options for connecting Go programs to IBM i Db2 are:
 3. **Java + JTOpen sidecar** — works but adds a JVM and a
    process boundary to a Go service.
 
-goJTOpen takes the **same protocol as JTOpen's JDBC driver** (which
+go-db2i takes the **same protocol as JTOpen's JDBC driver** (which
 uses the host-server datastream over 8471 / 9471) and reimplements
 the JDBC half natively in Go. The result is one statically-linked
 binary that runs anywhere Go runs, with the same JDBC behaviour the
@@ -238,7 +238,7 @@ specifically the
 `com.ibm.as400.access.AS400JDBC*` JDBC driver classes and the
 `DBBaseRequestDS` / `DBReplyRequestedDS` host-server-datastream
 encoders/decoders that JT400 hands to its `AS400` connection
-object. goJTOpen is a clean-room reimplementation: no JTOpen
+object. go-db2i is a clean-room reimplementation: no JTOpen
 source is included in this repository or copied at build time.
 The fixture harness (`testdata/jtopen-fixtures/`) pulls JTOpen
 from Maven Central at trace-capture time, but the recorded

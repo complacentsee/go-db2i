@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // NDB (Native Database) request IDs that share the as-database TCP

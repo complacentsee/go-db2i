@@ -192,7 +192,7 @@ func unwrapCompressedReply(payload []byte) ([]byte, error) {
 		// hostile) wire claiming a multi-GiB output size. 64 MiB
 		// is two orders of magnitude above LOB_BLOCK_SIZE (1 MiB)
 		// and well above any real-world host-server reply
-		// goJTOpen has captured. JT400 lets the JVM raise
+		// go-db2i has captured. JT400 lets the JVM raise
 		// OutOfMemoryError; Go's make() would panic the process.
 		maxDecompressedReplyLen = 64 * 1024 * 1024
 	)
@@ -227,7 +227,7 @@ func unwrapCompressedReply(payload []byte) ([]byte, error) {
 // the result of a 0x1F80 SET_SQL_ATTRIBUTES request. Field offsets
 // mirror JTOpen's DBReplyServerAttributes (which indexes off the
 // CP data start, i.e. after the 2 reserved bytes that follow
-// LL/CP). We only surface fields that goJTOpen actually consumes;
+// LL/CP). We only surface fields that go-db2i actually consumes;
 // the rest land if/when needed.
 //
 // EBCDIC strings come back as raw bytes -- caller decodes through

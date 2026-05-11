@@ -17,8 +17,8 @@ import (
 //
 // This test is the load-bearing regression net for the
 // "byte-equal-to-JT400" interop rule (see memory
-// project_gojtopen_m10_jt400_interop.md). If a future change to the
-// suffix formula breaks this, a Go client running goJTOpen and a Java
+// project_db2i_m10_jt400_interop.md). If a future change to the
+// suffix formula breaks this, a Go client running go-db2i and a Java
 // client running JT400 against the same LPAR would land on different
 // server-side *PGM objects.
 func TestSuffixFromOptions_FixtureMatch(t *testing.T) {

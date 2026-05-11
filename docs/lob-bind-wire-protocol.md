@@ -319,7 +319,7 @@ RPB; there is no explicit FREE_LOB on the bind side.
   refreshed each iteration. This is the missing piece that enables
   N independent rows on a single PREPARE / one RPB slot.
 
-  goJTOpen's existing per-`Exec` round trip is therefore wire-
+  go-db2i's existing per-`Exec` round trip is therefore wire-
   equivalent to JT400's `executeBatch` for LOB-column INSERTs —
   there is no special multi-row CP `0x381F` path to mirror.
   `docs/lob-known-gaps.md` §2 closes with this finding.

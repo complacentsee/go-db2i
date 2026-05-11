@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/complacentsee/goJTOpen/internal/wirelog"
+	"github.com/complacentsee/go-db2i/internal/wirelog"
 )
 
 // Annotated names for known database-server ReqRepIDs / function IDs.

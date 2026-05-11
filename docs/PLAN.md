@@ -1,4 +1,4 @@
-# goJTOpen — implementation roadmap
+# go-db2i — implementation roadmap
 
 This document is the post-M1 working plan for the pure-Go IBM i driver.
 It supersedes the original feasibility plan (which considered a
@@ -31,8 +31,8 @@ the items that were pushed past it; nothing is closed silently.
 ## Quick-start on the remote machine
 
 ```sh
-git clone https://github.com/complacentsee/goJTOpen.git
-cd goJTOpen
+git clone https://github.com/complacentsee/go-db2i.git
+cd go-db2i
 
 # Build everything; run unit tests offline (no IBM i needed).
 go build ./...
@@ -52,8 +52,8 @@ git add fixtures/ && git commit -m 'fixtures: re-capture' && git push
 ## Repo layout (current + planned)
 
 ```
-goJTOpen/
-  go.mod                                # github.com/complacentsee/goJTOpen
+go-db2i/
+  go.mod                                # github.com/complacentsee/go-db2i
   README.md
   docs/
     PLAN.md                             # this file
@@ -168,7 +168,7 @@ connections and prints info from both.
   `STRHOSTSVR SSL(*YES)` switch on V7R6. DSN scaffolding
   (`tls=true`, `tls-insecure-skip-verify`, `tls-server-name`,
   port flip) landed in commit `1e8ad69`; `TestTLSConnectivity` in
-  `test/conformance/` (gated on `GOJTOPEN_TLS_TARGET`) pins the
+  `test/conformance/` (gated on `DB2I_TLS_TARGET`) pins the
   full sign-on → start-database → multi-row FETCH flow plus a
   byte-diff against the plaintext result.
 
@@ -420,7 +420,7 @@ on `DBAttributesOptions` covers `*NONE` / `*CS` / `*ALL` / `*RR`
 - Implement `database/sql/driver`: `Driver`, `Connector`, `Conn`,
   `Stmt`, `Rows`, `Tx`, plus the `Context` variants.
 - `OpenConnector` with DSN parsing. Mirror JTOpen URL syntax where
-  reasonable: `goJTOpen://user:pwd@host:port/?library=AFTRAEGE1&naming=sql`.
+  reasonable: `go-db2i://user:pwd@host:port/?library=AFTRAEGE1&naming=sql`.
 - Run `bradfitz/go-sql-test` (or the `go-sql-driver/mysql` adapted
   test harness) end-to-end.
 
@@ -429,7 +429,7 @@ package exposes the standard `database/sql` surface and wraps our
 hostserver protocol; live-validated end-to-end against IBM Cloud
 IBM i 7.6 (V7R6M0): `sql.Open` + `db.Query` + `Rows.ColumnTypes`
 + `db.Begin` / `tx.Commit` / `tx.Rollback` all round-trip cleanly.
-DSN syntax: `gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso&isolation=cs`.
+DSN syntax: `db2i://USER:PWD@host:8471/?library=MYLIB&date=iso&isolation=cs`.
 
 **Parameter binding ✅ wire-validated.** `Stmt.Query` dispatches to
 `hostserver.SelectPreparedSQL` when args are present, with a typed
@@ -541,7 +541,7 @@ fresh connection.
   TestManyQueryRow (1000 prepared QueryRow round-trips),
   TestTxQuery, TestPreparedStmt (10 goroutines × 10 iterations
   of shared prepared SELECT + INSERT). Build-tag-gated under
-  `//go:build conformance`; opt-in via `GOJTOPEN_DSN`. Surfaced
+  `//go:build conformance`; opt-in via `DB2I_DSN`. Surfaced
   three real bugs during the original run (empty 0x380E CP,
   open-cursor cleanup ordering, RPB DELETE on error path) which
   shipped fixed in the same commit.
@@ -562,12 +562,12 @@ citations.
     fixed for V7R5+ (column-index off-by-one, SQL-818) on
     2026-05-09.
   - **LOB SELECT (streaming)** — landed 2026-05-09 via the DSN
-    option `?lob=stream` and `*gojtopen.LOBReader`. Wire-validated
+    option `?lob=stream` and `*db2i.LOBReader`. Wire-validated
     on PUB400 V7R5M0 (200-byte BLOB chunked, 700-char CCSID-273
     CLOB streamed and EBCDIC-decoded).
   - **LOB bind** — INSERT / UPDATE of large LOBs via `?`
     placeholders landed 2026-05-10. `[]byte`, `string`, and the
-    new `*gojtopen.LOBValue` type all route through the JT400
+    new `*db2i.LOBValue` type all route through the JT400
     `WRITE_LOB_DATA` (function `0x1817`) flow with server-allocated
     locator handles read out of `PREPARE_DESCRIBE` reply CP `0x3813`.
     Wire-validated end-to-end on PUB400 V7R5M0: 8 KiB BLOB
@@ -631,11 +631,11 @@ Track A (foundations):
   + `Config.LogSQL bool` API surface. Nil Logger silences all
   driver-side logging via an internal discard-handler fallback so
   call sites never have to nil-check. Per-Conn child logger carries
-  `driver=gojtopen`, `dsn_host=<host>`, `server_vrm=<vrm>` attrs.
+  `driver=db2i`, `dsn_host=<host>`, `server_vrm=<vrm>` attrs.
   Levels: INFO on connect/close, DEBUG on each Stmt.Exec /
   Stmt.Query + RETRIEVE_LOB_DATA chunk, WARN on ErrBadConn
   classification, ERROR on non-fatal statement failures. New
-  `gojtopen.NewConnector(cfg *Config) (*Connector, error)` so
+  `db2i.NewConnector(cfg *Config) (*Connector, error)` so
   callers can programmatically set Logger + LogSQL (the DSN can't
   express either). `cmd/smoketest -log-debug` flag dumps the level-
   filtered text-handler stream to stderr; live-validated against
@@ -662,9 +662,9 @@ Track A (foundations):
   `docs/migrating-from-jt400.md` enumerates every JTOpen JDBC URL
   property (~70 distinct keys covered, cross-referenced against
   JT400's [JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
-  enumeration). For each, the doc shows the goJTOpen DSN equivalent
+  enumeration). For each, the doc shows the go-db2i DSN equivalent
   or marks it "deferred" / "out of scope" with reasoning. Includes
-  a side-by-side migration recipe (jt400 URL -> gojtopen DSN +
+  a side-by-side migration recipe (jt400 URL -> go-db2i DSN +
   programmatic Config code) and gotchas (naming default, extended
   dynamic, socket timeout, lob threshold).
 - **M8-6 Performance tuning notes** ✅ 2026-05-11 —
@@ -693,7 +693,7 @@ database/sql idioms. `db.Exec("CALL p(?, ?)", in, sql.Out{Dest: &out})`
 covers IN / OUT / INOUT; `rows.NextResultSet()` covers multi-
 result-set procs. The full plan (wire facts cited from JT400
 source, ORS bits, four sub-items M9-0 through M9-3, deferred-to-
-M10+ items) lives in the goJTOpen M9 planning document under
+M10+ items) lives in the go-db2i M9 planning document under
 the user's plans/ directory.
 
 - **M9-0 Foundation** ✅ 2026-05-11 — Five fixtures captured against
@@ -785,7 +785,7 @@ Same working rhythm as M9. Each item is one commit directly to
 `origin/main`, one CHANGELOG entry, live-validated against IBM
 Cloud V7R6M0. Plan doc + cross-cutting interop rule live at
 `plans/m10-package-caching.md` and
-`memory/project_gojtopen_m10_jt400_interop.md`. Highlights:
+`memory/project_db2i_m10_jt400_interop.md`. Highlights:
 
 - **M10-0** ✅ — Three fixtures (`prepared_package_first_use`,
   `prepared_package_cache_hit`, `prepared_package_cache_download`)
@@ -931,10 +931,10 @@ diffs row-by-row. Use it nightly during M4-M7.
 After M6, an external user should be able to:
 
 ```go
-import _ "github.com/complacentsee/goJTOpen/driver"
+import _ "github.com/complacentsee/go-db2i/driver"
 
-db, _ := sql.Open("gojtopen",
-    "gojtopen://user:pwd@host:8471/?library=AFTRAEGE1")
+db, _ := sql.Open("db2i",
+    "db2i://user:pwd@host:8471/?library=AFTRAEGE1")
 rows, _ := db.QueryContext(ctx,
     "SELECT ID, NAME, AMT FROM ORDERS WHERE STATUS = ?", "OPEN")
 for rows.Next() { ... }

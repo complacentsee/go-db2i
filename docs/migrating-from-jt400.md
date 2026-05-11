@@ -1,9 +1,9 @@
-# Migrating from JTOpen (jt400.jar) to goJTOpen
+# Migrating from JTOpen (jt400.jar) to go-db2i
 
 This guide maps every [JTOpen JDBC URL property](https://www.ibm.com/docs/en/i/7.5?topic=jdbc-properties)
-to its goJTOpen DSN equivalent (or to "not supported, here's why"). It
+to its go-db2i DSN equivalent (or to "not supported, here's why"). It
 is honest about coverage gaps: JT400 ships ~109 connection properties;
-goJTOpen exposes roughly a dozen. The rest are either out of scope
+go-db2i exposes roughly a dozen. The rest are either out of scope
 (client-side reroute, BiDi text reordering, JDBC SQL escape extensions)
 or simply haven't been wired through yet.
 
@@ -15,13 +15,13 @@ JT400 (JDBC URL):
 jdbc:as400://HOST/SCHEMA;prompt=false;naming=sql;date format=iso;translate binary=true
 ```
 
-goJTOpen (DSN):
+go-db2i (DSN):
 
 ```
-gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
+db2i://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
 ```
 
-- Scheme is `gojtopen` (registered via `sql.Register("gojtopen", ...)` in `driver/driver.go`).
+- Scheme is `db2i` (registered via `sql.Register("db2i", ...)` in `driver/driver.go`).
 - User + password sit in the URL userinfo, not in `?user=` / `?password=` keys.
 - Default schema goes in `?library=`, **not** the URL path component.
 - Default ports: `8471` (as-database) / `8476` (as-signon); when `?tls=true` they flip to `9471` / `9476`.
@@ -31,27 +31,27 @@ See [`docs/configuration.md`](./configuration.md) for the complete DSN reference
 ## Property mapping
 
 Columns: **JT400 key** (URL-style spelling JT400 accepts) /
-**goJTOpen key** / **notes**. "—" means goJTOpen has no equivalent;
+**go-db2i key** / **notes**. "—" means go-db2i has no equivalent;
 the *Notes* column says why.
 
 ### Authentication & host
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
-| `user` | URL userinfo | `gojtopen://USER:...@host/` |
-| `password` | URL userinfo | `gojtopen://USER:PWD@host/` |
+| `user` | URL userinfo | `db2i://USER:...@host/` |
+| `password` | URL userinfo | `db2i://USER:PWD@host/` |
 | `secure` / `tls` | `tls` | `?tls=true` |
 | `key ring name` / `key ring password` | — | We use the system trust store (Go's `crypto/x509.SystemCertPool`). Self-signed IBM i certs: enable `?tls-insecure-skip-verify=true` for development, or install the CA into the OS trust store for production. |
 | `secure current user` | — | Plain password auth only; no Kerberos / GSSAPI yet. |
 | `additional authentication factor` | — | Multi-factor at signon is not implemented. |
 | `authentication verification id` | — | Verification ID isn't sent. |
-| `database name` | `library` (closest semantic match) | JT400's "database name" addresses an independent ASP via RDB directory entry; goJTOpen connects to the system ASP by default. To use an iASP, run `SETASPGRP` from the server-side trigger / job initialisation programs. |
-| `portnumber` | URL `:PORT` | `gojtopen://u:p@h:8471/`. SIGNON port lives at `?signon-port=N`. |
+| `database name` | `library` (closest semantic match) | JT400's "database name" addresses an independent ASP via RDB directory entry; go-db2i connects to the system ASP by default. To use an iASP, run `SETASPGRP` from the server-side trigger / job initialisation programs. |
+| `portnumber` | URL `:PORT` | `db2i://u:p@h:8471/`. SIGNON port lives at `?signon-port=N`. |
 | `proxy server` / `secondary URL` | — | No JDBC-toolbox proxy support. |
 
 ### TLS
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `secure=true` | `tls=true` | Same effect; default ports flip. |
 | `keyStoreLocation` (JVM `-D`) | — | Use OS trust store or `tls-insecure-skip-verify=true`. |
@@ -60,20 +60,20 @@ the *Notes* column says why.
 
 ### Session attributes
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `date format` | `date` | Values: `job` / `iso` / `usa` / `eur` / `jis` / `mdy` / `dmy` / `ymd`. Default `job`. |
 | `time format` | — | Driver currently emits `*JOB` for time format. Pin via session-init SET TIME FORMAT until wired. |
 | `date separator`, `time separator`, `decimal separator` | — | We send `*BLANK` for separators (server picks based on date/time format). |
-| `naming` | — (always `sql`) | goJTOpen always sends `naming=sql` (CP `0x3812 = 0`); JT400 defaults to `system` which uses `MYLIB/TABLE`-style qualification. Cross-job CL that mixes both styles must rewrite to SQL-style (`MYLIB.TABLE`) before being run via this driver. |
+| `naming` | — (always `sql`) | go-db2i always sends `naming=sql` (CP `0x3812 = 0`); JT400 defaults to `system` which uses `MYLIB/TABLE`-style qualification. Cross-job CL that mixes both styles must rewrite to SQL-style (`MYLIB.TABLE`) before being run via this driver. |
 | `transaction isolation` / `commitment control` | `isolation` | Values: `none` (default, matches IBM i Db2 autocommit-permissive baseline) / `cs` / `all` / `rr` / `rs`. `db.Begin()` flips to `cs` transparently. |
-| `libraries` | `library` (one only) | JT400 accepts a list (`/LIBA,LIBB,LIBC` or `libraries=LIBA LIBB LIBC`). goJTOpen takes one default library; add others via SQL-side `CALL QSYS2.QCMDEXC('ADDLIBLE LIBB')` after connect, or trigger them in the user profile's INLPGM. |
+| `libraries` | `library` (one only) | JT400 accepts a list (`/LIBA,LIBB,LIBC` or `libraries=LIBA LIBB LIBC`). go-db2i takes one default library; add others via SQL-side `CALL QSYS2.QCMDEXC('ADDLIBLE LIBB')` after connect, or trigger them in the user profile's INLPGM. |
 | `qaqqinilib` | — | Custom optimizer attribute library not plumbed. |
 | `prompt` | — (always off) | We never prompt; missing credentials surface as `parseDSN` errors. |
 
 ### CCSID & translation
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `ccsid` | `ccsid` | Same semantics: overrides the application-data CCSID (`SET_SQL_ATTRIBUTES` ClientCCSID). 0 = auto (1208 / UTF-8 on V7R3+, falls back to 37 / US English EBCDIC on older). |
 | `translate binary` | — | We always treat CCSID 65535 columns as raw `[]byte`; JT400's "interpret as character data" path is intentionally not mirrored. |
@@ -85,10 +85,10 @@ the *Notes* column says why.
 
 ### LOB handling
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `lob threshold` | `lob-threshold` | Same wire knob (CP `0x3822`), same default (32768). Bytes below this size travel inline in row data; bytes above it go through server-allocated locators + `RETRIEVE_LOB_DATA`. |
-| `large object handling` | `lob=stream` \| `lob=materialise` | JT400 always materialises; goJTOpen defaults to materialise but `lob=stream` returns `*gojtopen.LOBReader` so callers can pull multi-GB LOBs without exhausting the heap. |
+| `large object handling` | `lob=stream` \| `lob=materialise` | JT400 always materialises; go-db2i defaults to materialise but `lob=stream` returns `*db2i.LOBReader` so callers can pull multi-GB LOBs without exhausting the heap. |
 | `hold locators` | — | We don't expose `HOLD LOCATOR` semantics; cursors close their locators when the producing `Rows` is closed. |
 | `xa locks held` | — | XA / DTC is not implemented. |
 | `metadata source` | — | Always uses ROI flag values (the default for V7R5+). |
@@ -98,12 +98,12 @@ the *Notes* column says why.
 | `package cache` | `package-cache` | M10. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses PREPARE on a client-side cache hit. |
 | `package error` | `package-error` | M10. `warning` (default) / `exception` / `none` — controls how the driver reacts to package-related server errors. |
 | `package criteria` | `package-criteria` | M10. `default` (default, parameterised statements only) / `select` (broader: also caches SELECT statements without markers). Mirrors JT400's [JDSQLStatement.java filter](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java). |
-| `package add` | `package-add` (accept-ignore) | M10. JT400's only documented value is `true`; goJTOpen always adds when `extended-dynamic=true`, so `package-add=true` is accepted as a no-op for DSN-migration friendliness and `package-add=false` is rejected with a clear message. |
-| `package clear` | `package-clear` (accept-warn-log) | M10. Server-managed in goJTOpen. Accepted for DSN-migration friendliness; the driver slog.Warns on connect when the key is set. |
+| `package add` | `package-add` (accept-ignore) | M10. JT400's only documented value is `true`; go-db2i always adds when `extended-dynamic=true`, so `package-add=true` is accepted as a no-op for DSN-migration friendliness and `package-add=false` is rejected with a clear message. |
+| `package clear` | `package-clear` (accept-warn-log) | M10. Server-managed in go-db2i. Accepted for DSN-migration friendliness; the driver slog.Warns on connect when the key is set. |
 
 ### Performance / blocking
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `block size` | — | Block-fetch buffer fixed at 32 KB (`hostserver.Cursor.fetchMore`). |
 | `block criteria` | — | The cursor uses JT400's "fetch/close" path (M5+); no per-query tuning. |
@@ -115,14 +115,14 @@ the *Notes* column says why.
 | `query optimize goal` | — | Falls back to the job default (`*ALLIO` on most V7R5+ systems). |
 | `query storage limit` | — | Not plumbed. |
 | `query timeout mechanism` | — | Use `context.WithTimeout` per call; cancel propagates via `Conn.SetDeadline`. |
-| `socket timeout` | — | JT400 ties to per-read timeouts; goJTOpen uses `ctx` deadline plus `Conn.SetDeadline` per-op so cancellation works the standard Go way. |
+| `socket timeout` | — | JT400 ties to per-read timeouts; go-db2i uses `ctx` deadline plus `Conn.SetDeadline` per-op so cancellation works the standard Go way. |
 | `login timeout` | — (always 30 s) | Dial timeout default. Override via passing a deadline-carrying `ctx` to `sql.OpenDB().Conn(ctx)`. |
 | `tcp no delay` / `keep alive` / `stay alive` / `receive buffer size` / `send buffer size` | — | Use Go's net.Dialer customisation if needed; not plumbed through the DSN. |
 | `thread used` / `virtual threads` | — | Go runtime decides; no toolbox-side thread pool. |
 
 ### Reroute / failover
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `enable client affinities list` | — | Use Go's `sql.DB` pool sizing instead. |
 | `enable seamless failover` | — | Same. |
@@ -132,7 +132,7 @@ the *Notes* column says why.
 
 ### Diagnostics
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `trace` / `trace server` / `trace toolbox` | `Config.Logger` + `Config.LogSQL` | M8-3 slog integration. Pass any `*slog.Logger`; the driver emits INFO at connect/close, DEBUG per Exec / Query / LOB chunk, WARN on ErrBadConn, ERROR on statement failures. SQL text gated on `LogSQL`. |
 | — | `Config.Tracer` | M8-4 OpenTelemetry spans. Set `Config.Tracer = tp.Tracer("…")` for SpanKindClient spans following the OTel database semantic conventions. |
@@ -140,7 +140,7 @@ the *Notes* column says why.
 
 ### Behaviour overrides
 
-| JT400 | goJTOpen | Notes |
+| JT400 | go-db2i | Notes |
 |---|---|---|
 | `auto commit` | — (always on) | The driver starts every connection in autocommit mode (matches IBM i Db2 default). `db.Begin()` flips it off for the duration of the transaction. To start with autocommit off, call `hostserver.AutocommitOff` after `sql.OpenDB` (advanced). |
 | `cursor hold` | — | We don't set WITH HOLD on cursors; they close when the row-set drains. |
@@ -203,35 +203,35 @@ jdbc:as400://prod.example.com;
 translates to:
 
 ```go
-dsn := "gojtopen://APPUSER:secret@prod.example.com/" +
+dsn := "db2i://APPUSER:secret@prod.example.com/" +
     "?library=APPLIB" +
     "&date=iso" +
     "&lob-threshold=8192"
-db, _ := sql.Open("gojtopen", dsn)
+db, _ := sql.Open("db2i", dsn)
 ```
 
 For the `trace=true` JT400 flag, attach a slog logger via the
 programmatic `Config` path:
 
 ```go
-cfg := gojtopen.DefaultConfig()
+cfg := db2i.DefaultConfig()
 cfg.User, cfg.Password, cfg.Host = "APPUSER", "secret", "prod.example.com"
 cfg.Library = "APPLIB"
 cfg.DateFormat = hostserver.DateFormatISO
 cfg.LOBThreshold = 8192
 cfg.Logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 cfg.LogSQL = false // off by default to keep PII out of logs
-connector, _ := gojtopen.NewConnector(&cfg)
+connector, _ := db2i.NewConnector(&cfg)
 db := sql.OpenDB(connector)
 ```
 
 For `translate binary=true`: the equivalent behaviour is built in.
-goJTOpen always returns CCSID-65535 / FOR BIT DATA columns as `[]byte`;
+go-db2i always returns CCSID-65535 / FOR BIT DATA columns as `[]byte`;
 no flag needed.
 
 ## Cross-references
 
 - [JT400 JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java) — the authoritative list of all 109 JT400 properties.
-- [`docs/configuration.md`](./configuration.md) — the full goJTOpen DSN reference.
+- [`docs/configuration.md`](./configuration.md) — the full go-db2i DSN reference.
 - [`docs/performance.md`](./performance.md) — tuning notes for connection-pool sizing, LOB streaming, CCSID choice.
 - [`driver/driver.go`](../driver/driver.go) — `Config` struct + `parseDSN` are the source of truth for what the driver accepts.

@@ -26,7 +26,7 @@ import (
 func unvalidatedAlgorithmWarning(algoTag string) {
 	warnOnce(algoTag, func() {
 		fmt.Fprintf(os.Stderr,
-			"goJTOpen WARNING: password algorithm %q is spec-validated against JT400 source but has NOT been wire-validated against a live IBM i. PUB400 (our only free test target) is QPWDLVL=3 and won't issue %s challenges. If sign-on fails or the server returns SQL errClass 8, please report it -- the implementation may have a salt-construction or byte-order bug that only a real %s server can flush out.\n",
+			"go-db2i WARNING: password algorithm %q is spec-validated against JT400 source but has NOT been wire-validated against a live IBM i. PUB400 (our only free test target) is QPWDLVL=3 and won't issue %s challenges. If sign-on fails or the server returns SQL errClass 8, please report it -- the implementation may have a salt-construction or byte-order bug that only a real %s server can flush out.\n",
 			algoTag, algoTag, algoTag)
 	})
 }

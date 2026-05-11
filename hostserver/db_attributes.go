@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // DBAttributesOptions is the subset of DBSQLAttributesDS knobs that
-// goJTOpen sets on every database connection. The defaults match
+// go-db2i sets on every database connection. The defaults match
 // what JTOpen sends when the JDBC driver is opened with no extra
 // URL properties:
 //
@@ -52,7 +52,7 @@ type DBAttributesOptions struct {
 	// the decoder; or to DateFormatJOB to keep the fixture-
 	// compatible default.
 	//
-	// NOTE: pre-2026-05-08 builds of goJTOpen pumped this byte into
+	// NOTE: pre-2026-05-08 builds of go-db2i pumped this byte into
 	// CP 0x3805, which is actually the TranslateIndicator (per
 	// JTOpen's DBSQLAttributesDS.setTranslateIndicator). DateFormatJOB
 	// happened to coincide with the only valid TranslateIndicator
@@ -75,7 +75,7 @@ type DBAttributesOptions struct {
 	// JDProperties.LOB_THRESHOLD ("lob threshold" JDBC URL knob).
 	//
 	// 0 = use the wire-default 32768 (the historical hard-coded
-	// value goJTOpen has always sent). Set to a smaller value to
+	// value go-db2i has always sent). Set to a smaller value to
 	// keep large CLOBs out of the row-data buffer; set to a larger
 	// value (up to 15728640, the server's documented cap) to inline
 	// bigger LOBs and skip the RETRIEVE_LOB_DATA round trip for
@@ -167,7 +167,7 @@ func isolationLevelWireValue(level int16) int16 {
 }
 
 // defaultLOBThreshold is the historical hard-coded LOB-field
-// threshold sent by goJTOpen before LOBThreshold became
+// threshold sent by go-db2i before LOBThreshold became
 // configurable. Matches JT400's "lob threshold" default behaviour
 // for V7R5+ where the property is left unset by the application.
 const defaultLOBThreshold uint32 = 32768

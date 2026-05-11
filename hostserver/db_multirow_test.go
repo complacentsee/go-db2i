@@ -59,7 +59,7 @@ func TestMultiRowFetchAgainstFixture(t *testing.T) {
 		sqlReceiveds[5],
 	)
 	res, err := SelectStaticSQL(conn,
-		"SELECT ID, NAME, AMOUNT FROM AFTRAEGE1.GOJTOPEN_T1 ORDER BY ID",
+		"SELECT ID, NAME, AMOUNT FROM AFTRAEGE1.DB2I_T1 ORDER BY ID",
 		3,
 	)
 	if err != nil {

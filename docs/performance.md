@@ -1,6 +1,6 @@
-# goJTOpen performance tuning
+# go-db2i performance tuning
 
-Practical guidance for getting the most out of goJTOpen against a real
+Practical guidance for getting the most out of go-db2i against a real
 IBM i target. Every number below comes from a reproducible test in
 this repository or from a measured run against the IBM Cloud V7R6M0
 LPAR captured in `AUTH.md`; pointers are inline.
@@ -30,7 +30,7 @@ shared-processor), read-only workload mix:
 warm the pool serially before the workload starts:
 
 ```go
-db, _ := sql.Open("gojtopen", dsn)
+db, _ := sql.Open("db2i", dsn)
 db.SetMaxOpenConns(50)
 db.SetMaxIdleConns(50)            // hold them open
 db.SetConnMaxLifetime(time.Hour)  // recycle hourly
@@ -55,7 +55,7 @@ The default `lob=materialise` mode reads each LOB column into a `[]byte`
 use, and what 90% of callers want. The cost is heap proportional to
 LOB size: a 100 MB BLOB column = 100 MB allocation per row.
 
-`lob=stream` returns a `*gojtopen.LOBReader` (`io.Reader` + `io.Closer`)
+`lob=stream` returns a `*db2i.LOBReader` (`io.Reader` + `io.Closer`)
 instead. The driver pulls 32 KB chunks per `Read` call via
 `RETRIEVE_LOB_DATA`, so steady-state memory is bounded by the buffer
 size regardless of LOB byte count.

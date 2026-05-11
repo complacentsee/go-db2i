@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
 // EXECUTE_IMMEDIATE function ID. Per JT400's
@@ -385,7 +385,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 //
 // JT400's AS400JDBCPreparedStatementImpl.java:722-729 calls
 // `reply.getResultData()` then `parameterRow_.setServerData()` --
-// goJTOpen mirrors this end-to-end via the same parseExtendedResultData
+// go-db2i mirrors this end-to-end via the same parseExtendedResultData
 // path used for SELECT rows.
 func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, error) {
 	cols := make([]SelectColumn, len(shapes))
@@ -431,7 +431,7 @@ func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, error) {
 //	TYPE_SELECT       = 2    -- read-only verbs
 //	TYPE_CALL         = 3    -- procedure invocation
 //
-// goJTOpen historically diverged from JT400 for INSERT/UPDATE/DELETE
+// go-db2i historically diverged from JT400 for INSERT/UPDATE/DELETE
 // (returning 3/4/5 rather than TYPE_OTHER=1), and the server has
 // accepted those values across the M1-M8 live runs, so we leave the
 // pre-existing mapping intact and only add the CALL row which the

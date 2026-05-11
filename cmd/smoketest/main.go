@@ -1,4 +1,4 @@
-// Command smoketest exercises whatever the current goJTOpen milestone
+// Command smoketest exercises whatever the current go-db2i milestone
 // has wired up against a real IBM i. M1 (signon side): connect to
 // the as-signon host server (port 8476), do the exchange-attributes
 // + signon-info handshake, print server VRM / CCSID / sign-on dates.
@@ -29,9 +29,9 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	gojtopen "github.com/complacentsee/goJTOpen/driver"
-	"github.com/complacentsee/goJTOpen/ebcdic"
-	"github.com/complacentsee/goJTOpen/hostserver"
+	db2i "github.com/complacentsee/go-db2i/driver"
+	"github.com/complacentsee/go-db2i/ebcdic"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // runTraceStdout exercises a single round-trip Query through the
@@ -66,7 +66,7 @@ func runTraceStdout() {
 	)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
-	cfg := gojtopen.DefaultConfig()
+	cfg := db2i.DefaultConfig()
 	cfg.User = user
 	cfg.Password = pwd
 	cfg.Host = host
@@ -74,9 +74,9 @@ func runTraceStdout() {
 	fmt.Sscanf(signonPort, "%d", &cfg.SignonPort)
 	cfg.Library = envOr("PUB400_LIB", "QSYS2")
 	cfg.LogSQL = true // include db.statement on the span
-	cfg.Tracer = tp.Tracer("gojtopen-smoketest")
+	cfg.Tracer = tp.Tracer("db2i-smoketest")
 
-	connector, err := gojtopen.NewConnector(&cfg)
+	connector, err := db2i.NewConnector(&cfg)
 	if err != nil {
 		fail("new connector: %v", err)
 	}
@@ -120,7 +120,7 @@ func runLogDebug() {
 		os.Exit(2)
 	}
 
-	cfg := gojtopen.DefaultConfig()
+	cfg := db2i.DefaultConfig()
 	cfg.User = user
 	cfg.Password = pwd
 	cfg.Host = host
@@ -128,7 +128,7 @@ func runLogDebug() {
 	fmt.Sscanf(signonPort, "%d", &cfg.SignonPort)
 	cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	connector, err := gojtopen.NewConnector(&cfg)
+	connector, err := db2i.NewConnector(&cfg)
 	if err != nil {
 		fail("new connector: %v", err)
 	}
@@ -178,7 +178,7 @@ func main() {
 	}
 
 	signonAddr := net.JoinHostPort(host, signonPort)
-	fmt.Fprintf(os.Stderr, "goJTOpen smoketest -> %s as %s\n", signonAddr, user)
+	fmt.Fprintf(os.Stderr, "go-db2i smoketest -> %s as %s\n", signonAddr, user)
 
 	// --- Step 1: as-signon. ---
 	conn := dialOrDie(signonAddr, "as-signon")
@@ -209,7 +209,7 @@ func main() {
 
 	// --- Step 2: as-database. ---
 	dbAddr := net.JoinHostPort(host, dbPort)
-	fmt.Fprintf(os.Stderr, "goJTOpen smoketest -> %s (as-database)\n", dbAddr)
+	fmt.Fprintf(os.Stderr, "go-db2i smoketest -> %s (as-database)\n", dbAddr)
 	dbConn := dialOrDie(dbAddr, "as-database")
 	defer dbConn.Close()
 

@@ -1,4 +1,4 @@
-package io.github.complacentsee.gojtopen.fixtures;
+package io.github.complacentsee.db2i.fixtures;
 
 import java.sql.CallableStatement;
 import java.sql.Connection;
@@ -17,7 +17,7 @@ import java.util.Map;
  *
  * Cases that need only system tables target {@code SYSIBM.SYSDUMMY1} so the
  * fixtures are reproducible across PUB400 accounts. Cases that need a real
- * table create {@code <schema>.GOJTOPEN_T1} in setup and drop it in teardown.
+ * table create {@code <schema>.GODB2I_T1} in setup and drop it in teardown.
  *
  * Add cases here as the Go driver progresses. Re-run the harness against
  * PUB400, commit the new {@code .trace} + {@code .golden.json} pair.
@@ -509,7 +509,7 @@ final class Cases {
 
     private static abstract class WithTable extends Case {
         // 10-char SQL name == 10-char IBM i system name, so we avoid the
-        // suffix-mangling that turned GOJTOPEN_T1 into GOJTO00001 and made
+        // suffix-mangling that turned GODB2I_T1 into GOJTO00001 and made
         // the system commands below fragile.
         private static final String TABLE_SHORT = "GOJT_T1";
 

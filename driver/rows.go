@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/complacentsee/goJTOpen/ebcdic"
-	"github.com/complacentsee/goJTOpen/hostserver"
+	"github.com/complacentsee/go-db2i/ebcdic"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // Rows iterates a SELECT result lazily. Underneath it holds an open
@@ -91,7 +91,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 			}
 			t, terr := parseTemporalISO(col.SQLType, s)
 			if terr != nil {
-				return fmt.Errorf("gojtopen: col %d (%s): %w", i, col.Name, terr)
+				return fmt.Errorf("db2i: col %d (%s): %w", i, col.Name, terr)
 			}
 			dest[i] = t
 		case 960, 961, 964, 965, 968, 969:
@@ -124,7 +124,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 			}
 			out, lerr := r.materialiseLOB(loc, lobColIdx)
 			if lerr != nil {
-				return fmt.Errorf("gojtopen: col %d (%s, lob): %w", i, col.Name, lerr)
+				return fmt.Errorf("db2i: col %d (%s, lob): %w", i, col.Name, lerr)
 			}
 			dest[i] = out
 		default:
