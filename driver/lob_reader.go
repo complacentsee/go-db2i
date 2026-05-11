@@ -1,8 +1,10 @@
 package driver
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
@@ -168,6 +170,15 @@ func (r *LOBReader) Read(p []byte) (int, error) {
 	if err != nil {
 		r.sticky = r.conn.classifyConnErr(err)
 		return 0, r.sticky
+	}
+	if r.conn.log != nil {
+		r.conn.log.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: RETRIEVE_LOB_DATA",
+			slog.Uint64("handle", uint64(r.loc.Handle)),
+			slog.Int("col", r.colIdx),
+			slog.Int64("offset", r.offset),
+			slog.Int64("requested", requestSize),
+			slog.Int("returned", len(data.Bytes)),
+		)
 	}
 
 	// Capture the total length from the first reply that carries it.

@@ -130,6 +130,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -140,8 +142,13 @@ import (
 // Driver registered as "gojtopen" via sql.Register at init time.
 type Driver struct{}
 
+// registeredDriver is the singleton sql.Register handed out under
+// the "gojtopen" name. NewConnector hands this same pointer back so
+// db.Driver() and sql.Open share identity.
+var registeredDriver = &Driver{}
+
 func init() {
-	sql.Register("gojtopen", &Driver{})
+	sql.Register("gojtopen", registeredDriver)
 }
 
 // Open implements driver.Driver. database/sql calls it with the DSN
@@ -173,6 +180,42 @@ type Connector struct {
 	drv *Driver
 }
 
+// NewConnector builds a Connector from a programmatically-assembled
+// Config. Use this when you need to set fields that can't be
+// expressed in a DSN string -- Config.Logger and Config.LogSQL are
+// the main ones today. Pass the returned Connector to sql.OpenDB to
+// get a *sql.DB:
+//
+//	cfg := gojtopen.DefaultConfig()
+//	cfg.User, cfg.Password, cfg.Host = "USR", "PWD", "host.example.com"
+//	cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+//	connector, err := gojtopen.NewConnector(&cfg)
+//	db := sql.OpenDB(connector)
+//
+// Returns an error if cfg lacks the minimum required fields
+// (User, Host, DBPort, SignonPort).
+func NewConnector(cfg *Config) (*Connector, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("gojtopen: NewConnector requires a non-nil Config")
+	}
+	if cfg.User == "" {
+		return nil, fmt.Errorf("gojtopen: NewConnector: Config.User is empty")
+	}
+	if cfg.Host == "" {
+		return nil, fmt.Errorf("gojtopen: NewConnector: Config.Host is empty")
+	}
+	if cfg.DBPort <= 0 || cfg.DBPort > 65535 {
+		return nil, fmt.Errorf("gojtopen: NewConnector: Config.DBPort %d out of range (1..65535)", cfg.DBPort)
+	}
+	if cfg.SignonPort <= 0 || cfg.SignonPort > 65535 {
+		return nil, fmt.Errorf("gojtopen: NewConnector: Config.SignonPort %d out of range (1..65535)", cfg.SignonPort)
+	}
+	return &Connector{cfg: cfg, drv: registeredDriver}, nil
+}
+
+// Driver returns the *Driver that produced this Connector. Used by
+// database/sql for some pool-management decisions. Implements
+// database/sql/driver.Connector.Driver.
 func (c *Connector) Driver() driver.Driver { return c.drv }
 
 // Config is the parsed form of a gojtopen DSN. Public so tests can
@@ -267,6 +310,37 @@ type Config struct {
 	// configured via the DSN "extended-metadata=true" query key.
 	// Default false to preserve the pre-flag wire shape byte-for-byte.
 	ExtendedMetadata bool
+
+	// Logger is the *slog.Logger callers want the driver to emit
+	// diagnostic events through. Nil (the default) silences all
+	// driver-side logging; the driver internally substitutes a
+	// no-op handler so call sites never have to nil-check.
+	//
+	// At connect time the driver derives a child logger that carries
+	// the attrs `driver=gojtopen`, `conn_id=<corr-base>`, and
+	// `dsn_host=<host>`, so every line a single connection emits is
+	// pre-tagged. Levels used:
+	//   DEBUG  Per wire-level operation (PREPARE+EXECUTE,
+	//          continuation FETCH boundary, RETRIEVE_LOB_DATA chunk
+	//          boundary, WRITE_LOB_DATA frame boundary). Costs one
+	//          line per operation -- enable for diagnosis, leave off
+	//          in production.
+	//   INFO   Connect success, Close.
+	//   WARN   Retried-on-ErrBadConn classification.
+	//   ERROR  Fatal classification before the error returns to the
+	//          database/sql caller.
+	//
+	// SQL text is never logged unless LogSQL is also true; parameter
+	// counts are logged, parameter values never are.
+	Logger *slog.Logger
+
+	// LogSQL gates whether the driver attaches the SQL text as an
+	// attribute on Stmt.Exec / Stmt.Query DEBUG lines. Off by default
+	// because SQL text often carries customer identifiers or other
+	// data callers wouldn't want flowing through their log pipeline.
+	// Set true when actively debugging a specific query and pair with
+	// a Logger that filters by level.
+	LogSQL bool
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -289,6 +363,20 @@ func DefaultConfig() Config {
 		DateFormat: hostserver.DateFormatJOB,
 		Isolation:  hostserver.IsolationCommitNone,
 	}
+}
+
+// silentLogger is the no-op logger the driver substitutes when
+// Config.Logger is nil. Built once at init so per-Conn child
+// loggers don't allocate when no caller-supplied logger is set.
+var silentLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+
+// resolveLogger returns the caller-supplied logger or the silent
+// fallback. Always non-nil so call sites can skip the nil check.
+func resolveLogger(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return silentLogger
 }
 
 func parseDSN(dsn string) (*Config, error) {

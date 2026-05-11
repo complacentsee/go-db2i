@@ -17,17 +17,79 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"time"
 
+	gojtopen "github.com/complacentsee/goJTOpen/driver"
 	"github.com/complacentsee/goJTOpen/ebcdic"
 	"github.com/complacentsee/goJTOpen/hostserver"
 )
 
+// runLogDebug exercises a single round-trip Query through the
+// database/sql driver layer with a slog text handler attached.
+// Used by the -log-debug flag to demonstrate the M8-3 logger
+// plumbing without disturbing the rest of the smoketest's
+// host-server-level harness. Reads the same env vars: PUB400_HOST,
+// PUB400_PORT (signon), PUB400_DBPORT, PUB400_USER, PUB400_PWD.
+func runLogDebug() {
+	host := envOr("PUB400_HOST", "pub400.com")
+	signonPort := envOr("PUB400_PORT", "8476")
+	dbPort := envOr("PUB400_DBPORT", "8471")
+	user, ok := requireEnv("PUB400_USER")
+	if !ok {
+		os.Exit(2)
+	}
+	pwd, ok := requireEnv("PUB400_PWD")
+	if !ok {
+		os.Exit(2)
+	}
+
+	cfg := gojtopen.DefaultConfig()
+	cfg.User = user
+	cfg.Password = pwd
+	cfg.Host = host
+	fmt.Sscanf(dbPort, "%d", &cfg.DBPort)
+	fmt.Sscanf(signonPort, "%d", &cfg.SignonPort)
+	cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	connector, err := gojtopen.NewConnector(&cfg)
+	if err != nil {
+		fail("new connector: %v", err)
+	}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+
+	rows, err := db.QueryContext(context.Background(), "SELECT CURRENT_TIMESTAMP, CURRENT_USER FROM SYSIBM.SYSDUMMY1")
+	if err != nil {
+		fail("query: %v", err)
+	}
+	for rows.Next() {
+		var ts time.Time
+		var u string
+		if err := rows.Scan(&ts, &u); err != nil {
+			fail("scan: %v", err)
+		}
+		fmt.Printf("ts=%s user=%s\n", ts.Format(time.RFC3339), u)
+	}
+	if err := rows.Err(); err != nil {
+		fail("rows: %v", err)
+	}
+	rows.Close()
+}
+
 func main() {
+	logDebug := flag.Bool("log-debug", false, "exercise the database/sql driver with slog DEBUG attached to stderr (M8-3 demo); skips the host-server smoketest")
+	flag.Parse()
+	if *logDebug {
+		runLogDebug()
+		return
+	}
 	host := envOr("PUB400_HOST", "pub400.com")
 	signonPort := envOr("PUB400_PORT", "8476")
 	dbPort := envOr("PUB400_DBPORT", "8471")

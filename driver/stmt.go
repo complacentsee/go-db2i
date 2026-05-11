@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -100,8 +101,11 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if isSelect(s.query) {
 		return nil, fmt.Errorf("gojtopen: Exec called with SELECT; use Query")
 	}
+	start := time.Now()
+	logger := s.conn.log
 	if len(args) == 0 {
 		res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
+		s.logExec(logger, "EXECUTE_IMMEDIATE", 0, start, res, err)
 		if err != nil {
 			return nil, s.conn.classifyConnErr(err)
 		}
@@ -112,10 +116,36 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr())
+	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}
 	return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
+}
+
+// logExec emits one DEBUG line per Exec call. SQL text is gated on
+// Config.LogSQL; parameter values are never logged.
+func (s *Stmt) logExec(logger *slog.Logger, op string, paramCount int, start time.Time, res *hostserver.ExecResult, err error) {
+	if logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("op", op),
+		slog.Int("params", paramCount),
+		slog.Duration("elapsed", time.Since(start)),
+	}
+	if res != nil {
+		attrs = append(attrs, slog.Int64("rows_affected", res.RowsAffected))
+	}
+	if s.conn.cfg != nil && s.conn.cfg.LogSQL {
+		attrs = append(attrs, slog.String("sql", s.query))
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: exec failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: exec", attrs...)
 }
 
 // Query runs a SELECT (or VALUES / WITH). With no args it opens a
@@ -128,8 +158,10 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return nil, fmt.Errorf("gojtopen: Query called with non-SELECT; use Exec")
 	}
 	selectOpts := s.conn.selectOptions()
+	start := time.Now()
 	if len(args) == 0 {
 		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc(), selectOpts...)
+		s.logQuery("OPEN_SELECT_STATIC", 0, start, err)
 		if err != nil {
 			return nil, s.conn.classifyConnErr(err)
 		}
@@ -140,10 +172,34 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return nil, err
 	}
 	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
+	s.logQuery("OPEN_SELECT_PREPARED", len(args), start, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}
 	return &Rows{cursor: cursor, conn: s.conn}, nil
+}
+
+// logQuery emits one DEBUG line per Query call. SQL text is gated
+// on Config.LogSQL.
+func (s *Stmt) logQuery(op string, paramCount int, start time.Time, err error) {
+	logger := s.conn.log
+	if logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("op", op),
+		slog.Int("params", paramCount),
+		slog.Duration("elapsed", time.Since(start)),
+	}
+	if s.conn.cfg != nil && s.conn.cfg.LogSQL {
+		attrs = append(attrs, slog.String("sql", s.query))
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: query failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "gojtopen: query", attrs...)
 }
 
 // bindArgsToPreparedParams maps each driver.Value to a typed

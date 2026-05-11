@@ -12,6 +12,55 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-3 slog integration. New `driver.Config.Logger *slog.Logger`
+  field hands the driver a caller-controlled logging sink; nil (the
+  default) silences all driver-side logging via an internal
+  discard-handler fallback so call sites never need a nil check.
+  Per-Conn child logger carries the attrs `driver=gojtopen`,
+  `dsn_host=<host>`, `server_vrm=<vrm>` so every line a single
+  connection emits is pre-attributed. Levels:
+    - INFO  on connect (with user/db_port/signon_port/tls/library
+                       attrs) and Close.
+    - DEBUG on each `Stmt.Exec` / `Stmt.Query` (with op /
+                                              params / elapsed /
+                                              rows_affected attrs)
+                       and each `LOBReader.Read` ->
+                       RETRIEVE_LOB_DATA round trip (with handle /
+                       col / offset / requested / returned).
+    - WARN  on `classifyConnErr` producing ErrBadConn (the pool
+                                                     will retire
+                                                     the conn).
+    - ERROR on non-fatal statement-level failures so logs
+                       subscribed at ERROR catch SQL syntax /
+                       constraint / lock errors without parsing
+                       message text.
+  New `driver.Config.LogSQL bool` gates whether the SQL text is
+  attached to Exec / Query DEBUG attrs (off by default; SQL text
+  often carries customer identifiers). Parameter counts are always
+  attached; parameter values never are. New
+  `gojtopen.NewConnector(*Config) (*Connector, error)` constructor
+  lets callers wire a programmatic Logger that can't be expressed
+  in a DSN string -- pass the Connector to `sql.OpenDB` to get a
+  `*sql.DB`. `cmd/smoketest -log-debug` exercises the driver path
+  with a stderr text handler so the log stream is reproducible.
+  Sample run against IBM Cloud V7R6M0:
+
+  ```
+  time=2026-05-11T00:14:31Z level=INFO msg="gojtopen: connected" \
+      driver=gojtopen dsn_host=localhost server_vrm=460288 user=GOTEST \
+      db_port=8471 signon_port=8476 tls=false library=""
+  time=2026-05-11T00:14:31Z level=DEBUG msg="gojtopen: query" \
+      driver=gojtopen dsn_host=localhost server_vrm=460288 \
+      op=OPEN_SELECT_STATIC params=0 elapsed=71.954ms
+  time=2026-05-11T00:14:31Z level=INFO msg="gojtopen: connection closed" \
+      driver=gojtopen dsn_host=localhost server_vrm=460288
+  ```
+
+  Full plaintext conformance suite (`GOJTOPEN_DSN`, ~151 s)
+  remains green; the silent-handler fallback path adds < 1 ns of
+  overhead per logging call site under the default nil-Logger
+  configuration.
+
 - M8-2 godoc audit. Every exported symbol across `driver/`,
   `hostserver/`, `ebcdic/`, and `internal/wirelog/` now carries a
   leading-identifier doc comment that's compatible with `go doc`

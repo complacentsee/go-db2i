@@ -627,7 +627,20 @@ Track A (foundations):
   covered the other high-traffic types. Snapshot of `go doc -all`
   output across the four packages committed to
   `docs/godoc-snapshot/` for diffability.
-- **M8-3 slog integration** ⏳
+- **M8-3 slog integration** ✅ 2026-05-11 — `Config.Logger *slog.Logger`
+  + `Config.LogSQL bool` API surface. Nil Logger silences all
+  driver-side logging via an internal discard-handler fallback so
+  call sites never have to nil-check. Per-Conn child logger carries
+  `driver=gojtopen`, `dsn_host=<host>`, `server_vrm=<vrm>` attrs.
+  Levels: INFO on connect/close, DEBUG on each Stmt.Exec /
+  Stmt.Query + RETRIEVE_LOB_DATA chunk, WARN on ErrBadConn
+  classification, ERROR on non-fatal statement failures. New
+  `gojtopen.NewConnector(cfg *Config) (*Connector, error)` so
+  callers can programmatically set Logger + LogSQL (the DSN can't
+  express either). `cmd/smoketest -log-debug` flag dumps the level-
+  filtered text-handler stream to stderr; live-validated against
+  IBM Cloud V7R6M0 (visible: INFO connect, DEBUG
+  OPEN_SELECT_STATIC, INFO close).
 - **M8-4 OpenTelemetry spans** ⏳
 - **M8-5 JTOpen DSN migration guide** ⏳
 - **M8-6 Performance tuning notes** ⏳

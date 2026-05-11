@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 
 	"github.com/complacentsee/goJTOpen/hostserver"
@@ -64,7 +65,21 @@ func (c *Conn) classifyConnErr(err error) error {
 	}
 	if isConnLevelErr(err) {
 		c.markDead()
+		if c.log != nil {
+			c.log.LogAttrs(context.Background(), slog.LevelWarn, "gojtopen: classified as ErrBadConn (pool will retire conn)",
+				slog.String("err", err.Error()),
+			)
+		}
 		return &badConnWrap{err: err}
+	}
+	// Surface non-fatal statement-level failures at ERROR so callers
+	// who treat any ERROR-level event as actionable don't miss SQL
+	// constraint violations / syntax errors / etc. when their logging
+	// pipeline filters by level.
+	if c.log != nil {
+		c.log.LogAttrs(context.Background(), slog.LevelError, "gojtopen: operation failed",
+			slog.String("err", err.Error()),
+		)
 	}
 	return err
 }

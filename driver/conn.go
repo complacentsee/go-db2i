@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"database/sql/driver"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,17 @@ import (
 // fixed 30s timeout (the underlying net.Conn deadline).
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	deadline, _ := contextDeadline(ctx, 30*time.Second)
+
+	// Derive a per-Conn child logger tagged with driver/host so
+	// every line a single conn emits is pre-attributed. The conn_id
+	// attr is the connection's correlation-counter base; database/sql
+	// pool churn doesn't re-key it, so multiple sequential dials by
+	// the same pool entry will show as distinct logical conns when
+	// the underlying socket is recycled.
+	log := resolveLogger(c.cfg.Logger).With(
+		slog.String("driver", "gojtopen"),
+		slog.String("dsn_host", c.cfg.Host),
+	)
 
 	// Sign-on phase: open as-signon, perform encrypted handshake.
 	signon, err := dialHostServer(c.cfg, c.cfg.SignonPort, deadline)
@@ -87,7 +99,16 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		}
 	}
 
-	return &Conn{conn: db, cfg: c.cfg, serverVRM: serverVRM}, nil
+	conn := &Conn{conn: db, cfg: c.cfg, serverVRM: serverVRM, log: log}
+	conn.log = log.With(slog.Uint64("server_vrm", uint64(serverVRM)))
+	conn.log.LogAttrs(ctx, slog.LevelInfo, "gojtopen: connected",
+		slog.String("user", c.cfg.User),
+		slog.Int("db_port", c.cfg.DBPort),
+		slog.Int("signon_port", c.cfg.SignonPort),
+		slog.Bool("tls", c.cfg.TLS),
+		slog.String("library", c.cfg.Library),
+	)
+	return conn, nil
 }
 
 // Conn implements driver.Conn (and the Context-aware extensions).
@@ -104,7 +125,17 @@ type Conn struct {
 	// Used to gate features that require V7R5+ (CCSID 1208 string
 	// binds, etc.). 0 if the connection didn't capture a value.
 	serverVRM uint32
+
+	// log is the per-conn child logger. Always non-nil (silent
+	// fallback when Config.Logger is nil). Tagged with
+	// driver=gojtopen, dsn_host=<host>, server_vrm=<vrm>.
+	log *slog.Logger
 }
+
+// Logger returns the per-connection slog.Logger. Always non-nil --
+// when Config.Logger was nil at connect time this returns a
+// no-op logger so callers can use it without nil-checking.
+func (c *Conn) Logger() *slog.Logger { return c.log }
 
 // preferredStringCCSID returns the CCSID the driver should tag
 // VARCHAR string binds with. V7R5+ servers accept CCSID 1208 (UTF-8)
@@ -193,7 +224,11 @@ func (c *Conn) Close() error {
 		return nil
 	}
 	c.closed = true
-	return c.conn.Close()
+	err := c.conn.Close()
+	if c.log != nil {
+		c.log.LogAttrs(context.Background(), slog.LevelInfo, "gojtopen: connection closed")
+	}
+	return err
 }
 
 // Begin / BeginTx start a transaction by flipping autocommit off
