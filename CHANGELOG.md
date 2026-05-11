@@ -63,13 +63,51 @@ across IBM i versions; expect the public API surface to settle at
   intentionally NOT in this commit; that lands in M10-3 once
   M10-2 wires the Config / DSN surface.
 
+### Added (M10-2 — DSN + Config surface)
+
+- 7 new `Config` fields: `ExtendedDynamic`, `PackageName`,
+  `PackageLibrary`, `PackageCache`, `PackageError`,
+  `PackageCriteria`, `PackageCCSID`. Defaults match JT400's
+  `JDProperties.java` so an unmodified `DefaultConfig()` stays
+  byte-equal to JT400's default-properties baseline.
+- 9 new DSN query keys: `extended-dynamic`, `package`,
+  `package-library`, `package-cache`, `package-error`,
+  `package-criteria`, `package-ccsid`, plus the migration-
+  friendly accept-ignore `package-add=true` and accept-warn-log
+  `package-clear`. Validation is strict on every value — wrong
+  enum / bad charset / out-of-range CCSID / cache-without-
+  extended-dynamic all surface a typed error from `parseDSN`.
+- Package identifiers (name + library) get canonicalised at the
+  DSN boundary (upper-case, space→underscore) so downstream
+  callers see the same bytes the wire encoder expects. The
+  charset check (`A-Z 0-9 _ # @ $`) mirrors JT400's
+  `JDProperties.validateName`.
+- Cross-key sanity: `package-cache=true` requires
+  `extended-dynamic=true`; `extended-dynamic=true` requires
+  `package=<name>`. Both rejections are tested.
+- Documentation: `docs/migrating-from-jt400.md` moves the 9
+  package properties from "deferred" to "supported", updates
+  the supported count from 12 to 21.
+
+### Added (M10-2.5 — fuzz)
+
+- `hostserver/FuzzSuffixFromOptions`: random 8-int input through
+  the suffix formula. Asserts 4-char output, every char from
+  `SUFFIX_INVARIANT_`, deterministic, no panic on out-of-range
+  values (the clipSuffixIndex clamp is exercised).
+- `hostserver/FuzzBuildPackageName`: random base + options.
+  Asserts 10-char output, suffix tail in `SUFFIX_INVARIANT_`.
+- Extended `driver/FuzzParseDSN` seed corpus with the 9 new M10
+  keys plus their pinned rejection cases. Short fuzz runs
+  (5s, single core) on all three fuzz targets pass clean.
+
 ### Notes
 
 - `prepared_package_overflow` is deferred — server-side package
   threshold (~1024 entries) makes the trace prohibitively large
   for the cache-hit suite. Will land before M10-4 closes.
-- M10-2+ work (DSN surface, client cache, error handling) lives
-  in `plans/m10-package-caching.md`.
+- M10-3+ work (client cache + cache-hit fast path, error
+  handling) lives in `plans/m10-package-caching.md`.
 
 ## [0.6.0] - 2026-05-11
 

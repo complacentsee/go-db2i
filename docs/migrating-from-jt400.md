@@ -81,7 +81,7 @@ the *Notes* column says why.
 | `translate hex` | — | Binary columns decode as `[]byte`; callers can `hex.EncodeToString` them if they want the JT400 "interpret as hex" rendering. |
 | `bidi string type` / `bidi implicit reordering` / `bidi numeric ordering` | — | BiDi reordering is JT400 toolbox-side; not applicable to a thin host-server client. |
 | `sort` / `sort language` / `sort sequence` / `sort weight` / `sort table` | — | Sort-table control not plumbed; relies on the server-side job's CURSOR_SENSITIVITY / SORT_SEQUENCE defaults. |
-| `package ccsid` | — | Extended-dynamic-package feature isn't implemented; see "Unsupported features" below. |
+| `package ccsid` | `package-ccsid` | M10. Accepts `13488` (default UCS-2 BE), `1200` (UTF-16 LE), and the literal `system` (job CCSID). Wider CCSID support deferred to M11+. |
 
 ### LOB handling
 
@@ -92,7 +92,14 @@ the *Notes* column says why.
 | `hold locators` | — | We don't expose `HOLD LOCATOR` semantics; cursors close their locators when the producing `Rows` is closed. |
 | `xa locks held` | — | XA / DTC is not implemented. |
 | `metadata source` | — | Always uses ROI flag values (the default for V7R5+). |
-| `extended dynamic` / `package` / `package add` / `package cache` / `package clear` / `package criteria` / `package error` / `package library` | — | The whole extended-dynamic-package family is JT400-specific (it caches statement plans in `*PGM` objects so repeated PREPAREs become locator-lookups). goJTOpen always PREPAREs fresh. For repeated-statement performance, use a `sql.DB` with a healthy connection pool — see [`docs/performance.md`](./performance.md). |
+| `extended dynamic` | `extended-dynamic` | M10. When `true` together with `package=<NAME>`, the driver tells the server to keep PREPAREd statements in a persistent `*PGM` so co-tenant reconnects skip the PREPARE round-trip. |
+| `package` | `package` | M10. 1-6 chars from the IBM-i object-name set (`A-Z 0-9 _ # @ $`). The 10-char wire name is the base + a 4-char options-derived suffix, byte-equal to JT400 (`hostserver.BuildPackageName`). |
+| `package library` | `package-library` | M10. Library the `*PGM` lives in; default `QGPL`. Up to 10 chars from the same charset. |
+| `package cache` | `package-cache` | M10. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses PREPARE on a client-side cache hit. |
+| `package error` | `package-error` | M10. `warning` (default) / `exception` / `none` — controls how the driver reacts to package-related server errors. |
+| `package criteria` | `package-criteria` | M10. `default` (default, parameterised statements only) / `select` (broader: also caches SELECT statements without markers). Mirrors JT400's [JDSQLStatement.java filter](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java). |
+| `package add` | `package-add` (accept-ignore) | M10. JT400's only documented value is `true`; goJTOpen always adds when `extended-dynamic=true`, so `package-add=true` is accepted as a no-op for DSN-migration friendliness and `package-add=false` is rejected with a clear message. |
+| `package clear` | `package-clear` (accept-warn-log) | M10. Server-managed in goJTOpen. Accepted for DSN-migration friendliness; the driver slog.Warns on connect when the key is set. |
 
 ### Performance / blocking
 
@@ -160,14 +167,17 @@ the *Notes* column says why.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (12 DSN keys): `library`, `signon-port`, `date`, `isolation`, `lob`,
+✅ **Supported** (21 DSN keys): `library`, `signon-port`, `date`, `isolation`, `lob`,
 `lob-threshold`, `ccsid`, `extended-metadata`, `tls`,
-`tls-insecure-skip-verify`, `tls-server-name`, plus programmatic
+`tls-insecure-skip-verify`, `tls-server-name`, `extended-dynamic`,
+`package`, `package-library`, `package-cache`, `package-error`,
+`package-criteria`, `package-ccsid`, `package-add` (accept-ignore),
+`package-clear` (accept-warn-log), plus programmatic
 `Config.Logger` / `Config.LogSQL` / `Config.Tracer`.
 
 ⏭️ **Deferred** (would benefit a future release): `libraries` (multi-
 library default list), `time format`, separators, `query optimize goal`,
-`socket timeout` (per-op default), `package` family for prepared-statement caching.
+`socket timeout` (per-op default).
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`

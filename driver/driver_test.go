@@ -418,3 +418,159 @@ func TestParseDSNExtendedMetadata(t *testing.T) {
 		}
 	})
 }
+
+// TestParseDSN_DefaultsM10 confirms the package-cache defaults a
+// blank DSN inherits from DefaultConfig: no extended-dynamic, no
+// cache, library QGPL, warning mode, default criteria, CCSID 13488.
+// These have to match JT400's JDProperties.java defaults or a
+// caller expecting JT400-compatible behaviour will silently drift.
+func TestParseDSN_DefaultsM10(t *testing.T) {
+	cfg, err := parseDSN("gojtopen://u:p@h/")
+	if err != nil {
+		t.Fatalf("parseDSN: %v", err)
+	}
+	if cfg.ExtendedDynamic {
+		t.Errorf("ExtendedDynamic = true, want false")
+	}
+	if cfg.PackageName != "" {
+		t.Errorf("PackageName = %q, want empty", cfg.PackageName)
+	}
+	if cfg.PackageLibrary != "QGPL" {
+		t.Errorf("PackageLibrary = %q, want QGPL", cfg.PackageLibrary)
+	}
+	if cfg.PackageCache {
+		t.Errorf("PackageCache = true, want false")
+	}
+	if cfg.PackageError != "warning" {
+		t.Errorf("PackageError = %q, want warning", cfg.PackageError)
+	}
+	if cfg.PackageCriteria != "default" {
+		t.Errorf("PackageCriteria = %q, want default", cfg.PackageCriteria)
+	}
+	if cfg.PackageCCSID != 13488 {
+		t.Errorf("PackageCCSID = %d, want 13488", cfg.PackageCCSID)
+	}
+}
+
+// TestParseDSN_ExtendedDynamicHappyPath wires the seven main keys
+// together the way an operator who migrated from JT400 would.
+func TestParseDSN_ExtendedDynamicHappyPath(t *testing.T) {
+	cfg, err := parseDSN("gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-library=MYLIB&package-cache=true&package-error=exception&package-criteria=select&package-ccsid=1200")
+	if err != nil {
+		t.Fatalf("parseDSN: %v", err)
+	}
+	if !cfg.ExtendedDynamic {
+		t.Error("ExtendedDynamic = false, want true")
+	}
+	if cfg.PackageName != "APP" {
+		t.Errorf("PackageName = %q, want APP", cfg.PackageName)
+	}
+	if cfg.PackageLibrary != "MYLIB" {
+		t.Errorf("PackageLibrary = %q, want MYLIB", cfg.PackageLibrary)
+	}
+	if !cfg.PackageCache {
+		t.Error("PackageCache = false, want true")
+	}
+	if cfg.PackageError != "exception" {
+		t.Errorf("PackageError = %q, want exception", cfg.PackageError)
+	}
+	if cfg.PackageCriteria != "select" {
+		t.Errorf("PackageCriteria = %q, want select", cfg.PackageCriteria)
+	}
+	if cfg.PackageCCSID != 1200 {
+		t.Errorf("PackageCCSID = %d, want 1200", cfg.PackageCCSID)
+	}
+}
+
+func TestParseDSN_PackageNameCanon(t *testing.T) {
+	cases := []struct {
+		raw, want string
+	}{
+		{"app", "APP"},
+		{"My Pkg", "MY_PKG"},
+		{"PKG123", "PKG123"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := parseDSN("gojtopen://u:p@h/?extended-dynamic=true&package=" + tc.raw)
+			if err != nil {
+				t.Fatalf("parseDSN: %v", err)
+			}
+			if cfg.PackageName != tc.want {
+				t.Errorf("PackageName = %q, want %q", cfg.PackageName, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDSN_PackageCCSIDSystem(t *testing.T) {
+	cfg, err := parseDSN("gojtopen://u:p@h/?package-ccsid=system")
+	if err != nil {
+		t.Fatalf("parseDSN: %v", err)
+	}
+	if cfg.PackageCCSID != 0 {
+		t.Errorf("PackageCCSID = %d, want 0 (system)", cfg.PackageCCSID)
+	}
+}
+
+func TestParseDSN_PackageAddTrueAccepted(t *testing.T) {
+	if _, err := parseDSN("gojtopen://u:p@h/?package-add=true"); err != nil {
+		t.Errorf("package-add=true should be silently accepted: %v", err)
+	}
+	if _, err := parseDSN("gojtopen://u:p@h/?package-add=false"); err == nil {
+		t.Error("package-add=false should be rejected (always-add semantics)")
+	}
+}
+
+func TestParseDSN_PackageClearAccepted(t *testing.T) {
+	// shape-validate only; the connect path emits the warn-log
+	for _, v := range []string{"true", "false"} {
+		t.Run(v, func(t *testing.T) {
+			if _, err := parseDSN("gojtopen://u:p@h/?package-clear=" + v); err != nil {
+				t.Errorf("package-clear=%s should be accepted: %v", v, err)
+			}
+		})
+	}
+	if _, err := parseDSN("gojtopen://u:p@h/?package-clear=maybe"); err == nil {
+		t.Error("package-clear=maybe should be rejected")
+	}
+}
+
+func TestParseDSN_M10RejectsBadValues(t *testing.T) {
+	cases := map[string]string{
+		"bogus extended-dynamic":  "gojtopen://u:p@h/?extended-dynamic=maybe",
+		"package name too long":   "gojtopen://u:p@h/?extended-dynamic=true&package=TOOLONGNAME",
+		"package bad char dot":    "gojtopen://u:p@h/?extended-dynamic=true&package=A.B",
+		"package bad char slash":  "gojtopen://u:p@h/?extended-dynamic=true&package=A/B",
+		"package empty":           "gojtopen://u:p@h/?extended-dynamic=true&package=",
+		"package-library too lng": "gojtopen://u:p@h/?package-library=ELEVENCHARS",
+		"package-cache bogus":     "gojtopen://u:p@h/?package-cache=maybe",
+		"package-error bogus":     "gojtopen://u:p@h/?package-error=fatal",
+		"package-criteria bogus":  "gojtopen://u:p@h/?package-criteria=all",
+		"package-ccsid 1208":      "gojtopen://u:p@h/?package-ccsid=1208",
+		"package-ccsid -1":        "gojtopen://u:p@h/?package-ccsid=-1",
+		"cache without extended":  "gojtopen://u:p@h/?package-cache=true",
+		"extended-dyn no name":    "gojtopen://u:p@h/?extended-dynamic=true",
+	}
+	for name, dsn := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDSN(dsn); err == nil {
+				t.Errorf("expected error for %q, got nil", dsn)
+			}
+		})
+	}
+}
+
+// TestParseDSN_PackageCCSIDRejectMentionsM11 makes sure the rejection
+// message for an unsupported CCSID points operators at the M11+
+// deferral, not just "invalid". Future contributors might widen the
+// accepted set; the test pins the message until that lands.
+func TestParseDSN_PackageCCSIDRejectMentionsM11(t *testing.T) {
+	_, err := parseDSN("gojtopen://u:p@h/?package-ccsid=1208")
+	if err == nil {
+		t.Fatal("expected error for package-ccsid=1208")
+	}
+	if !strings.Contains(err.Error(), "M11+") {
+		t.Errorf("error %q does not mention M11+ deferral", err)
+	}
+}

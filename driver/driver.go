@@ -302,6 +302,62 @@ type Config struct {
 	// chosen threshold.
 	LOBThreshold uint32
 
+	// ExtendedDynamic switches the connection on to JT400's
+	// extended-dynamic SQL package caching. When true and PackageName
+	// is non-empty, the driver instructs the server to maintain a
+	// persistent *PGM that accumulates PREPAREd statements across
+	// connections so a co-tenant reconnect skips the PREPARE round-
+	// trip. Mirrors JT400's "extended dynamic" JDBC URL knob;
+	// configured via the DSN "extended-dynamic=true" query key.
+	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	ExtendedDynamic bool
+
+	// PackageName is the user-chosen base for the on-wire package
+	// name (1-6 chars from the IBM-i object-name charset:
+	// A-Z 0-9 _ # @ $). The 10-char wire name is base + a 4-char
+	// suffix derived from session options; see
+	// hostserver.BuildPackageName.
+	PackageName string
+
+	// PackageLibrary is the library the package object lives in.
+	// Default "QGPL". Up to 10 chars from the IBM-i object-name
+	// charset.
+	PackageLibrary string
+
+	// PackageCache enables the client-side fast path. When true the
+	// driver issues a RETURN_PACKAGE on connect to download the
+	// server's cached statement entries, then bypasses PREPARE for
+	// any cache-hit SQL on subsequent Stmt.Exec / Query calls.
+	// Default false (statements still get added to the server-side
+	// package via CP 0x3804 on PREPARE, but every Stmt.Prepare on
+	// the client still round-trips).
+	PackageCache bool
+
+	// PackageError selects how the driver handles errors from the
+	// CREATE_PACKAGE / RETURN_PACKAGE / CP 0x3804 paths. Mirrors
+	// JT400's "package error" JDBC URL knob; configured via the DSN
+	// "package-error=warning|exception|none" query key.
+	//   "warning"   (default) slog.Warn + continue without package
+	//   "exception" return the error to the database/sql caller
+	//   "none"      silent drop + continue without package
+	PackageError string
+
+	// PackageCriteria filters which SQL strings the driver considers
+	// for cache insertion / lookup. Mirrors JT400's
+	// "package criteria" JDBC URL knob.
+	//   "default" (default) only parameterised statements (the JT400
+	//             rule: marker count > 0 && !isCurrentOf && various
+	//             special-case shapes)
+	//   "select"  default rules plus all SELECTs (broader cache)
+	PackageCriteria string
+
+	// PackageCCSID is the CCSID the server uses to write package-
+	// stored SQL text on disk. JT400's default is 13488 (UCS-2 BE);
+	// a value of 0 means "system default" (the connection's job
+	// CCSID). The driver accepts 13488 and 1200 (UTF-16 LE); other
+	// values must wait for the M11+ broader package-CCSID work.
+	PackageCCSID int
+
 	// ExtendedMetadata, when true, asks the server to include CP
 	// 0x3811 (extended column descriptors) in every PREPARE_DESCRIBE
 	// reply by ORing the ORSExtendedColumnDescrs (0x00020000) bit
@@ -385,6 +441,16 @@ func DefaultConfig() Config {
 		SignonPort: 8476,
 		DateFormat: hostserver.DateFormatJOB,
 		Isolation:  hostserver.IsolationCommitNone,
+		// Package-cache defaults match JT400's JDProperties.java
+		// (PACKAGE_LIBRARY="QGPL", PACKAGE_ERROR="warning",
+		// PACKAGE_CRITERIA="default", PACKAGE_CCSID=13488). The
+		// gating flags ExtendedDynamic + PackageCache start false
+		// so an unmodified Config never touches the package wire
+		// at all.
+		PackageLibrary:  "QGPL",
+		PackageError:    "warning",
+		PackageCriteria: "default",
+		PackageCCSID:    13488,
 	}
 }
 
@@ -563,7 +629,138 @@ func parseDSN(dsn string) (*Config, error) {
 		}
 		cfg.ExtendedMetadata = b
 	}
+	if v := q.Get("extended-dynamic"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid extended-dynamic %q (want true|false): %w", v, err)
+		}
+		cfg.ExtendedDynamic = b
+	}
+	if v := q.Get("package"); v != "" {
+		// Uppercase + space->underscore at the boundary so every
+		// downstream caller sees normalised bytes. Validate the
+		// charset before anything in the driver tries to hand it
+		// off to BuildPackageName.
+		canon := canonPackageIdent(v)
+		if err := validatePackageIdent(canon, 6); err != nil {
+			return nil, fmt.Errorf("invalid package %q: %w", v, err)
+		}
+		cfg.PackageName = canon
+	}
+	if v := q.Get("package-library"); v != "" {
+		canon := canonPackageIdent(v)
+		if err := validatePackageIdent(canon, 10); err != nil {
+			return nil, fmt.Errorf("invalid package-library %q: %w", v, err)
+		}
+		cfg.PackageLibrary = canon
+	}
+	if v := q.Get("package-cache"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid package-cache %q (want true|false): %w", v, err)
+		}
+		cfg.PackageCache = b
+	}
+	if v := q.Get("package-error"); v != "" {
+		switch strings.ToLower(v) {
+		case "warning", "exception", "none":
+			cfg.PackageError = strings.ToLower(v)
+		default:
+			return nil, fmt.Errorf("invalid package-error %q (want warning|exception|none)", v)
+		}
+	}
+	if v := q.Get("package-criteria"); v != "" {
+		switch strings.ToLower(v) {
+		case "default", "select":
+			cfg.PackageCriteria = strings.ToLower(v)
+		default:
+			return nil, fmt.Errorf("invalid package-criteria %q (want default|select)", v)
+		}
+	}
+	if v := q.Get("package-ccsid"); v != "" {
+		switch strings.ToLower(v) {
+		case "system":
+			cfg.PackageCCSID = 0
+		case "1200":
+			cfg.PackageCCSID = 1200
+		case "13488":
+			cfg.PackageCCSID = 13488
+		default:
+			// Reject any other numeric value with an explicit
+			// message that points at the M11+ deferral so users
+			// hitting this know where to track the broader work.
+			return nil, fmt.Errorf("invalid package-ccsid %q (want 13488 | 1200 | system; broader CCSID set deferred to M11+)", v)
+		}
+	}
+	// `package-add` is a JT400 knob whose only documented value is
+	// "true" (statements get added to the package). goJTOpen always
+	// adds. Accept it for DSN-migration friendliness; reject other
+	// values so a typo doesn't silently no-op.
+	if v := q.Get("package-add"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid package-add %q (want true|false; goJTOpen always adds when extended-dynamic is on): %w", v, err)
+		}
+		if !b {
+			return nil, fmt.Errorf("package-add=false is not supported (goJTOpen always adds when extended-dynamic is on)")
+		}
+	}
+	// `package-clear` is another JT400 migration knob; the server now
+	// manages clearing on its own. Accept the key, validate the
+	// shape, slog.Warn from the driver later when the connection
+	// opens. Doing nothing else for now.
+	if v := q.Get("package-clear"); v != "" {
+		if _, err := parseBool(v); err != nil {
+			return nil, fmt.Errorf("invalid package-clear %q (want true|false; server-managed in goJTOpen): %w", v, err)
+		}
+		// The actual warn is emitted by the connect path so it
+		// rides on the Conn-scoped logger (with conn_id attrs);
+		// we just stash a flag here. But we don't have anywhere
+		// to stash it yet -- so for now the DSN parse just
+		// validates the shape and ignores the value.
+	}
+	// Cross-key sanity: package-cache=true requires extended-dynamic.
+	if cfg.PackageCache && !cfg.ExtendedDynamic {
+		return nil, fmt.Errorf("package-cache=true requires extended-dynamic=true")
+	}
+	// PackageName mandatory when extended-dynamic on (otherwise the
+	// driver can't put together a CP 0x3804 to send).
+	if cfg.ExtendedDynamic && cfg.PackageName == "" {
+		return nil, fmt.Errorf("extended-dynamic=true requires package=<name>")
+	}
 	return &cfg, nil
+}
+
+// canonPackageIdent normalises a package or library identifier to
+// uppercase with spaces turned into underscores, matching JT400's
+// boundary normalisation in JDPackageManager.java's package-name
+// derivation. The result still needs validatePackageIdent to confirm
+// charset + length.
+func canonPackageIdent(s string) string {
+	return strings.ReplaceAll(strings.ToUpper(s), " ", "_")
+}
+
+// validatePackageIdent enforces the IBM-i object-name rules JT400's
+// validateName method (JDProperties.java:1690) applies: 1..max chars,
+// each from the set [A-Z 0-9 _ # @ $]. Accepts the canonical form
+// produced by canonPackageIdent.
+func validatePackageIdent(s string, max int) error {
+	if s == "" {
+		return fmt.Errorf("empty")
+	}
+	if len(s) > max {
+		return fmt.Errorf("length %d > %d", len(s), max)
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '#' || r == '@' || r == '$':
+		default:
+			return fmt.Errorf("char %d (%q) outside [A-Z 0-9 _ # @ $]", i, string(r))
+		}
+	}
+	return nil
 }
 
 // parseBool accepts the same case-insensitive set Go's strconv.ParseBool

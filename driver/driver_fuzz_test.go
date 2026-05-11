@@ -88,5 +88,37 @@ func parseDSNFuzzSeeds() []string {
 		"gojtopen://U%20SER:P%2FWD@h/?library=lower",
 		"gojtopen://u:p@[::1]:8471/",
 		"gojtopen://u:p@h.example.com/?date=JOB&isolation=NONE",
+		// M10 package-cache surface (9 knobs total).
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-library=MYLIB",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-cache=true",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-error=warning",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-error=exception",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-error=none",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-criteria=default",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-criteria=select",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-ccsid=13488",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-ccsid=1200",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-ccsid=system",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-add=true",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-clear=true",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=APP&package-clear=false",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=My%20Pkg",       // canon path
+		"gojtopen://u:p@h/?extended-dynamic=true&package=PKG%23%40%24_2", // # @ $ _
+		// M10 rejection cases pinned from TestParseDSN_M10RejectsBadValues.
+		"gojtopen://u:p@h/?extended-dynamic=maybe",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=TOOLONGNAME",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=A.B",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=A/B",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=",
+		"gojtopen://u:p@h/?package-library=ELEVENCHARS",
+		"gojtopen://u:p@h/?package-cache=maybe",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=A&package-error=fatal",
+		"gojtopen://u:p@h/?extended-dynamic=true&package=A&package-criteria=all",
+		"gojtopen://u:p@h/?package-ccsid=1208",
+		"gojtopen://u:p@h/?package-ccsid=-1",
+		"gojtopen://u:p@h/?package-cache=true",
+		"gojtopen://u:p@h/?extended-dynamic=true",
+		"gojtopen://u:p@h/?package-add=false",
 	}
 }
