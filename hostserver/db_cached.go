@@ -95,15 +95,18 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 
 // OpenSelectPreparedCached is the Query-path companion to
 // ExecutePreparedCached. It builds an OPEN_DESCRIBE_FETCH (0x180E)
-// against the cached statement name + parameter shape, returning
-// the rows in one shot. The cached DataFormat is used to drive
-// result-row parsing -- no PREPARE_DESCRIBE round-trip is needed.
+// against the cached statement name + parameter shape, returning a
+// streaming *Cursor whose first batch is the rows in the reply.
 //
-// Returns a SelectResult (columns + first batch of rows + outcome).
-// Multi-block fetch continuation is delegated to the caller (the
-// driver.Rows path will issue follow-up FETCH frames the same way
-// it does for the non-cached path).
-func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, opts ...SelectOption) (*SelectResult, error) {
+// LIMITATION (v0.7.1): the cached fast path ships RPBHandle=0 on
+// the OPEN frame so continuation FETCH is not available -- the
+// returned Cursor is pre-marked exhausted=true / rpbActive=false.
+// Callers reading more than the OPEN's first batch will see
+// truncated results. Result sets that fit in one 32 KB buffer
+// (the typical case for packaged statements -- a few rows of a
+// small SELECT) are unaffected. v0.7.2 will swap in a RPB-backed
+// path so multi-block FETCH continuation works.
+func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error) {
 	if cached == nil {
 		return nil, fmt.Errorf("hostserver: OpenSelectPreparedCached: cached statement nil")
 	}
@@ -145,17 +148,29 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 	if dbErr := makeDb2Error(rep, "OPEN_DESCRIBE_FETCH_CACHED"); dbErr != nil {
 		return nil, dbErr
 	}
-	// Reuse the cached column metadata; the wire reply may or may
-	// not carry a fresh CP 0x3812 depending on what the server
-	// decides to echo, but the bind side already has authoritative
-	// shapes from the package.
 	cols := make([]SelectColumn, len(cached.DataFormat))
 	copy(cols, cached.DataFormat)
 	rows, err := rep.findExtendedResultData(cols)
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: parse cached OPEN row data: %w", err)
 	}
-	return &SelectResult{Columns: cols, Rows: rows}, nil
+	// Pre-marked exhausted + no RPB. Close() is a no-op on this
+	// shape; Next() drains the buffered rows then returns io.EOF.
+	return newBufferedCursor(cols, rows), nil
+}
+
+// newBufferedCursor returns a *Cursor that owns the given row batch
+// and refuses continuation FETCH. Used by the cache-hit fast path
+// (and potentially other future buffered paths) where the server
+// state we'd need for continuation isn't available.
+func newBufferedCursor(cols []SelectColumn, rows []SelectRow) *Cursor {
+	return &Cursor{
+		cols:         cols,
+		pending:      rows,
+		exhausted:    true,
+		serverClosed: true,
+		rpbActive:    false,
+	}
 }
 
 // buildCachedExecuteFrame assembles the wire frame for both the

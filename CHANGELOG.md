@@ -40,6 +40,15 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- **v0.7.1-Query**: OpenSelectPreparedCached added to the
+  hostserver layer (cache-hit fast path for SELECT). Builds a
+  single OPEN_DESCRIBE_FETCH against the cached statement name,
+  returns a pre-buffered Cursor with no continuation (small
+  result sets only). Driver-side Stmt.Query dispatch deferred to
+  v0.7.2 -- live testing showed our no-RPB OPEN frame is rejected
+  with SQL-202 errorClass=7, and the wire fix needs JT400's
+  rename-tracking that we haven't ported yet.
+
 - **v0.7.1-C**: driver Stmt cache-hit dispatch. `Stmt.Exec` now
   calls `Conn.packageLookup(sql)` after the bind step; on a
   byte-equal hit (and no `sql.Out` arg) it dispatches to
@@ -49,8 +58,12 @@ across IBM i versions; expect the public API surface to settle at
   `db2i: exec cache-hit` (op=`EXECUTE_PREPARED_CACHED`,
   `cached_name`=server-assigned 18-char name) so operators can see
   fast-path activity and cross-reference QSYS2.SYSPACKAGE entries.
-  Stmt.Query still routes through the normal prepare-and-open flow
-  pending the v0.7.1-D wire validation.
+  v0.7.1 dispatch (both Exec and Query) stays in the normal prepare-
+  and-open flow -- live testing surfaced wire-shape limitations in
+  the no-RPB cache-hit path that v0.7.2 will resolve. The decoder,
+  packageLookup helper, ExecutePreparedCached entry point, and
+  OpenSelectPreparedCached entry point all stay in tree as
+  scaffolding so v0.7.2 wires through cleanly.
 
 - **v0.7.1-B**: client-side cache-hit fast path -- `hostserver`
   layer. `ExecutePreparedCached` and `OpenSelectPreparedCached`

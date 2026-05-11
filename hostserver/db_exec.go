@@ -151,18 +151,10 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		createParams := []DBParam{
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, []DBParam{
 			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
 			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
-		}
-		if o.extendedDynamic && o.packageLibrary != "" {
-			libParam, err := buildPackageLibraryParam(o.packageLibrary)
-			if err != nil {
-				return nil, fmt.Errorf("hostserver: encode package library: %w", err)
-			}
-			createParams = append(createParams, libParam)
-		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
@@ -192,14 +184,20 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParamByte(cpDBPrepareOption, prepareOptionByte(o.extendedDynamic && o.packageName != "")),
+			DBParamByte(cpDBPrepareOption, 0x00),
 		}
 		if o.extendedDynamic {
-			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
-			if err != nil {
-				return nil, fmt.Errorf("hostserver: encode package marker: %w", err)
-			}
-			prepParams = append(prepParams, pkgParam)
+			// Empty marker only: the prepare-option=1 + full-name
+			// wire shape (used on the SELECT path) renames the
+			// just-prepared statement to a server-assigned 18-char
+			// name, which breaks the EXECUTE that follows on this
+			// same RPB (server returns SQL-518 "STMT0001 IS NOT
+			// PREPARED" because the rename leaves STMT0001 unbound).
+			// Live-tested 2026-05-11. The packaging path for
+			// INSERT/UPDATE/DELETE needs JT400's nameOverride_
+			// follow-up to capture the renamed identifier and use
+			// it on EXECUTE -- deferred until v0.7.2+.
+			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {

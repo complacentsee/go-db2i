@@ -225,23 +225,13 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 
-	// Cache-hit fast path: when this connection's package cache
-	// holds a statement whose stored SQL byte-equals s.query AND
-	// no caller argument is sql.Out (callable statements can't
-	// take the fast path because their OUT destinations aren't
-	// representable on the wire without the CHANGE_DESCRIPTOR
-	// pre-step), skip CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR
-	// entirely. Falls through to ExecutePreparedSQL on miss; that
-	// path still adds the CP 0x3804 marker that POPULATES the
-	// cache for subsequent calls.
-	if cached := s.conn.packageLookup(s.query); cached != nil && len(outDests) == 0 {
-		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc())
-		s.logExecCached(logger, len(args), start, res, cached.Name, err)
-		if err != nil {
-			return nil, s.conn.classifyConnErr(err)
-		}
-		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
-	}
+	// Cache-hit fast path is wired but DISABLED for v0.7.1:
+	// hostserver.ExecutePreparedCached emits a single EXECUTE frame
+	// with RPBHandle=0 + cached statement-name override, which the
+	// IBM Cloud V7R6M0 server rejected during live testing
+	// (2026-05-11) -- the no-RPB shape needs the same CREATE_RPB
+	// precursor JT400 uses but with a captured server-side rename.
+	// Stays as scaffolding for v0.7.2 to wire properly.
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
@@ -337,12 +327,46 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Stmt.Query cache-hit fast path is deferred. Live testing
+	// against IBM Cloud V7R6M0 showed our OPEN_DESCRIBE_FETCH
+	// frame with RPBHandle=0 + statement-name override is rejected
+	// by the server (SQL-202 errorClass=7). The wire shape needs
+	// a CREATE_RPB precursor that we have yet to reverse-engineer.
+	// Until then the Query path always uses the full prepare-and-
+	// open flow; the v0.7.1 win is the M10 wire fix that actually
+	// populates the *PGM, so cross-driver share now works.
 	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
 	s.logQuery("OPEN_SELECT_PREPARED", len(args), start, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
 	}
 	return &Rows{cursor: cursor, conn: s.conn}, nil
+}
+
+// logQueryCached is the Query-path equivalent of logQuery for
+// cache-hit dispatches. Tagged with op="OPEN_SELECT_PREPARED_CACHED"
+// and carries the cached statement's 18-char server name.
+func (s *Stmt) logQueryCached(paramCount int, start time.Time, cachedName string, err error) {
+	logger := s.conn.log
+	if logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("op", "OPEN_SELECT_PREPARED_CACHED"),
+		slog.Int("params", paramCount),
+		slog.Duration("elapsed", time.Since(start)),
+		slog.String("cached_name", cachedName),
+	}
+	if s.conn.cfg != nil && s.conn.cfg.LogSQL {
+		attrs = append(attrs, slog.String("sql", s.query))
+	}
+	if err != nil {
+		attrs = append(attrs, slog.String("err", err.Error()))
+		logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: query cache-hit failed", attrs...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelDebug, "db2i: query cache-hit", attrs...)
 }
 
 // logQuery emits one DEBUG line per Query call. SQL text is gated
