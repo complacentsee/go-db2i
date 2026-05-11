@@ -212,6 +212,17 @@ var wireHook func(hdr Header, full []byte)
 // shapes; do not call from concurrent goroutines.
 func SetWireHook(fn func(hdr Header, full []byte)) { wireHook = fn }
 
+// SwapWireHook atomically (modulo no-concurrent-call constraint)
+// installs fn as the new wire hook and returns the previous one.
+// Tests that need to restore the prior state on defer use this --
+// e.g. a SetWireHook(nil) defer would clobber an outer hook installed
+// by a parent test or shared fixture.
+func SwapWireHook(fn func(hdr Header, full []byte)) func(hdr Header, full []byte) {
+	prev := wireHook
+	wireHook = fn
+	return prev
+}
+
 // readHook is fired on every ReadFrame return.
 var readHook func(hdr Header, full []byte)
 

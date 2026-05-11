@@ -100,10 +100,7 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 	if dbErr := makeDb2Error(rep, "EXECUTE_IMMEDIATE"); dbErr != nil {
 		return nil, dbErr
 	}
-	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA);
-	// JT400 reads SQLERRD[2]. For now return 0 -- callers that
-	// need the count can decode the SQLCA themselves.
-	return &ExecResult{}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected()}, nil
 }
 
 // ExecutePreparedSQL runs a parameterised INSERT / UPDATE / DELETE
@@ -151,10 +148,23 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 0,
 		}
-		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, []DBParam{
+		createParams := []DBParam{
 			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
 			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
-		})
+		}
+		if o.extendedDynamic && o.packageLibrary != "" {
+			// Without CP 0x3801 here, the server can't resolve the
+			// *PGM referenced by the per-statement CP 0x3804 and
+			// returns SQL-112 errorClass=2 on PREPARE_DESCRIBE
+			// (see db_select.go:619-621). Mirrors the SELECT
+			// path's CREATE_RPB at db_prepared.go:465-471.
+			libParam, err := buildPackageLibraryParam(o.packageLibrary)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package library: %w", err)
+			}
+			createParams = append(createParams, libParam)
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
 		if err != nil {
 			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
 		}
@@ -184,20 +194,25 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		prepParams := []DBParam{
 			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParamByte(cpDBPrepareOption, 0x00),
+			DBParamByte(cpDBPrepareOption, prepareOptionByte(o.extendedDynamic && o.packageName != "")),
 		}
-		if o.extendedDynamic {
-			// Empty marker only: the prepare-option=1 + full-name
-			// wire shape (used on the SELECT path) renames the
-			// just-prepared statement to a server-assigned 18-char
-			// name, which breaks the EXECUTE that follows on this
-			// same RPB (server returns SQL-518 "STMT0001 IS NOT
-			// PREPARED" because the rename leaves STMT0001 unbound).
-			// Live-tested 2026-05-11. The packaging path for
-			// INSERT/UPDATE/DELETE needs JT400's nameOverride_
-			// follow-up to capture the renamed identifier and use
-			// it on EXECUTE -- deferred until v0.7.2+.
-			prepParams = append(prepParams, DBParam{CodePoint: cpPackageName})
+		if o.extendedDynamic && o.packageName != "" {
+			// Full package marker on PREPARE_DESCRIBE -- mirrors the
+			// SELECT filing wire shape (db_prepared.go:503-509).
+			// JT400's wire emits the same CP for parameterised IUD
+			// statements that pass JDSQLStatement.isPackaged()
+			// (verified 2026-05-11 in
+			// prepared_package_filing_iud.trace lines 264-273 for
+			// the INSERT case). The earlier "rename breaks EXECUTE"
+			// concern at this site was outdated: the server resolves
+			// the renamed plan via the package marker JT400 also
+			// emits on the EXECUTE frame -- see the EXECUTE block
+			// below, which now matches.
+			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			prepParams = append(prepParams, pkgParam)
 		}
 		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
 		if err != nil {
@@ -315,11 +330,24 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 			RPBHandle:                 1,
 			ParameterMarkerDescriptor: 1,
 		}
-		params := []DBParam{
-			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			{CodePoint: cpDBExtendedData, Data: dataPayload},
-			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		params := []DBParam{}
+		if o.extendedDynamic && o.packageName != "" {
+			// Package marker first on EXECUTE -- matches JT400's
+			// emitted order in prepared_package_filing_iud.trace
+			// line 314 (CP 0x3804 ahead of CP 0x380D / CP 0x3830 /
+			// CP 0x3812 / CP 0x381F). The server resolves the
+			// renamed filed plan via this marker + the RPB handle.
+			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode EXECUTE package marker: %w", err)
+			}
+			params = append(params, pkgParam)
 		}
+		params = append(params,
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		)
 		hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
 		if err != nil {
 			return nil, fmt.Errorf("hostserver: build EXECUTE: %w", err)
@@ -382,8 +410,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)
 	}
-	// TODO(M7): pull rows-affected out of CP 0x3807 (SQLCA SQLERRD[2]).
-	return &ExecResult{OutValues: outValues}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues}, nil
 }
 
 // parseOutParameterRow finds the EXECUTE reply's result-data CP and

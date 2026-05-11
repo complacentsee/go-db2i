@@ -67,8 +67,12 @@ hit (v0.7.1 cache-hit):
 On a cache-hit, the EXECUTE / OPEN frame carries the cached 18-byte
 server-assigned statement name (e.g. `QZAF488C43A7873001`) in code
 point `0x3806`. The server looks the plan up in the `*PGM` and runs
-it directly without re-preparing. This mirrors JT400's
-`AS400JDBCStatement.commonExecute` `nameOverride_` mechanism.
+it directly without re-preparing. JT400's
+`AS400JDBCStatement.commonExecute` internally tracks the same name
+in its `nameOverride_` field, but on the wire the dispatch is
+package marker + RPB handle + CP 0x3806 — no reply-side rename
+capture is required (verified against `prepared_package_cache_hit.trace`
+and `prepared_package_filing_iud.trace`, 2026-05-11).
 
 ## Setup
 
@@ -159,13 +163,22 @@ On a reconnect with the same `package` name and `package-cache=true`:
 
 ## Eligibility — `package-criteria`
 
-Not every SQL string can be cached. The default criteria matches
-JT400's `JDSQLStatement.canHaveExtendedDynamic` rule:
+Not every SQL string can be cached. The driver's gate
+(`driver.packageEligibleFor`) is byte-equivalent to JT400's
+`JDSQLStatement.isPackaged_` (verified against IBM/JTOpen `f14abcc`,
+2026-05-11) and matches IBM's own ODBC filing rule documented in
+the [SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
+support page:
 
 | Criteria | Files this SQL? |
 |---|---|
-| `default` (default) | Parameterised SELECT / INSERT / UPDATE / DELETE only. Excludes `CURRENT OF`, `DECLARE`, unparameterised SELECT, and `CALL` (stored procedures). |
-| `select` | Same as `default` PLUS unparameterised SELECT / VALUES / WITH statements. |
+| `default` (default) | Parameterised SELECT / INSERT / UPDATE / DELETE; `INSERT INTO t SELECT ...` (subselect, even without markers); `SELECT ... FOR UPDATE` (positioned cursor); `DECLARE PROCEDURE` / `DECLARE CURSOR`. Excludes `CURRENT OF`, unparameterised plain SELECT, `VALUES`, `WITH`, and `CALL`. |
+| `select` | Same as `default` PLUS unparameterised SELECT statements. (JT400's wider gate; matches `package criteria=select` exactly. Does **not** widen to VALUES / WITH — those remain non-cached under either criterion.) |
+
+Note: `select` previously also accepted VALUES / WITH in go-db2i
+v0.7.0–v0.7.2; v0.7.3 narrowed it to match JT400's wire-equivalent
+gate so Go and Java clients hash to the same `*PGM` for the same
+session options.
 
 Examples:
 
@@ -173,15 +186,38 @@ Examples:
 -- Filed under both default and select:
 SELECT id, name FROM mylib.things WHERE status = ?
 
+-- Filed under default and select (positional rules):
+INSERT INTO mylib.archive SELECT * FROM mylib.things WHERE archived = 1
+SELECT * FROM mylib.things WHERE id = 1 FOR UPDATE
+
 -- Filed under select only (default rejects: zero markers):
 SELECT CURRENT_TIMESTAMP FROM SYSIBM.SYSDUMMY1
 
--- Never filed (CALL is excluded; OUT/INOUT bind can't be cached):
+-- Never filed (VALUES / WITH not in JT400's gate; CALL excluded
+-- because OUT/INOUT bind can't survive a cached plan):
+VALUES 1
+WITH t AS (SELECT 1) SELECT * FROM t
 CALL mylib.p_lookup(?, ?)
 
 -- Never filed (DDL is not cacheable):
 CREATE TABLE mylib.things (id INTEGER, name VARCHAR(64))
 ```
+
+### What actually files vs only crosses the gate
+
+Passing the client-side `packageEligibleFor` gate is necessary but
+not sufficient — IBM's server-side 3-PREPARE threshold (PTF
+SI30855 since IBM i 6.1) also gates filing. A statement crosses
+the gate but only files once it's been PREPAREd ≥ 3 times against
+the same package on the same QZDASOINIT job. See the
+"NUMBER_STATEMENTS stays at 0" entry below for the gory details.
+
+End-to-end verified against IBM Cloud V7R6M0 and PUB400 V7R5M0
+(2026-05-11): all 17 JDBC types — INTEGER, BIGINT, SMALLINT,
+DECIMAL, NUMERIC, REAL, DOUBLE, DECFLOAT, VARCHAR, CHAR, VARCHAR
+FOR BIT DATA, DATE, TIME, TIMESTAMP, BOOLEAN, BINARY, VARBINARY —
+round-trip through filing + cache-hit dispatch for SELECT and
+through filing for INSERT / UPDATE / DELETE.
 
 Use `package-criteria=select` if your workload includes many
 identical zero-parameter SELECTs (typical of dashboards that hit
@@ -303,22 +339,87 @@ That was a v0.7.1 SQLDA bug. Upgrade to v0.7.1 or later — the
 package-SQLDA VARCHAR length convention was off by 2 bytes and
 caused row-decode misalignment on cache-hit Query.
 
-**Filing doesn't happen on my IBM Cloud V7R6M0 LPAR.**
+**`NUMBER_STATEMENTS` stays at 0 in `QSYS2.SYSPACKAGESTAT` even
+though I'm using extended-dynamic.**
 
-Known environmental issue. v0.7.2 testing against IBM Cloud
-V7R6M0 confirmed that the LPAR's QSQSRVR job doesn't accumulate
-statements into the `*SQLPKG` even with byte-identical JT400 +
-go-db2i wire bytes (verified by capturing JT400's wire via the
-Java fixture harness — same 21 frames as our driver, same lack
-of filing). The wire shape on both clients is correct; the
-gating happens client-side in JT400's `JDSQLStatement.isPackaged()`
-heuristic AND apparently on the server's side too for this LPAR
-configuration. Without filing, the cache-hit dispatch path never
-gets entries to hit against. The conformance suite's
-`test/conformance/cache_hit_test.go` tests that depend on fresh
-filing are gated by the `DB2I_TEST_FILING=1` env var; run with
-that set against an LPAR known to file (PUB400 V7R5M0 has been
-the reliable baseline) to exercise the full type matrix.
+Two things to check, both documented by IBM but easy to miss.
+
+### 1. Are you crossing the 3-PREPARE filing threshold?
+
+IBM's [SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
+documents the server-side gate:
+
+> *"Starting with IBM i 6.1 PTF SI30855, a statement must be
+> prepared 3 times before it is added to the SQL package. This
+> change was made to prevent filling the package with statements
+> that aren't used frequently."*
+
+This is per-job (QZDASOINIT), per-package. A workload that opens a
+fresh connection per call and runs one PREPARE never crosses the
+threshold; the statement is held in transient compiled form and
+never written to the `*PGM`. The package then shows
+`PACKAGE_USED_SIZE=36848` (the empty-allocation floor) and
+`NUMBER_STATEMENTS=0` indefinitely.
+
+To verify filing works on a given LPAR, run the same
+parameterised SQL **at least 3 times on a single pinned
+connection** before checking `SYSPACKAGESTAT`. The Go conformance
+test `TestFiling_ServerSideStateVerified` does exactly this; the
+JT400 fixture case `prepared_package_filing_verify.trace`
+mirrors it on the Java side. Both pass against IBM Cloud V7R6M0
+(`GOTCHE9899`, `NUMBER_STATEMENTS=2`, `PACKAGE_USED_SIZE=65744`)
+and against PUB400 V7R5M0 (`GOJTPK9689`, `NUMBER_STATEMENTS=2`,
+`PACKAGE_USED_SIZE=58880`) on the same prepare-loop pattern.
+
+The threshold also explains why every cache-hit-related test in
+`test/conformance/cache_hit_test.go` is gated behind
+`DB2I_TEST_FILING=1`: an environment without authority to drop and
+re-create the package between runs accumulates state, and the
+threshold makes "fresh package + one prepare" non-reproducible.
+
+### 2. Are you querying with the right package name?
+
+The base name from the `package=` DSN property is the user input;
+the on-wire name is what the driver actually files into:
+
+| `package=` | on-wire (V7R6M0 IBM Cloud) | on-wire (PUB400 V7R5M0) |
+|---|---|---|
+| `GOJTPKG` (truncated to 6) | `GOJTPK9899` | `GOJTPK9689` |
+| `GOTCHE` (already 6) | `GOTCHE9899` | `GOTCHE9689` |
+
+The 4-char suffix is the session-options hash JT400 (and
+`hostserver.BuildPackageName`) append per
+`JDPackageManager.java:466`. It varies with the connection
+attributes — date format, decimal separator, CCSID, etc. —
+specifically so two clients with different session options can
+share one `*PGM` library without poisoning each other's filed
+plans. Two clients with **identical** session options
+produce **byte-equal** package names and share one *PGM*.
+
+Verification queries should therefore use `LIKE 'BASE%'`:
+
+```sql
+SELECT PACKAGE_SCHEMA, PACKAGE_NAME, NUMBER_STATEMENTS,
+       PACKAGE_USED_SIZE, LAST_USED_TIMESTAMP
+FROM   QSYS2.SYSPACKAGESTAT
+WHERE  PACKAGE_NAME LIKE 'GOJTPK%'
+  AND  PACKAGE_SCHEMA = '<schema>'
+ORDER  BY PACKAGE_NAME;
+```
+
+…not `PACKAGE_NAME = 'GOJTPKG'`. The exact-match query will
+return zero rows regardless of whether filing is working.
+
+### Visibility delay inside the owning connection
+
+A subtle wrinkle: a `SYSPACKAGESTAT` query issued on the same
+connection that owns the package returns zero rows even after
+filing has happened. The view only reflects state after the
+owning connection has cycled (commit + close, or a fresh conn).
+The Go conformance test pins one `*sql.Conn` for the PREPAREs
+and then queries `SYSPACKAGESTAT` from a separate
+non-extended-dynamic conn — verified empirically on both
+V7R6M0 and V7R5M0 on 2026-05-11.
 
 ## Cross-references
 

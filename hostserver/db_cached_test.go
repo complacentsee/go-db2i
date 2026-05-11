@@ -52,24 +52,43 @@ func TestExecutePreparedCached_RejectsNilCached(t *testing.T) {
 // TestPreparedParamsFromCached exercises the SQLDA -> PreparedParam
 // shape conversion that drives both Exec and Query cache-hit paths.
 // Non-input direction bytes must abort; input-only round-trips the
-// SQL type / length / CCSID / precision / scale.
+// SQL type / length / CCSID. Precision and Scale are zeroed for
+// non-decimal SQLTypes (the cached SQLDA's high/low-byte split is
+// redundant with FieldLength for non-numeric types and produces
+// values the server interprets incorrectly on EXECUTE -- see
+// preparedParamsFromCached doc). ParamType is forced to 0x00 to
+// match JT400's cache-hit wire bytes.
 func TestPreparedParamsFromCached(t *testing.T) {
 	in := []ParameterMarkerField{
-		{SQLType: 497, FieldLength: 4, ParamType: 0x00},
+		// INTEGER with a "scale=4" leak from the SQLDA's high/low
+		// byte overlap (Length=4 stored as 0x0004 reads as
+		// Precision=0, Scale=4 through the package decoder).
+		{SQLType: 497, FieldLength: 4, Precision: 0, Scale: 4, ParamType: 0x00},
 		{SQLType: 449, FieldLength: 16, CCSID: 1208, ParamType: 0xF0},
+		// DECIMAL(5,2) -- the precision/scale survive the SQLDA
+		// because the high/low-byte split is semantically meaningful
+		// for decimal-family types.
+		{SQLType: 484, FieldLength: 3, Precision: 5, Scale: 2, ParamType: 0x00},
 	}
 	out, err := preparedParamsFromCached(in)
 	if err != nil {
 		t.Fatalf("preparedParamsFromCached: %v", err)
 	}
-	if len(out) != 2 {
-		t.Fatalf("got %d shapes, want 2", len(out))
+	if len(out) != 3 {
+		t.Fatalf("got %d shapes, want 3", len(out))
 	}
-	if out[0].SQLType != 497 || out[0].FieldLength != 4 || out[0].ParamType != 0xF0 {
-		t.Errorf("shape[0] mismatch: %+v", out[0])
+	if out[0].SQLType != 497 || out[0].FieldLength != 4 ||
+		out[0].Precision != 0 || out[0].Scale != 0 || out[0].ParamType != 0x00 {
+		t.Errorf("shape[0] INTEGER mismatch: %+v "+
+			"(want SQLType=497 FieldLength=4 Precision=0 Scale=0 ParamType=0x00)", out[0])
 	}
-	if out[1].CCSID != 1208 {
-		t.Errorf("shape[1] CCSID = %d, want 1208", out[1].CCSID)
+	if out[1].CCSID != 1208 || out[1].ParamType != 0x00 {
+		t.Errorf("shape[1] VARCHAR mismatch: %+v "+
+			"(want CCSID=1208 ParamType=0x00)", out[1])
+	}
+	if out[2].Precision != 5 || out[2].Scale != 2 || out[2].ParamType != 0x00 {
+		t.Errorf("shape[2] DECIMAL(5,2) precision/scale stripped: %+v "+
+			"(want Precision=5 Scale=2 ParamType=0x00)", out[2])
 	}
 
 	// OUT direction must abort.

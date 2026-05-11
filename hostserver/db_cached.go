@@ -9,22 +9,28 @@ import (
 
 // Client-side cache-hit fast path for v0.7.1. When a Conn's
 // PackageManager has downloaded a CP 0x380B reply at connect
-// (package-cache=true) and a caller's SQL byte-equals a cached
-// PackageStatement, the driver short-circuits one wire round-trip
-// by skipping PREPARE_DESCRIBE:
+// (package-cache=true) -- or has populated the cache mid-session
+// via the v0.7.4 auto-populate-after-filing path -- and a caller's
+// SQL byte-equals a cached PackageStatement, the driver short-
+// circuits one wire round-trip by skipping PREPARE_DESCRIBE:
 //
 //	miss:  CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE/OPEN
 //	hit:   CREATE_RPB +                  + CHANGE_DESCRIPTOR + EXECUTE/OPEN
-//	                                                         (with name override)
 //
-// This is the same shape JT400 emits in AS400JDBCStatement.commonExecute
-// when nameOverride_ is set (see AS400JDBCStatement.java:880-885):
-// CREATE_RPB stays so the server has a cursor / handle scope for the
-// frames that follow; CHANGE_DESCRIPTOR uploads the cached parameter
-// shape so the bind side matches; EXECUTE/OPEN carries the cached
-// 18-char server statement name in CP 0x3806 (cpDBPrepareStatementName)
-// telling the server "use the prepared plan filed in the package
-// under this name, not the RPB's auto-allocated STMT0001".
+// The server resolves the cached plan via two pieces of wire data:
+//   - CP 0x3804 (package name) on the EXECUTE / OPEN frame -- tells
+//     the server which *PGM to look in.
+//   - CP 0x3806 (statement-name override) carrying the 18-char
+//     server-assigned name from the cached PackageStatement -- tells
+//     the server which entry in that *PGM to dispatch.
+//
+// This is byte-equivalent to JT400's wire shape; verified against
+// IBM Cloud V7R6M0 in prepared_package_cache_hit.trace and
+// prepared_package_filing_iud.trace. The earlier comment block
+// here referenced JT400's nameOverride_ field as the mechanism --
+// that's actually a JT400-internal client cache, not the wire
+// protocol; the wire dispatch is package-marker + RPB handle, no
+// reply-side rename capture required.
 //
 // Cache-hit eligibility is enforced by the driver layer
 // (driver.packageLookup) and by ExecutePreparedCached itself: any
@@ -140,7 +146,7 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after cached EXECUTE: %w", err)
 	}
-	return &ExecResult{}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected()}, nil
 }
 
 // OpenSelectPreparedCached is the Query-path companion to
@@ -196,13 +202,19 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 		stmtType = 2 // TYPE_SELECT
 	}
 	openCorr := nextCorr()
+	pmDesc := uint16(1)
+	if len(shapes) == 0 {
+		// No CHANGE_DESCRIPTOR sent; reference descriptor 0 so the
+		// server doesn't dereference a non-existent descriptor.
+		pmDesc = 0
+	}
 	tpl := DBRequestTemplate{
 		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression | ORSCursorAttributes,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
 		RPBHandle:                 1,
-		ParameterMarkerDescriptor: 1,
+		ParameterMarkerDescriptor: pmDesc,
 	}
 	params := []DBParam{
 		DBParamByte(cpDBOpenAttributes, 0x80),
@@ -222,9 +234,16 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 		DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 		DBParamByte(cpDBResultSetHoldability, 0xE8),
 		DBParamShort(cpDBStatementType, stmtType),
-		DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
-		DBParamShort(cpDBSyncPointDelimiter, 0x0000),
 	)
+	// Extended data only when we have parameters to bind.
+	// CP 0x381F with a header-only body (zero parameters) makes the
+	// server return SQL-603 errorClass=2 on OPEN_DESCRIBE_FETCH for
+	// the criteria=select parameterless SELECT path; the static
+	// equivalent skips it entirely, and JT400 follows that pattern.
+	if len(shapes) > 0 {
+		params = append(params, DBParam{CodePoint: cpDBExtendedData, Data: dataPayload})
+	}
+	params = append(params, DBParamShort(cpDBSyncPointDelimiter, 0x0000))
 	hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
@@ -327,20 +346,59 @@ func sendCachedChangeDescriptor(conn io.ReadWriter, shapes []PreparedParam, corr
 // EncodeDBExtendedData encoders consume. Refuses any non-input
 // direction up front (sql.Out / sql.InOut callers must skip the
 // cache).
+//
+// Precision/Scale handling: the package SQLDA encodes Precision in
+// the high byte of the per-field "length" field and Scale in the
+// low byte (see db_package.go:474-475). For numeric types this is
+// useful (DECIMAL(5,2) stores 0x0502, decoded as precision=5,
+// scale=2). For non-numeric types the same bytes redundantly carry
+// the storage width, so the decoded Precision/Scale are garbage
+// (an INTEGER with FieldLength=4 would otherwise propagate as
+// Precision=0, Scale=4 -- enough to make the server silently drop
+// the bound value at EXECUTE).
+//
+// JT400's wire emits Precision/Scale of 0 for non-decimal SQLTypes
+// on cache-hit EXECUTE; we mirror that here. ParamType is forced
+// to 0x00 (input-only, no direction tag) to match JT400's
+// cache-hit byte sequence verified on V7R6M0 2026-05-11.
 func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, error) {
 	out := make([]PreparedParam, 0, len(pmf))
 	for i, p := range pmf {
 		if p.ParamType != 0x00 && p.ParamType != 0xF0 {
 			return nil, fmt.Errorf("hostserver: cached PMF[%d] direction 0x%02X (only IN is cacheable)", i, p.ParamType)
 		}
+		precision := uint16(0)
+		scale := uint16(0)
+		if isDecimalNumericSQLType(p.SQLType) {
+			// Trust the SQLDA's high/low-byte split for packed/
+			// zoned decimal -- precision and scale are part of the
+			// type identity for these.
+			precision = p.Precision
+			scale = p.Scale
+		}
 		out = append(out, PreparedParam{
 			SQLType:     p.SQLType,
 			FieldLength: p.FieldLength,
-			Precision:   p.Precision,
-			Scale:       p.Scale,
+			Precision:   precision,
+			Scale:       scale,
 			CCSID:       p.CCSID,
-			ParamType:   0xF0,
+			ParamType:   0x00,
 		})
 	}
 	return out, nil
+}
+
+// isDecimalNumericSQLType reports whether the SQLType is one of the
+// packed/zoned decimal variants where Precision and Scale carry
+// semantic meaning beyond storage width. For every other type
+// (INTEGER, VARCHAR, DATE, ...) Precision/Scale of zero match
+// JT400's cache-hit wire bytes.
+func isDecimalNumericSQLType(t uint16) bool {
+	switch t {
+	case 484, 485, // DECIMAL (NN, nullable)
+		488, 489, // NUMERIC (zoned decimal)
+		996, 997: // DECFLOAT
+		return true
+	}
+	return false
 }

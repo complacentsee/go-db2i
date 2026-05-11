@@ -229,7 +229,12 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// and there's no sql.Out destination, skip PREPARE_DESCRIBE.
 	// Saves one wire round-trip per call by relying on the server-
 	// side plan filed in the *PGM under the cached statement name.
-	if cached := s.conn.packageLookup(s.query); cached != nil && len(outDests) == 0 && s.conn.pkg != nil {
+	cached := s.conn.packageLookup(s.query)
+	// outDests is preallocated to len(args) -- only non-nil
+	// entries are actual sql.Out destinations. The earlier
+	// `len(outDests) == 0` test always falsified for any
+	// parameterised call, defeating the cache-hit dispatch.
+	if cached != nil && !hasOutDest(outDests) && s.conn.pkg != nil {
 		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logExecCached(logger, len(args), start, res, cached.Name, err)
 		if err != nil {
@@ -238,10 +243,25 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 	}
 
+	// Track this PREPARE_DESCRIBE for the v0.7.4 auto-populate
+	// path. When the local count crosses IBM's 3-PREPARE
+	// threshold, the next prepare causes server-side filing;
+	// noteFilingPrepare returns true on the threshold-crossing
+	// call so we can issue a one-time RETURN_PACKAGE refresh
+	// after the EXECUTE returns. Only counts when the SQL
+	// passes packageEligibleFor (otherwise the server isn't
+	// going to file no matter how often we prepare).
+	shouldRefresh := false
+	if s.conn.packageEligibleFor(s.query, len(args) > 0) {
+		shouldRefresh = s.conn.noteFilingPrepare(s.query)
+	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
+	}
+	if shouldRefresh {
+		s.conn.refreshPackageCache(context.Background(), s.query)
 	}
 	if err := writeBackOutParams(outDests, res.OutValues); err != nil {
 		return nil, err
@@ -321,7 +341,14 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	hasParams := len(args) > 0
 	selectOpts := s.conn.selectOptionsFor(s.query, hasParams)
 	start := time.Now()
-	if !hasParams {
+	// Parameterless SELECTs default to OpenSelectStatic. But when
+	// extended-dynamic + package-criteria=select are both active,
+	// route through the prepared path so the cache-hit fast path
+	// can pick up filed parameterless SELECTs -- otherwise the
+	// criteria=select knob does nothing for Query callers and the
+	// filed plan in the *PGM is unreachable.
+	useStatic := !hasParams && !s.conn.packageEligibleFor(s.query, hasParams)
+	if useStatic {
 		cursor, err := hostserver.OpenSelectStatic(s.conn.conn, s.query, s.conn.nextCorrFunc(), selectOpts...)
 		s.logQuery("OPEN_SELECT_STATIC", 0, start, err)
 		if err != nil {
@@ -347,10 +374,21 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
 
+	// v0.7.4 auto-populate: track this PREPARE for the threshold-
+	// crossing refresh, same as Stmt.Exec. Refresh happens AFTER
+	// the OPEN returns the first batch, so the next call of the
+	// same SQL on this conn finds NameBytes populated.
+	shouldRefresh := false
+	if s.conn.packageEligibleFor(s.query, hasParams) {
+		shouldRefresh = s.conn.noteFilingPrepare(s.query)
+	}
 	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
 	s.logQuery("OPEN_SELECT_PREPARED", len(args), start, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
+	}
+	if shouldRefresh {
+		s.conn.refreshPackageCache(context.Background(), s.query)
 	}
 	return &Rows{cursor: cursor, conn: s.conn}, nil
 }
@@ -688,6 +726,20 @@ func int32Of(v reflect.Value) int32 {
 		return int32(v.Int())
 	}
 	return 0
+}
+
+// hasOutDest reports whether any slot in outDests is a real
+// sql.Out destination. outDests is preallocated by
+// bindArgsToPreparedParams with len(args) slots, the unused ones
+// nil; callers that want to know "is there at least one OUT
+// param" must walk the slice rather than checking len().
+func hasOutDest(outDests []*stdsql.Out) bool {
+	for _, o := range outDests {
+		if o != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // writeBackOutParams reflect-assigns each decoded OUT value into the

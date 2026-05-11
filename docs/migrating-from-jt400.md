@@ -229,7 +229,7 @@ For `translate binary=true`: the equivalent behaviour is built in.
 go-db2i always returns CCSID-65535 / FOR BIT DATA columns as `[]byte`;
 no flag needed.
 
-### Cache-hit fast path (v0.7.1)
+### Cache-hit fast path (v0.7.1 / v0.7.4)
 
 `extended-dynamic=true&package=APP&package-cache=true` activates
 both the server-side `*PGM` filing (JT400-equivalent) AND a
@@ -240,6 +240,15 @@ same session options, **a Java service and a Go service hitting
 the same LPAR share one `*PGM` on disk**. The Go client benefits
 from plans the Java client filed (and vice versa) without any
 coordination.
+
+v0.7.4 extends filing coverage to `INSERT` / `UPDATE` / `DELETE`
+(the original v0.7.0–v0.7.2 work was SELECT-only) and fixes a
+cache-hit param-binding regression that silently zeroed the
+bound value on filed statements. v0.7.4 also auto-populates the
+cache after first-time filing on the same connection, so the
+3rd / 6th / 12th call of a not-yet-filed SQL triggers a
+`RETURN_PACKAGE` refresh and subsequent calls hit the fast path
+without waiting for a fresh connect.
 
 See [`package-caching.md`](./package-caching.md) for setup,
 observability (slog DEBUG `"db2i: query cache-hit"` lines, OTel

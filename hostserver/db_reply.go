@@ -88,6 +88,34 @@ type DBReply struct {
 	Params     []DBParam
 }
 
+// RowsAffected reads the rows-affected count from the reply's
+// CP 0x3807 SQLCA. SQLERRD is six int32 BE starting at offset 96
+// of the SQLCA data; rows-affected sits at SQLERRD(3) in SQL-
+// standard 1-indexed terms (sqlerrd_[2] in JT400's 0-indexed
+// Java array), which is byte offset 104.
+//
+// Returns 0 when no SQLCA is present, the SQLCA is too short, or
+// the value is sentinel-negative (IBM i uses negative SQLERRD
+// fields for "info not available"; JDBC's getUpdateCount mirrors
+// the same fallback).
+func (r *DBReply) RowsAffected() int64 {
+	for i := range r.Params {
+		if r.Params[i].CodePoint != cpDBSQLCA {
+			continue
+		}
+		data := r.Params[i].Data
+		if len(data) < 108 {
+			return 0
+		}
+		v := int32(binary.BigEndian.Uint32(data[104:108]))
+		if v < 0 {
+			return 0
+		}
+		return int64(v)
+	}
+	return 0
+}
+
 // VLFCompressed reports whether the server set the variable-length-
 // field compression bit (0x00010000) in the response ORS bitmap.
 // True means CP 0x380E result data must be decoded with the row-

@@ -252,7 +252,37 @@ type PackageStatement struct {
 	// RawParameterMarkerFormat is the raw bytes of the
 	// parameter-marker-format SQLDA region (or nil if absent).
 	RawParameterMarkerFormat []byte
+
+	// LocalPrepareCount tracks how many filing-eligible PREPARE_DESCRIBE
+	// requests the current connection has sent for this SQL. Used by
+	// the v0.7.4 auto-populate path: once the count reaches IBM's
+	// SI30855 threshold (3), the conn issues one RETURN_PACKAGE refresh
+	// to learn the server-assigned name so subsequent calls dispatch
+	// via the cache-hit fast path. Not persisted across reconnects --
+	// each conn tracks its own count, and connect-time RETURN_PACKAGE
+	// absorbs filings caused by other conns.
+	LocalPrepareCount uint8
+
+	// RefreshAttempts counts how many RETURN_PACKAGE refreshes this
+	// conn has issued for this SQL that came back without a populated
+	// NameBytes (i.e. filing didn't materialize). Used to cap retry
+	// cost when filing fails persistently (package full, server
+	// transient state, etc.) so we don't burn a refresh per call
+	// forever. After hostserver.MaxFilingRefreshAttempts unsuccessful
+	// attempts, the conn stays on the regular path for this SQL.
+	RefreshAttempts uint8
 }
+
+// MaxFilingRefreshAttempts caps the number of RETURN_PACKAGE
+// refreshes a connection will issue to learn a single SQL's
+// server-assigned filed name. Refreshes fire at LocalPrepareCount
+// values 3, 6, 12 (one per attempt; the threshold-crossing prepare
+// plus exponential backoff). After three unsuccessful refreshes
+// the conn gives up and stays on the regular PREPARE+EXECUTE path
+// for this SQL, logging a one-time WARN. Mirrors the cost ceiling
+// the v0.7.4 plan committed to: ~3 wasted refreshes maximum (~210ms
+// total on a typical LPAR).
+const MaxFilingRefreshAttempts = 3
 
 // PackageManager holds the per-connection package state. M10-1
 // ships only the scaffolding; M10-3 wires it into the connect-time
@@ -267,9 +297,17 @@ type PackageManager struct {
 	// CCSID is the package-CCSID (DSN `package-ccsid`); JT400
 	// defaults to 13488 (UCS-2 BE).
 	CCSID uint16
-	// Cached statements downloaded via RETURN_PACKAGE. Populated by
-	// M10-3 on connect.
-	Cached []PackageStatement
+	// Cached holds the in-memory view of the server-side *PGM.
+	// Populated on connect from the RETURN_PACKAGE reply and
+	// refreshed mid-session by the v0.7.4 auto-populate path
+	// after a SQL crosses IBM's 3-PREPARE threshold.
+	//
+	// Map keyed on SQLText so packageLookup is O(1) instead of
+	// linear over the slice. Entries with NameBytes populated
+	// are eligible for cache-hit dispatch; entries we've inserted
+	// to track LocalPrepareCount but haven't yet seen filed
+	// (NameBytes empty) only contribute to the threshold count.
+	Cached map[string]*PackageStatement
 }
 
 // BuildCreatePackageParams builds the parameter list for a

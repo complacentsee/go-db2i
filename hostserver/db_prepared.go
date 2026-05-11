@@ -427,9 +427,14 @@ func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPar
 // whether the OPEN reply already drained the cursor and whether
 // the server auto-closed it (JT400's "fetch/close" path).
 func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32, opts selectOpts) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
-	if !strings.ContainsRune(sql, '?') {
-		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: OpenSelectPrepared called on SQL without parameter markers; use OpenSelectStatic")
-	}
+	// Parameterless SELECTs are normally routed through
+	// OpenSelectStatic, but the driver intentionally falls through
+	// to this path when extended-dynamic + package-criteria=select
+	// is active so the SQL can be filed into the *PGM and reached
+	// by the cache-hit fast path on subsequent calls. The PREPARE_
+	// DESCRIBE + CHANGE_DESCRIPTOR + OPEN_DESCRIBE_FETCH wire shape
+	// degrades cleanly with zero parameter markers (CHANGE_DESCRIPTOR
+	// is skipped at the `len(paramShapes) > 0` gate below).
 	if len(paramShapes) != len(paramValues) {
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: shape/value count mismatch (%d shapes, %d values)", len(paramShapes), len(paramValues))
 	}

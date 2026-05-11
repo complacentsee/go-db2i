@@ -1,7 +1,11 @@
 # go-db2i
 
-> **Current: v0.7.2 (2026-05-11)** — extended-dynamic SQL package
-> caching live across the JDBC type matrix. See
+> **Current: v0.7.4 (2026-05-11)** — extended-dynamic SQL package
+> caching live across the JDBC type matrix, with `INSERT` / `UPDATE`
+> / `DELETE` filing wired end-to-end and the cache-hit param-binding
+> regression fixed. Per-conn auto-populate refreshes the cache after
+> first-time filing so subsequent calls dispatch via the fast path
+> without a server-renamed-name round-trip. See
 > [`docs/package-caching.md`](./docs/package-caching.md) for the
 > operator's guide and the `Example_packageCache*` godoc snippets.
 
@@ -86,9 +90,15 @@ implemented end-to-end:
   downloaded cache, `Stmt.Exec` / `Stmt.Query` skip `PREPARE_DESCRIBE`
   and run via `ExecutePreparedCached` / `OpenSelectPreparedCached`
   with the cached 18-byte server-assigned statement name in CP 0x3806
-  — one round-trip saved per call. The 10-char wire name is
-  byte-equal to JT400 for the same session options, so a Go client
-  and a Java client targeting the same LPAR share one `*PGM`.
+  — one round-trip saved per call. v0.7.4 extends filing to
+  `INSERT` / `UPDATE` / `DELETE`, fixes the cache-hit
+  param-binding regression on SQLDA Precision/Scale, and
+  auto-populates the cache after first-time filing (per-conn retry
+  schedule at PREPARE-counts 3 / 6 / 12, capped to bound work) so
+  same-conn subsequent calls hit the fast path without waiting for
+  a reconnect to re-download. The 10-char wire name is byte-equal
+  to JT400 for the same session options, so a Go client and a Java
+  client targeting the same LPAR share one `*PGM`.
   Operator guide: [`docs/package-caching.md`](./docs/package-caching.md).
   DSN surface: [`docs/configuration.md`](./docs/configuration.md).
 
@@ -230,7 +240,7 @@ if err != nil {
 
 | IBM i version | Status |
 |---|---|
-| V7R6 (7.6) | wire-validated on IBM Cloud V7R6M0 (PBKDF2 / SHA-1, full feature set). Note: extended-dynamic package filing is wire-correct on go-db2i and byte-identical to JT400, but the IBM Cloud V7R6M0 LPAR exhibits a server-side / JT400-client-heuristic that prevents fresh statement filing — see [`docs/package-caching.md`](./docs/package-caching.md). Cache-hit dispatch works correctly against any pre-populated `*SQLPKG`. |
+| V7R6 (7.6) | wire-validated on IBM Cloud V7R6M0 (PBKDF2 / SHA-1, full feature set). Extended-dynamic filing — including SELECT, INSERT, UPDATE, DELETE — is live-validated end-to-end against `GOTCHE9899` after the 3-PREPARE threshold (PTF SI30855) is crossed. The full 17-type JDBC matrix round-trips through filing + cache-hit dispatch. See [`docs/package-caching.md`](./docs/package-caching.md) for the operator's guide and `CHANGELOG.md` for the verification matrix. |
 | V7R5 (7.5) | should work — same protocol level; full feature set including package filing (PUB400 V7R5M0 baseline) |
 | V7R4 (7.4) | should work; tested via PUB400 (some features auto-fallback) |
 | V7R3 (7.3) | should work via password levels 2/3 (SHA-1) |

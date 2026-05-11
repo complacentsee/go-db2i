@@ -119,6 +119,8 @@ final class Cases {
         cases.add(new PackageFirstUse(schema));
         cases.add(new PackageCacheHit(schema));
         cases.add(new PackageCacheDownload(schema));
+        cases.add(new PackageFilingVerify(schema));
+        cases.add(new PackageFilingIUD(schema));
 
         // Negative paths — SQLException to SQLCARD parsing.
         cases.add(new ErrorSyntax());
@@ -1071,6 +1073,306 @@ final class Cases {
                 try (ResultSet rs = ps.executeQuery()) {
                     golden.recordResultSet(rs);
                 }
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_package_filing_verify.trace} — ground-truth fixture
+     * that proves end-to-end filing into the *SQLPKG works on the
+     * target LPAR. Wipes any prior {@code GOJTPK*} package, then
+     * runs each parameterised statement {@value #PREPARE_COUNT}
+     * times so it crosses IBM's documented 3-PREPARE threshold:
+     *
+     * <blockquote>"Starting with IBM i 6.1 PTF SI30855, a statement
+     * must be prepared 3 times before it is added to the SQL
+     * package. This change was made to prevent filling the package
+     * with statements that aren't used frequently." — IBM Support
+     * page <em>SQL Package Questions and Answers</em>.</blockquote>
+     *
+     * Without this loop the v0.7.2 investigation saw
+     * {@code NUMBER_STATEMENTS=0} on V7R6M0 even though JT400 was
+     * correctly emitting {@code 0x3808=01} on the wire (verified at
+     * {@code prepared_package_first_use.trace:373}). The single
+     * PREPARE-per-statement pattern is two short of the threshold,
+     * so the server defers filing — exactly as IBM documents.
+     *
+     * Each PreparedStatement is opened and closed inside the loop
+     * so the wire actually issues 4 PREPARE_DESCRIBE round-trips
+     * for the same SQL text (JDBC connection-level statement
+     * caching would otherwise collapse this to one PREPARE).
+     *
+     * Both statements pass JT400's {@code JDSQLStatement.isPackaged()}
+     * gate under {@code package criteria=default}: parameterised
+     * SELECT (matches {@code numberOfParameters_ > 0}), parameterised
+     * INSERT (same). Then we query {@code QSYS2.SYSPACKAGESTAT}
+     * with {@code LIKE 'GOJTPK%'} so the 4-char options-hash suffix
+     * JT400 appends to the package name (per
+     * {@code JDPackageManager.java:466}) is matched.
+     *
+     * The catalog query MUST use {@link Statement} (not
+     * {@link PreparedStatement}) so it doesn't itself attempt to
+     * file through the cached path and pollute the count.
+     */
+    private static final class PackageFilingVerify extends WithPackage {
+        // 8-char SQL/system name; deterministic table for the
+        // parameterised INSERT statement that exercises the filing
+        // path for non-SELECT verbs.
+        private static final String TABLE_SHORT = "GOJTFLVT";
+
+        // IBM's 3-PREPARE threshold (IBM i 6.1 PTF SI30855) means
+        // 3 PREPAREs of the same SQL are needed before the statement
+        // gets filed. Run 4 to be safely past the threshold and to
+        // also accumulate prepare-count statistics in the package.
+        private static final int PREPARE_COUNT = 4;
+
+        PackageFilingVerify(String schema) {
+            super("prepared_package_filing_verify", schema);
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            // 1. Wipe any prior package so the catalog count is the
+            //    result of THIS run alone. Wildcard handles the 4-char
+            //    options-hash suffix.
+            try (Statement st = conn.createStatement()) {
+                String cmd = "DLTOBJ OBJ(" + schema + "/" + PACKAGE_NAME + "*) "
+                        + "OBJTYPE(*SQLPKG)";
+                try {
+                    st.execute("CALL QSYS2.QCMDEXC('" + cmd + "')");
+                } catch (SQLException ignored) {
+                    // CPF2105 (object not found) is the expected first-run
+                    // outcome; QCMDEXC wraps it as a SQL error.
+                }
+            }
+            // 2. (Re)create the test table for the INSERT case. Two-step
+            //    drop-create so re-runs are deterministic.
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) {
+                    // Table doesn't exist yet on first run.
+                }
+                st.execute("CREATE TABLE " + schema + "." + TABLE_SHORT
+                        + " (ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "LABEL VARCHAR(32) NOT NULL)");
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) { }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            String insertSQL = "INSERT INTO " + schema + "." + TABLE_SHORT
+                    + " (ID, LABEL) VALUES (?, ?)";
+
+            // Statement 1 — parameterised SELECT, prepared
+            // PREPARE_COUNT times. JT400's isPackaged() returns
+            // true (numberOfParameters_ > 0), so each PREPARE
+            // emits 0x3808=01. After IBM's 3-PREPARE threshold
+            // the statement is filed into the *PGM.
+            //
+            // Try-with-resources closes each PreparedStatement
+            // before the next iteration so the wire actually
+            // issues a fresh PREPARE_DESCRIBE -- JDBC client-side
+            // caching would otherwise collapse to one round-trip.
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                try (PreparedStatement ps = conn.prepareStatement(SAMPLE_SQL)) {
+                    ps.setInt(1, i);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (i == 0) {
+                            // Only record the first row in golden;
+                            // the other three are just to cross
+                            // the threshold and don't add value.
+                            golden.recordResultSet(rs);
+                        } else {
+                            while (rs.next()) { /* drain */ }
+                        }
+                    }
+                }
+            }
+
+            // Statement 2 — parameterised INSERT, prepared
+            // PREPARE_COUNT times. Same threshold story, different
+            // verb. ID is loop-indexed to avoid the primary-key
+            // collision that would otherwise fail iterations 2-N.
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                try (PreparedStatement ps = conn.prepareStatement(insertSQL)) {
+                    ps.setInt(1, i + 1);
+                    ps.setString(2, "filing-verify-" + i);
+                    int n = ps.executeUpdate();
+                    if (i == 0) {
+                        golden.recordUpdateCount(n);
+                    }
+                }
+            }
+
+            // Statement 3 — load-bearing assertion. Catalog query via
+            // plain Statement so it doesn't itself try to file. LIKE
+            // 'GOJTPK%' so the 4-char options-hash suffix is matched.
+            // If NUMBER_STATEMENTS >= 2, filing works on this LPAR.
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT PACKAGE_SCHEMA, PACKAGE_NAME, NUMBER_STATEMENTS, "
+                         + "PACKAGE_USED_SIZE, LAST_USED_TIMESTAMP, DAYS_USED_COUNT "
+                         + "FROM QSYS2.SYSPACKAGESTAT "
+                         + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
+                         + "AND PACKAGE_SCHEMA = '" + schema + "' "
+                         + "ORDER BY PACKAGE_NAME")) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_package_filing_iud.trace} — companion to
+     * {@link PackageFilingVerify}, but exercises the
+     * INSERT / UPDATE / DELETE branches of JT400's
+     * {@code JDSQLStatement.isPackaged()} gate so we have a
+     * ground-truth trace of the EXECUTE wire shape JT400 uses
+     * after the server files a non-SELECT statement.
+     *
+     * <p>The go-db2i driver's {@code hostserver.ExecutePreparedSQL}
+     * currently hard-codes {@code prepare-option=0x00} for IUDs
+     * (see db_exec.go:187) because the prepare-option=1 wire
+     * shape causes the server to rename the just-prepared
+     * statement and the follow-up EXECUTE fails with SQL-518.
+     * JT400 handles this via its {@code nameOverride_}: it parses
+     * the renamed 18-byte server-assigned name out of the
+     * PREPARE_DESCRIBE reply and re-cites it on the EXECUTE wire
+     * via CP 0x3806 ({@code cpDBPrepareStatementName}). This
+     * fixture captures exactly that round-trip so the Go reply
+     * parser can be anchored to the real on-wire bytes.</p>
+     *
+     * <p>Each statement is prepared {@value #PREPARE_COUNT} times
+     * to cross IBM's 3-PREPARE filing threshold (IBM i 6.1 PTF
+     * SI30855). Final result set queries {@code SYSPACKAGESTAT}
+     * + {@code SYSPACKAGESTMTSTAT} so the golden documents what
+     * the three filed statements look like server-side.</p>
+     */
+    private static final class PackageFilingIUD extends WithPackage {
+        // 8-char SQL/system name distinct from PackageFilingVerify's
+        // GOJTFLVT so the two cases don't share residual state.
+        private static final String TABLE_SHORT = "GOJTFIUD";
+
+        // Match PackageFilingVerify's loop count: one above the
+        // IBM 3-PREPARE threshold so the server is guaranteed to
+        // file each of the three statement texts at least once.
+        private static final int PREPARE_COUNT = 4;
+
+        PackageFilingIUD(String schema) {
+            super("prepared_package_filing_iud", schema);
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            // 1. Wipe any prior package so the catalog measurement
+            //    reflects THIS run alone. Wildcard handles the
+            //    4-char options-hash suffix JT400 appends.
+            try (Statement st = conn.createStatement()) {
+                String cmd = "DLTOBJ OBJ(" + schema + "/" + PACKAGE_NAME + "*) "
+                        + "OBJTYPE(*SQLPKG)";
+                try {
+                    st.execute("CALL QSYS2.QCMDEXC('" + cmd + "')");
+                } catch (SQLException ignored) {
+                    // CPF2105 "object not found" on first run; fine.
+                }
+            }
+            // 2. (Re)create test table with enough rows that UPDATE
+            //    and DELETE both have something to act on after the
+            //    INSERTs land.
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) {
+                    // First run; expected.
+                }
+                st.execute("CREATE TABLE " + schema + "." + TABLE_SHORT
+                        + " (ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "LABEL VARCHAR(32) NOT NULL)");
+                // Seed PREPARE_COUNT*2 rows so the UPDATE/DELETE
+                // iterations each act on a distinct row.
+                for (int i = 0; i < PREPARE_COUNT * 2; i++) {
+                    st.execute("INSERT INTO " + schema + "." + TABLE_SHORT
+                            + " VALUES (" + (i + 100) + ", 'seed-" + i + "')");
+                }
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) { }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            String insertSQL = "INSERT INTO " + schema + "." + TABLE_SHORT
+                    + " (ID, LABEL) VALUES (?, ?)";
+            String updateSQL = "UPDATE " + schema + "." + TABLE_SHORT
+                    + " SET LABEL = ? WHERE ID = ?";
+            String deleteSQL = "DELETE FROM " + schema + "." + TABLE_SHORT
+                    + " WHERE ID = ?";
+
+            // INSERT — primes new rows (IDs 1..PREPARE_COUNT).
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                try (PreparedStatement ps = conn.prepareStatement(insertSQL)) {
+                    ps.setInt(1, i + 1);
+                    ps.setString(2, "iud-insert-" + i);
+                    int n = ps.executeUpdate();
+                    if (i == 0) {
+                        golden.recordUpdateCount(n);
+                    }
+                }
+            }
+
+            // UPDATE — touches the seed rows ID=100..103.
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                try (PreparedStatement ps = conn.prepareStatement(updateSQL)) {
+                    ps.setString(1, "iud-update-" + i);
+                    ps.setInt(2, 100 + i);
+                    ps.executeUpdate();
+                }
+            }
+
+            // DELETE — clears seed rows ID=104..107.
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                try (PreparedStatement ps = conn.prepareStatement(deleteSQL)) {
+                    ps.setInt(1, 104 + i);
+                    ps.executeUpdate();
+                }
+            }
+
+            // Server-side state — confirms NUMBER_STATEMENTS reflects
+            // all three filed verbs (INSERT + UPDATE + DELETE).
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT PACKAGE_SCHEMA, PACKAGE_NAME, NUMBER_STATEMENTS, "
+                         + "PACKAGE_USED_SIZE, LAST_USED_TIMESTAMP, DAYS_USED_COUNT "
+                         + "FROM QSYS2.SYSPACKAGESTAT "
+                         + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
+                         + "AND PACKAGE_SCHEMA = '" + schema + "' "
+                         + "ORDER BY PACKAGE_NAME")) {
+                golden.recordResultSet(rs);
+            }
+
+            // Per-statement metadata — the STATEMENT_NAME column
+            // is the 18-char server-assigned name (QZAF...001 etc.)
+            // which is what we need the Go reply parser to capture.
+            // STATEMENT_TEXT confirms our three statements landed.
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT STATEMENT_NUMBER, STATEMENT_NAME, NUMBER_TIMES_PREPARED, "
+                         + "NUMBER_TIMES_EXECUTED, SUBSTR(STATEMENT_TEXT, 1, 80) AS STMT "
+                         + "FROM QSYS2.SYSPACKAGESTMTSTAT "
+                         + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
+                         + "AND PACKAGE_SCHEMA = '" + schema + "' "
+                         + "ORDER BY STATEMENT_NUMBER")) {
+                golden.recordResultSet(rs);
             }
         }
     }

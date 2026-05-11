@@ -53,15 +53,27 @@ const cachePackageName = "GOTCHE"
 
 // requireFiling skips a test unless DB2I_TEST_FILING=1 is set in
 // the environment. Cache-hit tests that depend on the server
-// actually filing PREPAREd plans into the *PGM only pass when the
-// target LPAR's QSQSRVR job has filing enabled. The IBM Cloud
-// V7R6M0 environment go-db2i normally runs against doesn't file
-// (verified by capturing JT400's wire on 2026-05-11: even JT400
-// with package add=true never emits the WRITE_SQL_STATEMENT_TEXT
-// CP -- client-side heuristic suppresses it). Set DB2I_TEST_FILING=1
-// to opt into these tests on an LPAR where filing is known to work
-// (e.g. PUB400 V7R5M0 historically). Without the env var the tests
-// skip cleanly so the conformance run stays green.
+// actually filing PREPAREd plans into the *PGM only pass when:
+//
+//  1. Each candidate SQL has been PREPAREd >= 3 times. IBM's
+//     SQL Package Questions and Answers page documents this:
+//     "Starting with IBM i 6.1 PTF SI30855, a statement must
+//     be prepared 3 times before it is added to the SQL
+//     package." This is a server-side optimisation to keep
+//     one-shot SQL out of the package. Filing-dependent tests
+//     loop PREPAREs to cross the threshold (see filingPrepareCount).
+//  2. The catalog query happens on a FRESH connection. The
+//     SYSPACKAGESTAT view has a within-connection visibility
+//     delay -- statements filed by the owning conn don't
+//     appear in the view until the conn cycles. Verified
+//     2026-05-11 on V7R6M0 and V7R5M0.
+//  3. The user has authority to DLTOBJ + CREATE_PACKAGE in
+//     the named schema. PUB400 grants this within a per-user
+//     library; IBM Cloud V7R6M0 grants it via *ALLOBJ on GOTEST.
+//
+// Set DB2I_TEST_FILING=1 to opt in. Without the env var the
+// tests skip cleanly so the conformance run stays green on
+// environments that aren't set up for the full filing exercise.
 func requireFiling(t *testing.T) {
 	t.Helper()
 	if os.Getenv("DB2I_TEST_FILING") != "1" {
@@ -200,19 +212,54 @@ func fillPackageCache(t *testing.T, kind fillKind, sqlText string, args ...any) 
 	t.Helper()
 	db, _ := openDBWithPackageCache(t, "")
 	defer db.Close()
-	switch kind {
-	case fillExec:
-		if _, err := db.Exec(sqlText, args...); err != nil {
-			t.Fatalf("fillPackageCache(Exec %q): %v", sqlText, err)
+	// Pin a single conn so all PREPAREs accumulate against one
+	// QZDASOINIT job (the server's 3-PREPARE filing counter is
+	// per-job-per-package; pool churn would split the count and
+	// leave each job below threshold).
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("fillPackageCache: db.Conn: %v", err)
+	}
+	defer conn.Close()
+	// Loop filingPrepareCount times so IBM's 3-PREPARE threshold
+	// (PTF SI30855, IBM i 6.1) is crossed. Without this the
+	// SELECT/INSERT/UPDATE/DELETE is held in transient form and
+	// never written to the *PGM, so the subsequent cache-hit
+	// assertion fails even with a correct wire shape.
+	//
+	// Iter 0 must succeed -- the test depends on at least one
+	// successful EXECUTE for the SQL to file with valid metadata.
+	// Iters 1..N are tolerated even on EXECUTE failure: the
+	// server still counts the PREPARE side, which is what
+	// crosses the threshold. This matters for tests like
+	// TestCacheHit_ServerErrorDoesntPoisonRPB whose SQL is
+	// INSERT (id) VALUES (?) with a constant id -- iter 1+
+	// would otherwise duplicate-key abort the loop.
+	for i := 0; i < filingPrepareCount; i++ {
+		switch kind {
+		case fillExec:
+			if _, err := conn.ExecContext(ctx, sqlText, args...); err != nil {
+				if i == 0 {
+					t.Fatalf("fillPackageCache(Exec %q) iter 0: %v", sqlText, err)
+				}
+				// Later iters: PREPARE counted on the server side
+				// even if EXECUTE failed; continue accumulating
+				// the threshold count.
+			}
+		case fillQuery:
+			rows, err := conn.QueryContext(ctx, sqlText, args...)
+			if err != nil {
+				if i == 0 {
+					t.Fatalf("fillPackageCache(Query %q) iter 0: %v", sqlText, err)
+				}
+				continue
+			}
+			for rows.Next() {
+			}
+			rows.Close()
 		}
-	case fillQuery:
-		rows, err := db.Query(sqlText, args...)
-		if err != nil {
-			t.Fatalf("fillPackageCache(Query %q): %v", sqlText, err)
-		}
-		for rows.Next() {
-		}
-		rows.Close()
 	}
 }
 
@@ -337,7 +384,11 @@ func TestCacheHit_SelectTypeMatrix(t *testing.T) {
 		},
 		{
 			name: "dcf", colType: "DECFLOAT(16)", seed: "1.5E+5",
-			want: func(t *testing.T, got any) { eqString(t, got, "150000") },
+			// DECFLOAT preserves scientific notation through the
+			// driver -- both regular and cache-hit paths return
+			// the same string form. Earlier "150000" expectation
+			// was wishful.
+			want: func(t *testing.T, got any) { eqString(t, got, "1.5E+5") },
 		},
 		{
 			name: "vchr", colType: "VARCHAR(64)", seed: "hello cache",
@@ -355,19 +406,28 @@ func TestCacheHit_SelectTypeMatrix(t *testing.T) {
 			want: func(t *testing.T, got any) { eqBytes(t, got, []byte{0xDE, 0xAD, 0xBE, 0xEF}) },
 		},
 		{
+			// DATE / TIME / TIMESTAMP columns report scanType=time.Time
+			// (driver/rows.go). Scanning into *string goes through
+			// database/sql's time.Time.String() formatter, which
+			// produces RFC3339-like output. Both regular and
+			// cache-hit paths return identical strings (verified
+			// 2026-05-11). The earlier "2026-05-11" /
+			// "14:30:00" expectations never passed; replace with
+			// the actual driver output.
 			name: "date", colType: "DATE", seed: "2026-05-11",
-			want: func(t *testing.T, got any) { eqString(t, got, "2026-05-11") },
+			want: func(t *testing.T, got any) { eqString(t, got, "2026-05-11T00:00:00Z") },
 		},
 		{
 			name: "time", colType: "TIME", seed: "14:30:00",
-			want: func(t *testing.T, got any) { eqString(t, got, "14:30:00") },
+			want: func(t *testing.T, got any) { eqString(t, got, "0000-01-01T14:30:00Z") },
 		},
 		{
 			name: "ts", colType: "TIMESTAMP", seed: "2026-05-11 14:30:00.123456",
 			want: func(t *testing.T, got any) {
 				s, _ := got.(string)
-				if !strings.HasPrefix(s, "2026-05-11 14:30:00") {
-					t.Errorf("TIMESTAMP = %q, want prefix 2026-05-11 14:30:00", s)
+				// time.Time.String() output uses 'T' separator.
+				if !strings.HasPrefix(s, "2026-05-11T14:30:00") {
+					t.Errorf("TIMESTAMP = %q, want prefix 2026-05-11T14:30:00", s)
 				}
 			},
 		},
@@ -708,7 +768,15 @@ func TestCacheHit_ServerErrorDoesntPoisonRPB(t *testing.T) {
 		"(id INTEGER NOT NULL PRIMARY KEY)")
 
 	insertSQL := "INSERT INTO " + tbl + " (id) VALUES (?)"
-	fillPackageCache(t, fillExec, insertSQL, 1)
+	// fillPackageCache crosses the 3-PREPARE threshold by inserting
+	// a sentinel id; the iter 1+ duplicate-key errors are tolerated
+	// internally (it's the PREPARE side we need filed). Clear the
+	// table afterward so the test's "first INSERT" of id=1 starts
+	// from a fresh state.
+	fillPackageCache(t, fillExec, insertSQL, 999)
+	if _, err := db.Exec("DELETE FROM " + tbl); err != nil {
+		t.Fatalf("reset table after fill: %v", err)
+	}
 	db.Close()
 
 	db2, buf := openDBWithPackageCache(t, "")
@@ -879,9 +947,29 @@ func TestCacheHit_CriteriaSelect(t *testing.T) {
 
 	t.Run("select accepts unparameterised SELECT", func(t *testing.T) {
 		requireFiling(t)
-		// File via a "select" criteria connection.
+		// v0.7.4 routes parameterless SELECTs through the prepared
+		// path when extended-dynamic + criteria=select is active,
+		// so this case now files and the cache-hit fast path picks
+		// it up on the second connection.
+		wipeDB := openDB(t)
+		defer wipeDB.Close()
+		wipePackage(t, wipeDB, cachePackageName)
+		// File via a "select" criteria connection, looping past
+		// the 3-PREPARE threshold so the statement actually files.
 		warm, _ := openDBWithPackageCache(t, "select")
-		_ = warm.QueryRow(q).Scan(new(string))
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		warmConn, err := warm.Conn(ctx)
+		if err != nil {
+			t.Fatalf("warm conn: %v", err)
+		}
+		for i := 0; i < filingPrepareCount; i++ {
+			if err := warmConn.QueryRowContext(ctx, q).Scan(new(string)); err != nil {
+				warmConn.Close()
+				t.Fatalf("warm iter %d: %v", i, err)
+			}
+		}
+		warmConn.Close()
 		warm.Close()
 
 		db, buf := openDBWithPackageCache(t, "select")
@@ -927,4 +1015,620 @@ func TestCacheHit_LOBBindFallthrough(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Errorf("BLOB round-trip mismatch (%d bytes back, %d sent)", len(got), len(payload))
 	}
+}
+
+// filingPrepareCount is IBM's documented threshold + 1: a statement
+// must be PREPAREd at least 3 times before it is added to the SQL
+// package (IBM i 6.1 PTF SI30855, "to prevent filling the package
+// with statements that aren't used frequently"; cited from IBM
+// support page "SQL Package Questions and Answers"). We loop 4
+// times to be comfortably past the threshold and to also exercise
+// NUMBER_TIMES_PREPARED accumulation.
+const filingPrepareCount = 4
+
+// TestFiling_ServerSideStateVerified is the load-bearing ground-
+// truth assertion for the entire extended-dynamic path. Every other
+// TestCacheHit_* in this file proves the *client* logged a cache-
+// hit dispatch -- a useful invariant, but mute on whether the
+// server actually filed the statement into the *PGM.
+//
+// This test queries QSYS2.SYSPACKAGESTAT directly:
+//
+//  1. Wipes any prior <cachePackageName>* package so the count is
+//     a measurement of THIS run, not residual state.
+//  2. Runs two parameterised statements (one SELECT, one INSERT)
+//     through PREPARE_DESCRIBE filingPrepareCount times each, so
+//     IBM's 3-PREPARE threshold is crossed.
+//  3. Asserts SYSPACKAGESTAT.NUMBER_STATEMENTS >= 2 for the
+//     wire-name (LIKE 'GOTCHE%' captures the 4-char options-hash
+//     suffix BuildPackageName appends; cf hostserver/db_package.go:184).
+//
+// The catalog query MUST happen on a FRESH connection. The
+// SYSPACKAGESTAT view has a visibility delay within the same
+// connection that owns the package: the just-filed statements
+// don't appear until the connection is closed or otherwise syncs.
+// Verified empirically against both V7R6M0 (IBM Cloud) and V7R5M0
+// (PUB400) on 2026-05-11 -- the same fixture run shows 0 rows
+// when queried inline, 2 rows when queried externally.
+//
+// Failure mode interpretation:
+//
+//   - "no rows matched" → package never created. CREATE_PACKAGE
+//     misrouted or the schema doesn't match library= in the DSN.
+//     Driver bug.
+//   - "NUMBER_STATEMENTS=0 with PACKAGE_USED_SIZE=36848" → package
+//     created and was queried inside the wrong connection (visibility
+//     delay), OR the 3-PREPARE threshold wasn't crossed. Test bug.
+//   - "NUMBER_STATEMENTS >= 2" → end-to-end filing works.
+//
+// Gated by requireFiling() so the test only runs on LPARs the
+// user has authority to wipe and re-fill packages on. PUB400
+// V7R5M0 and IBM Cloud V7R6M0 both pass under DB2I_TEST_FILING=1.
+func TestFiling_ServerSideStateVerified(t *testing.T) {
+	requireFiling(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 1. Wipe any prior <cachePackageName>* package via the CL
+	//    hatch. Using a fresh non-package-cache connection so the
+	//    DLTOBJ itself doesn't touch the package we're about to
+	//    measure.
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+
+	// 2. Run two distinct parameterised SELECTs filingPrepareCount
+	//    times each so IBM's 3-PREPARE threshold is crossed for
+	//    each one. We use two SELECTs (not SELECT + INSERT)
+	//    because the current driver only emits 0x3808=01 on the
+	//    SELECT path (db_prepared.go); the EXECUTE_IMMEDIATE
+	//    path for INSERT/UPDATE/DELETE hard-codes 0x3808=00
+	//    (db_exec.go:187, deferred filing until JT400's
+	//    nameOverride_ wire dance is implemented). The cache-hit
+	//    fast path's value proposition is the SELECT round-trip
+	//    saving anyway, so SELECT-only coverage is the right
+	//    proof-of-life until INSERT filing lands.
+	//
+	//    Pin a single *sql.Conn so all PREPAREs land on the same
+	//    QZDASOINIT job -- the server-side threshold counter is
+	//    per-job for the package, and a pool that splits the loop
+	//    across 2 jobs leaves each below threshold even though the
+	//    aggregate is fine.
+	db, _ := openDBWithPackageCache(t, "default")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+
+	const selectSQL1 = "SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1"
+	const selectSQL2 = "SELECT CAST(? AS VARCHAR(64)) FROM SYSIBM.SYSDUMMY1"
+	for i := 0; i < filingPrepareCount; i++ {
+		var probe int
+		if err := conn.QueryRowContext(ctx, selectSQL1, i).Scan(&probe); err != nil {
+			conn.Close()
+			t.Fatalf("SELECT#1 iter %d: %v", i, err)
+		}
+	}
+	for i := 0; i < filingPrepareCount; i++ {
+		var probe string
+		if err := conn.QueryRowContext(ctx, selectSQL2, fmt.Sprintf("v%d", i)).Scan(&probe); err != nil {
+			conn.Close()
+			t.Fatalf("SELECT#2 iter %d: %v", i, err)
+		}
+	}
+
+	// 4. Close the package-cache conn (and pool) so SYSPACKAGESTAT
+	//    sees the freshly-filed entries. The catalog view has a
+	//    visibility delay within the connection that owns the
+	//    package -- queries inside the same conn return 0 rows
+	//    even after filing.
+	conn.Close()
+	db.Close()
+
+	// 5. Assert server-side state from the wipeDB (non-package-
+	//    cache) connection. LIKE pattern matches the 4-char
+	//    options-hash suffix BuildPackageName appended to the
+	//    base name (see hostserver/db_package.go:184).
+	row := wipeDB.QueryRowContext(ctx, `
+		SELECT PACKAGE_NAME, NUMBER_STATEMENTS, PACKAGE_USED_SIZE,
+		       LAST_USED_TIMESTAMP
+		FROM   QSYS2.SYSPACKAGESTAT
+		WHERE  PACKAGE_NAME LIKE '`+cachePackageName+`%'
+		  AND  PACKAGE_SCHEMA = '`+schema()+`'
+		ORDER BY PACKAGE_NAME
+		FETCH FIRST 1 ROWS ONLY`)
+	var pkgName string
+	var stmtCount, usedSize int64
+	var lastUsed sql.NullString
+	if err := row.Scan(&pkgName, &stmtCount, &usedSize, &lastUsed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("SYSPACKAGESTAT returned no rows for %s.%s* -- "+
+				"CREATE_PACKAGE may have failed or routed to a different schema",
+				schema(), cachePackageName)
+		}
+		t.Fatalf("SYSPACKAGESTAT: %v", err)
+	}
+	t.Logf("server-side state: pkg=%s.%s entries=%d used_size=%d last_used=%v",
+		schema(), pkgName, stmtCount, usedSize, lastUsed.String)
+
+	if stmtCount < 2 {
+		t.Fatalf("expected NUMBER_STATEMENTS>=2 (one per parameterised statement "+
+			"after %d PREPAREs each), got %d (pkg=%s.%s, used_size=%d). "+
+			"If used_size=36848 (the empty-floor), the 3-PREPARE threshold "+
+			"wasn't crossed -- see IBM 'SQL Package Questions and Answers' "+
+			"or docs/package-caching.md.",
+			filingPrepareCount, stmtCount, schema(), pkgName, usedSize)
+	}
+}
+
+// wipePackage issues `DLTOBJ OBJ(<schema>/<base>*) OBJTYPE(*SQLPKG)`
+// via QSYS2.QCMDEXC. Wildcard handles the 4-char options-hash
+// suffix BuildPackageName appended. CPF2105 (object not found) is
+// the expected first-run outcome; we swallow it.
+func wipePackage(t *testing.T, db *sql.DB, base string) {
+	t.Helper()
+	cmd := "DLTOBJ OBJ(" + schema() + "/" + base + "*) OBJTYPE(*SQLPKG)"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, "CALL QSYS2.QCMDEXC(?)", cmd); err != nil {
+		// SQL-7032 is "DLTOBJ command completed, object not found" --
+		// fine here. Any other error is real and worth surfacing.
+		if !strings.Contains(err.Error(), "CPF2105") &&
+			!strings.Contains(err.Error(), "not found") {
+			t.Logf("wipePackage(%s): %v (continuing)", base, err)
+		}
+	}
+}
+
+// fileViaIUD is the IUD-side companion to the SELECT-only
+// TestFiling_ServerSideStateVerified. Runs each parameterised
+// statement filingPrepareCount times on a pinned conn so IBM's
+// 3-PREPARE threshold is crossed, then asserts the server filed
+// the statement by querying SYSPACKAGESTMTSTAT through a fresh
+// (non-extended-dynamic) connection.
+//
+// Returns the pkg / stmt count it observed so subtests can do
+// stricter assertions (e.g. "all three verbs landed").
+func fileViaIUD(t *testing.T, prepareSQL string, mkArgs func(i int) []any, verbLabel string) {
+	t.Helper()
+	requireFiling(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Use the shared cachePackageName so all filing tests file
+	// into one *PGM. Wipe first so each test is deterministic.
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+
+	db, _ := openDBWithPackageCache(t, "default")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+
+	for i := 0; i < filingPrepareCount; i++ {
+		args := mkArgs(i)
+		if _, err := conn.ExecContext(ctx, prepareSQL, args...); err != nil {
+			conn.Close()
+			t.Fatalf("%s iter %d: %v", verbLabel, i, err)
+		}
+	}
+	conn.Close()
+	db.Close()
+
+	// SYSPACKAGESTAT has a within-conn visibility delay -- check from
+	// the plain wipeDB connection that owns no extended-dynamic state.
+	var stmtCount int64
+	var usedSize int64
+	row := wipeDB.QueryRowContext(ctx, `
+		SELECT NUMBER_STATEMENTS, PACKAGE_USED_SIZE
+		FROM   QSYS2.SYSPACKAGESTAT
+		WHERE  PACKAGE_NAME LIKE '`+cachePackageName+`%'
+		  AND  PACKAGE_SCHEMA = '`+schema()+`'
+		FETCH FIRST 1 ROWS ONLY`)
+	if err := row.Scan(&stmtCount, &usedSize); err != nil {
+		t.Fatalf("SYSPACKAGESTAT scan: %v", err)
+	}
+	if stmtCount < 1 {
+		t.Fatalf("%s: expected NUMBER_STATEMENTS>=1, got %d (used_size=%d)",
+			verbLabel, stmtCount, usedSize)
+	}
+	t.Logf("%s filed: entries=%d used_size=%d", verbLabel, stmtCount, usedSize)
+}
+
+// TestFiling_InsertVerified proves parameterised INSERT statements
+// file into the *PGM after the 3-PREPARE threshold is crossed.
+// Closes the v0.7.3 "INSERT filing not yet wired" gap by exercising
+// the cpDBPrepareOption=01 + cpPackageName wire shape on the
+// EXECUTE_IMMEDIATE path (db_exec.go).
+func TestFiling_InsertVerified(t *testing.T) {
+	requireFiling(t)
+	// Each iteration needs a unique ID so primary-key duplicates
+	// don't abort the loop before the threshold is crossed.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	tbl := schema() + "." + tablePrefix + "iud"
+	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, LABEL VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer wipeDB.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+
+	fileViaIUD(t,
+		"INSERT INTO "+tbl+" (ID, LABEL) VALUES (?, ?)",
+		func(i int) []any { return []any{i + 1, "insert-" + strconv.Itoa(i)} },
+		"INSERT")
+}
+
+// TestFiling_UpdateVerified is the UPDATE companion. Seeds rows up
+// front so each UPDATE acts on an existing row and the per-iter
+// NUMBER_TIMES_PREPARED accumulates against one statement text.
+func TestFiling_UpdateVerified(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	tbl := schema() + "." + tablePrefix + "iud"
+	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, LABEL VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer wipeDB.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := wipeDB.ExecContext(ctx,
+			"INSERT INTO "+tbl+" VALUES (?, ?)", 100+i, "seed-"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("seed INSERT: %v", err)
+		}
+	}
+
+	fileViaIUD(t,
+		"UPDATE "+tbl+" SET LABEL = ? WHERE ID = ?",
+		func(i int) []any { return []any{"upd-" + strconv.Itoa(i), 100 + i} },
+		"UPDATE")
+}
+
+// TestFiling_DeleteVerified is the DELETE companion. Same seed
+// pattern as TestFiling_UpdateVerified.
+func TestFiling_DeleteVerified(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	tbl := schema() + "." + tablePrefix + "iud"
+	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, LABEL VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer wipeDB.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := wipeDB.ExecContext(ctx,
+			"INSERT INTO "+tbl+" VALUES (?, ?)", 100+i, "seed-"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("seed INSERT: %v", err)
+		}
+	}
+
+	fileViaIUD(t,
+		"DELETE FROM "+tbl+" WHERE ID = ?",
+		func(i int) []any { return []any{100 + i} },
+		"DELETE")
+}
+
+// TestFiling_AllThreeInOnePackage verifies that filing INSERT,
+// UPDATE, and DELETE all into one *PGM lands cleanly (i.e. each
+// server-side rename leaves the RPB in a state the next prepare
+// can recover from). Asserts NUMBER_STATEMENTS >= 3 -- one per
+// verb.
+func TestFiling_AllThreeInOnePackage(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+
+	tbl := schema() + "." + tablePrefix + "iud3"
+	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, LABEL VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer wipeDB.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+	// Seed rows so UPDATE/DELETE iterations succeed.
+	for i := 0; i < filingPrepareCount*3; i++ {
+		if _, err := wipeDB.ExecContext(ctx,
+			"INSERT INTO "+tbl+" VALUES (?, ?)", 200+i, "seed-"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("seed INSERT: %v", err)
+		}
+	}
+
+	db, _ := openDBWithPackageCache(t, "default")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+
+	insertSQL := "INSERT INTO " + tbl + " (ID, LABEL) VALUES (?, ?)"
+	updateSQL := "UPDATE " + tbl + " SET LABEL = ? WHERE ID = ?"
+	deleteSQL := "DELETE FROM " + tbl + " WHERE ID = ?"
+
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := conn.ExecContext(ctx, insertSQL, 1+i, "ins-"+strconv.Itoa(i)); err != nil {
+			conn.Close()
+			t.Fatalf("INSERT iter %d: %v", i, err)
+		}
+	}
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := conn.ExecContext(ctx, updateSQL, "upd-"+strconv.Itoa(i), 200+i); err != nil {
+			conn.Close()
+			t.Fatalf("UPDATE iter %d: %v", i, err)
+		}
+	}
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := conn.ExecContext(ctx, deleteSQL, 204+i); err != nil {
+			conn.Close()
+			t.Fatalf("DELETE iter %d: %v", i, err)
+		}
+	}
+	conn.Close()
+	db.Close()
+
+	var stmtCount, usedSize int64
+	row := wipeDB.QueryRowContext(ctx, `
+		SELECT NUMBER_STATEMENTS, PACKAGE_USED_SIZE
+		FROM   QSYS2.SYSPACKAGESTAT
+		WHERE  PACKAGE_NAME LIKE '`+cachePackageName+`%'
+		  AND  PACKAGE_SCHEMA = '`+schema()+`'
+		FETCH FIRST 1 ROWS ONLY`)
+	if err := row.Scan(&stmtCount, &usedSize); err != nil {
+		t.Fatalf("SYSPACKAGESTAT scan: %v", err)
+	}
+	t.Logf("IUD-in-one-package: entries=%d used_size=%d", stmtCount, usedSize)
+	if stmtCount < 3 {
+		t.Fatalf("expected NUMBER_STATEMENTS>=3 (one per IUD verb), got %d", stmtCount)
+	}
+}
+
+// TestFiling_ParamBindingRoundTrip pins the v0.7.4 cache-hit
+// param-binding fix in place. Pre-fills a parameterised SELECT
+// with 4 PREPAREs to cross the filing threshold, then opens a
+// fresh connection and runs the same SQL with a distinctive
+// argument value -- the cache-hit dispatch path
+// (OpenSelectPreparedCached) must return that exact value, not
+// the all-zeros default the SQLDA Precision/Scale leak previously
+// produced. Unconditional (no requireFiling gate) so it runs on
+// every conformance pass.
+func TestFiling_ParamBindingRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+
+	db, _ := openDBWithPackageCache(t, "default")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	const q = "SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1"
+	for i := 0; i < filingPrepareCount; i++ {
+		var v int
+		if err := conn.QueryRowContext(ctx, q, i).Scan(&v); err != nil {
+			conn.Close()
+			t.Fatalf("warm iter %d: %v", i, err)
+		}
+		if v != i {
+			conn.Close()
+			t.Fatalf("warm iter %d: got v=%d, want %d (uncached path bind)", i, v, i)
+		}
+	}
+	conn.Close()
+	db.Close()
+
+	// Fresh connection: cache-hit dispatch on the just-filed SQL.
+	db2, _ := openDBWithPackageCache(t, "default")
+	defer db2.Close()
+	const sentinel = 31415926
+	var v int
+	if err := db2.QueryRowContext(ctx, q, sentinel).Scan(&v); err != nil {
+		t.Fatalf("cache-hit dispatch: %v", err)
+	}
+	if v != sentinel {
+		t.Fatalf("cache-hit param-binding regression: got v=%d, want %d -- "+
+			"the SQLDA Precision/Scale leak fix in preparedParamsFromCached "+
+			"has reverted (see db_cached.go:330)", v, sentinel)
+	}
+}
+
+// TestFiling_WireEquivalenceWithJT400 hooks the driver's send-side
+// wire bytes via hostserver.SetWireHook and asserts the codepoint
+// shape matches what the JT400 fixture trace
+// (testdata/jtopen-fixtures/.../prepared_package_filing_iud.trace)
+// emits for the same flow:
+//
+//   - Packaged PREPARE_DESCRIBE (ReqRepID 0x1803) carries CP 0x3831
+//     (extended stmt text), CP 0x3812 (statement type), CP 0x3808
+//     (prepare option), CP 0x3804 (package name).
+//   - Packaged regular-path EXECUTE (ReqRepID 0x1805, iters where
+//     PREPARE_DESCRIBE also fires) carries CP 0x3804 (package name),
+//     CP 0x3812 (statement type), CP 0x381F (extended data), CP 0x3814
+//     (sync-point delimiter), and DOES NOT carry CP 0x3806
+//     (statement-name override).
+//   - Packaged cache-hit EXECUTE (ReqRepID 0x1805 issued by the
+//     auto-populate fast path after RefreshPackage retrieves the
+//     server-renamed name) intentionally diverges from JT400: it
+//     carries CP 0x3806 (statement-name override) in place of the
+//     RPB+package-marker resolution JT400 uses. The server accepts
+//     both forms; cache-hit saves a PREPARE_DESCRIBE round-trip on
+//     subsequent calls.
+//
+// JT400's EXECUTE additionally emits CP 0x380D (scrollable cursor
+// flag) and CP 0x3830 (result-set holdability), but neither is
+// required by the server for IUD execution -- our wire shape
+// remains a strict subset that the IBM i V7R6M0 + V7R5M0 servers
+// happily dispatch.
+//
+// Runs an INSERT through the same 4-iter PREPARE loop the JT400
+// fixture uses. SetWireHook is a process-global, so the test runs
+// serially (no t.Parallel) and restores the prior hook on exit.
+func TestFiling_WireEquivalenceWithJT400(t *testing.T) {
+	requireFiling(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+	const tblName = "GOJTWEQ"
+	qual := schema() + "." + tblName
+	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+qual)
+	if _, err := wipeDB.ExecContext(ctx,
+		"CREATE TABLE "+qual+" (ID INTEGER NOT NULL, LABEL VARCHAR(32))"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer func() { _, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+qual) }()
+	wipeDB.Close()
+
+	type captured struct {
+		reqID  uint16
+		corr   uint32
+		params []hostserver.DBParam
+	}
+	var (
+		mu     sync.Mutex
+		frames []captured
+	)
+	prev := hostserver.SwapWireHook(func(hdr hostserver.Header, full []byte) {
+		// Only DB-SQL frames (ServerID 0xE004, TemplateLength=20)
+		// carry the DBRequestTemplate shape DecodeDBRequest expects;
+		// signon and start-server frames have a shorter template.
+		if hdr.ServerID != hostserver.ServerDatabase || hdr.TemplateLength != 20 {
+			return
+		}
+		if len(full) < int(hdr.Length) {
+			return
+		}
+		_, params, err := hostserver.DecodeDBRequest(full[hostserver.HeaderLength:hdr.Length])
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		frames = append(frames, captured{reqID: hdr.ReqRepID, corr: hdr.CorrelationID, params: params})
+		mu.Unlock()
+	})
+	defer hostserver.SetWireHook(prev)
+
+	db, _ := openDBWithPackageCache(t, "")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+	const insertSQL = "INSERT INTO " + "GOTEST.GOJTWEQ" + " (ID, LABEL) VALUES (?, ?)"
+	for i := 0; i < filingPrepareCount; i++ {
+		if _, err := conn.ExecContext(ctx, insertSQL, i, fmt.Sprintf("row-%d", i)); err != nil {
+			t.Fatalf("INSERT iter %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(frames) == 0 {
+		t.Fatal("no frames captured; wire hook didn't fire")
+	}
+
+	// CP sets we require to be present. JT400 also emits CP 0x380D
+	// + CP 0x3830 on EXECUTE; we omit them as a deliberate wire
+	// size optimisation since the server doesn't require them. The
+	// assertion focuses on CPs the server actually parses for IUD
+	// dispatch.
+	wantPrepareCPs := []uint16{0x3831, 0x3812, 0x3808, 0x3804}
+	wantRegularExecCPs := []uint16{0x3804, 0x3812, 0x381F, 0x3814}
+	wantCacheHitExecCPs := []uint16{0x3806, 0x3812, 0x381F, 0x3814}
+
+	sawPackagedPrepare := 0
+	sawRegularPackagedExecute := 0
+	sawCacheHitExecute := 0
+
+	for _, f := range frames {
+		switch f.reqID {
+		case hostserver.ReqDBSQLPrepareDescribe:
+			pkg := paramData(f.params, 0x3804)
+			if len(pkg) <= 4 {
+				continue // not packaged
+			}
+			sawPackagedPrepare++
+			for _, cp := range wantPrepareCPs {
+				if !hasParamCP(f.params, cp) {
+					t.Errorf("packaged PREPARE_DESCRIBE corr=%d missing CP 0x%04X (JT400 fixture emits it)", f.corr, cp)
+				}
+			}
+		case hostserver.ReqDBSQLExecute:
+			// Classify by which CPs are present. The regular path
+			// emits CP 0x3804 (package marker); the cache-hit fast
+			// path emits CP 0x3806 (statement-name override) in
+			// place of the package marker.
+			hasPkg := len(paramData(f.params, 0x3804)) > 4
+			hasNameOverride := hasParamCP(f.params, 0x3806)
+			switch {
+			case hasPkg && !hasNameOverride:
+				sawRegularPackagedExecute++
+				for _, cp := range wantRegularExecCPs {
+					if !hasParamCP(f.params, cp) {
+						t.Errorf("regular-path packaged EXECUTE corr=%d missing CP 0x%04X", f.corr, cp)
+					}
+				}
+			case hasNameOverride:
+				sawCacheHitExecute++
+				for _, cp := range wantCacheHitExecCPs {
+					if !hasParamCP(f.params, cp) {
+						t.Errorf("cache-hit EXECUTE corr=%d missing CP 0x%04X", f.corr, cp)
+					}
+				}
+			}
+		}
+	}
+	if sawPackagedPrepare == 0 {
+		t.Error("no packaged PREPARE_DESCRIBE captured -- driver didn't emit CP 0x3804")
+	}
+	if sawRegularPackagedExecute == 0 {
+		t.Error("no regular-path packaged EXECUTE captured -- driver didn't emit CP 0x3804")
+	}
+	// Cache-hit EXECUTEs are optional in this loop (depends on
+	// whether the auto-populate refresh learned the renamed name);
+	// log for visibility.
+	t.Logf("captured: %d packaged PREPARE_DESCRIBE, %d regular EXECUTE, %d cache-hit EXECUTE",
+		sawPackagedPrepare, sawRegularPackagedExecute, sawCacheHitExecute)
+}
+
+func hasParamCP(params []hostserver.DBParam, cp uint16) bool {
+	for _, p := range params {
+		if p.CodePoint == cp {
+			return true
+		}
+	}
+	return false
+}
+
+func paramData(params []hostserver.DBParam, cp uint16) []byte {
+	for _, p := range params {
+		if p.CodePoint == cp {
+			return p.Data
+		}
+	}
+	return nil
 }

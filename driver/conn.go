@@ -187,7 +187,11 @@ func (c *Conn) initPackage(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("return-package %s/%s: %w", c.cfg.PackageLibrary, wireName, err)
 		}
-		mgr.Cached = cached
+		mgr.Cached = make(map[string]*hostserver.PackageStatement, len(cached))
+		for i := range cached {
+			ps := cached[i]
+			mgr.Cached[ps.SQLText] = &ps
+		}
 		c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: RETURN_PACKAGE",
 			slog.String("package", wireName),
 			slog.String("library", c.cfg.PackageLibrary),
@@ -394,16 +398,21 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 }
 
 // packageEligibleFor implements the per-SQL eligibility test the
-// Config.PackageCriteria knob selects between. Mirrors JT400's
-// JDSQLStatement.canHaveExtendedDynamic boundary (the same SQL
-// shape that JT400 treats as "package-eligible"):
+// Config.PackageCriteria knob selects between. Byte-equivalent to
+// JT400's JDSQLStatement.java:950-959 isPackaged_ gate so a Go
+// client and a Java client running the same SQL agree on whether
+// the statement gets filed into the shared *PGM:
 //
-//	"default":
-//	  - statement has >=1 parameter marker AND is not a CURRENT OF
-//	    cursor expression AND is not a DECLARE PROCEDURE / DECLARE
-//	    CURSOR statement
-//	"select":
-//	  - default rules, PLUS unparameterised SELECT statements
+//	"default" (JDSQLStatement.java:76-79 after 2011 widening):
+//	  ((numberOfParameters_ > 0) && !isCurrentOf_)
+//	  || (isInsert_ && isSubSelect_)        // INSERT INTO t SELECT ...
+//	  || (isSelect_ && isForUpdate_)        // SELECT ... FOR UPDATE
+//	  || isDeclare_                         // DECLARE CURSOR ...
+//	"select" (JDSQLStatement.java:81-84):
+//	  default rules || isSelect_            // any classified SELECT
+//
+// See /home/complacentsee/godb2/JT400-EXTENDED-DYNAMIC-FILING.md
+// for the wire-shape derivation and the gate-history rationale.
 //
 // Empty sql (the selectOptions() shortcut) returns true so callers
 // that don't have SQL context yet still see the package flag.
@@ -414,64 +423,219 @@ func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
 	if sql == "" {
 		return true
 	}
-	// Trim leading whitespace to find the verb.
-	verb := firstSQLVerb(sql)
-	// JT400 always refuses to cache "DECLARE" and "CURRENT OF" --
-	// they're not standalone, just lexical decoration on something
-	// the server is already preparing differently.
-	if eqIgnoreCaseDriver(verb, "DECLARE") {
-		return false
-	}
+	// CURRENT OF cursor: an UPDATE/DELETE bound to a previously-
+	// declared cursor. JT400 unconditionally rejects.
 	if containsCaseInsensitive(sql, "CURRENT OF") {
 		return false
 	}
-	switch c.cfg.PackageCriteria {
-	case "select":
-		// criteria=select caches the same as default PLUS
-		// unparameterised SELECT / VALUES / WITH.
-		if hasParams {
-			return true
-		}
-		switch {
-		case eqIgnoreCaseDriver(verb, "SELECT"),
-			eqIgnoreCaseDriver(verb, "VALUES"),
-			eqIgnoreCaseDriver(verb, "WITH"):
-			return true
-		}
-		return false
-	default: // "default"
-		return hasParams
+	verb := firstSQLVerb(sql)
+	isSelect := eqIgnoreCaseDriver(verb, "SELECT")
+	isInsert := eqIgnoreCaseDriver(verb, "INSERT")
+	isDeclare := eqIgnoreCaseDriver(verb, "DECLARE")
+	isForUpdate := isSelect && containsCaseInsensitive(sql, "FOR UPDATE")
+	isSubSelect := isInsert && hasEmbeddedSelect(sql)
+
+	// JT400 "default" criteria, post-2011 widening. The hasParams
+	// arm dominates in practice -- the other three handle the
+	// non-parameterised edge cases JT400's heuristic still files.
+	packaged := hasParams ||
+		(isInsert && isSubSelect) ||
+		(isSelect && isForUpdate) ||
+		isDeclare
+
+	if c.cfg.PackageCriteria == "select" {
+		// criteria=select widens to include every parameterless
+		// SELECT (JT400's `|| isSelect_` arm). Note we do NOT
+		// add VALUES/WITH here -- JT400 treats those as
+		// non-SELECT and excludes them from filing under either
+		// criterion.
+		packaged = packaged || isSelect
 	}
+	return packaged
 }
 
-// packageLookup walks c.pkg.Cached looking for a PackageStatement
-// whose SQLText byte-equals sql. Returns nil/false when:
+// hasEmbeddedSelect checks whether an INSERT contains an embedded
+// SELECT (i.e. INSERT INTO t (...) SELECT ...) -- the JT400 isSubSelect_
+// signal that flips the filing gate on for non-parameterised
+// inserts. Case-insensitive substring search; SQL identifiers don't
+// contain unquoted SELECT in practice, so a literal substring match
+// is good enough.
+func hasEmbeddedSelect(sql string) bool {
+	// Skip the leading INSERT token; the SELECT must follow.
+	rest := sql
+	if i := indexNonSpace(rest); i >= 0 {
+		rest = rest[i:]
+	}
+	if j := indexSpace(rest); j > 0 {
+		rest = rest[j:]
+	}
+	return containsCaseInsensitive(rest, "SELECT")
+}
+
+func indexNonSpace(s string) int {
+	for i, r := range s {
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexSpace(s string) int {
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return i
+		}
+	}
+	return -1
+}
+
+// packageLookup returns the cached entry for sql when one exists
+// AND its NameBytes is populated (i.e. the entry came from a
+// RETURN_PACKAGE reply, not from a local LocalPrepareCount stub
+// inserted by noteFilingPrepare before we knew the server-assigned
+// name). Returns nil when:
 //
 //   - the connection has no package context (cfg.PackageCache off,
 //     or initPackage soft-disabled the package via PackageError);
-//   - the cache was empty on connect (fresh *PGM);
-//   - no entry's SQL text matches.
+//   - the cache is empty;
+//   - no entry's SQL text matches;
+//   - an entry matches but is a count-tracking stub without a
+//     server name (filing not yet observed by this conn).
 //
-// Lookup is linear -- the typical *PGM holds tens to low hundreds of
-// statements and the per-call cost is dominated by other work
-// (parameter encoding, network). If a workload ever produces a
-// thousand-entry package we'll swap in a map keyed on SQLText hash.
-//
-// Byte equality (not normalised SQL) matches JT400's
-// JDPackageManager.getCachedStatementIndex behaviour: a whitespace
-// or case change in the caller's SQL string forces a re-prepare,
-// which is the right outcome since the server-side cache lookup
-// uses the same identity.
+// Byte equality matches JT400's JDPackageManager.getCachedStatementIndex
+// behaviour: a whitespace or case change in the caller's SQL string
+// forces a re-prepare, which is the right outcome since the server-
+// side cache lookup uses the same identity.
 func (c *Conn) packageLookup(sql string) *hostserver.PackageStatement {
 	if c.pkg == nil || len(c.pkg.Cached) == 0 {
 		return nil
 	}
-	for i := range c.pkg.Cached {
-		if c.pkg.Cached[i].SQLText == sql {
-			return &c.pkg.Cached[i]
+	ps, ok := c.pkg.Cached[sql]
+	if !ok || ps == nil || len(ps.NameBytes) != 18 {
+		return nil
+	}
+	return ps
+}
+
+// filingRefreshTriggers is the schedule of LocalPrepareCount
+// values at which the conn issues a RETURN_PACKAGE refresh to
+// learn the server-assigned filed name. The first trigger (3)
+// matches IBM's SI30855 threshold; subsequent triggers (6, 12)
+// give the server more chances if the first refresh comes back
+// without a populated entry (transient server state, package
+// constraint, future PTF that bumps the threshold, etc.).
+// Bounded by hostserver.MaxFilingRefreshAttempts so a SQL the
+// server refuses to file doesn't burn unbounded refreshes.
+var filingRefreshTriggers = [hostserver.MaxFilingRefreshAttempts]uint8{3, 6, 12}
+
+// noteFilingPrepare is called by the Exec / Query dispatch sites
+// just before issuing a filing-eligible PREPARE_DESCRIBE on this
+// conn. Tracks LocalPrepareCount for SQLs we haven't yet seen
+// filed; returns true to signal the caller should issue a
+// RETURN_PACKAGE refresh AFTER this prepare returns.
+//
+// Safe to call when the conn has no package context -- returns
+// false immediately.
+func (c *Conn) noteFilingPrepare(sql string) (shouldRefresh bool) {
+	if c.pkg == nil {
+		return false
+	}
+	if c.pkg.Cached == nil {
+		c.pkg.Cached = make(map[string]*hostserver.PackageStatement)
+	}
+	ps, ok := c.pkg.Cached[sql]
+	if !ok {
+		// First time we've seen this SQL on this conn. Insert a
+		// count-tracking stub; NameBytes stays empty so cache-hit
+		// dispatch will not fire until a future RETURN_PACKAGE
+		// refresh populates the renamed name.
+		c.pkg.Cached[sql] = &hostserver.PackageStatement{
+			SQLText:           sql,
+			LocalPrepareCount: 1,
+		}
+		return false
+	}
+	if len(ps.NameBytes) == 18 {
+		// Already cache-hit eligible -- count tracking irrelevant.
+		return false
+	}
+	if ps.RefreshAttempts >= hostserver.MaxFilingRefreshAttempts {
+		// We've already tried MaxFilingRefreshAttempts refreshes
+		// for this SQL on this conn without learning a server-
+		// assigned name. Assume filing isn't going to happen
+		// (package full, locked, server policy, etc.) and stop
+		// burning refreshes.
+		return false
+	}
+	ps.LocalPrepareCount++
+	// Does the new count match the next scheduled refresh trigger?
+	next := filingRefreshTriggers[ps.RefreshAttempts]
+	return ps.LocalPrepareCount == next
+}
+
+// refreshPackageCache re-issues RETURN_PACKAGE on this conn and
+// rebuilds the in-memory Cached map. Called by the dispatch sites
+// after a PREPARE_DESCRIBE that crossed the local filing threshold,
+// so subsequent calls of the just-filed SQL hit the cache-hit fast
+// path. Errors are logged at WARN and swallowed -- a refresh failure
+// is non-fatal; the regular path continues to work.
+//
+// triggerSQL identifies the statement whose LocalPrepareCount
+// crossed a filingRefreshTriggers boundary. After a successful
+// refresh, RefreshAttempts on that entry is incremented regardless
+// of whether the refresh populated NameBytes for it -- otherwise
+// the cap in noteFilingPrepare can never be reached and a SQL the
+// server refuses to file would burn unbounded RETURN_PACKAGE
+// round-trips on subsequent PREPAREs. Pass "" to skip the attempt
+// bookkeeping (e.g., for connect-time priming refreshes).
+func (c *Conn) refreshPackageCache(ctx context.Context, triggerSQL string) {
+	if c.pkg == nil || c.cfg == nil || !c.cfg.PackageCache {
+		return
+	}
+	ccsid := uint16(c.cfg.PackageCCSID)
+	if ccsid == 0 {
+		ccsid = 13488
+	}
+	cached, err := hostserver.SendReturnPackage(c.conn, c.pkg.Name, c.pkg.Library, ccsid, c.nextCorrFunc())
+	if err != nil {
+		c.log.LogAttrs(ctx, slog.LevelWarn, "db2i: cache refresh failed",
+			slog.String("package", c.pkg.Name),
+			slog.String("library", c.pkg.Library),
+			slog.String("err", err.Error()),
+		)
+		return
+	}
+	// Merge the refresh result into the existing map so any count-
+	// tracking stubs we have for not-yet-filed SQLs (e.g. SQLs
+	// that have only 1-2 PREPAREs on this conn) survive.
+	for i := range cached {
+		ps := cached[i]
+		if existing, ok := c.pkg.Cached[ps.SQLText]; ok && existing != nil {
+			// Preserve any LocalPrepareCount + RefreshAttempts we
+			// had accumulated. The refresh's purpose is to learn
+			// NameBytes; the local counters track *our* observation
+			// state and outlive any single refresh.
+			ps.LocalPrepareCount = existing.LocalPrepareCount
+			ps.RefreshAttempts = existing.RefreshAttempts
+		}
+		c.pkg.Cached[ps.SQLText] = &ps
+	}
+	// Bookkeep the attempt against the triggering SQL whether or not
+	// the refresh learned its name. If the server hasn't filed it
+	// yet (or never will -- package full, locked, etc.), this is
+	// what eventually flips noteFilingPrepare to stop calling us.
+	if triggerSQL != "" {
+		if ps, ok := c.pkg.Cached[triggerSQL]; ok && ps != nil {
+			if ps.RefreshAttempts < hostserver.MaxFilingRefreshAttempts {
+				ps.RefreshAttempts++
+			}
 		}
 	}
-	return nil
+	c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: cache refresh",
+		slog.String("package", c.pkg.Name),
+		slog.Int("cached_statements", len(cached)),
+	)
 }
 
 // firstSQLVerb returns the first whitespace-delimited token of sql

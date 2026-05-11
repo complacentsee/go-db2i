@@ -10,6 +10,238 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-05-11
+
+Fifth tagged release. Wraps the post-v0.7.2 work that accumulated
+without a separate tag: V7R6M0 + V7R5M0 extended-dynamic filing
+investigation, JT400 wire-equivalent IUD filing, the cache-hit
+SQLDA Precision/Scale fix, per-conn auto-populate after first-time
+filing, and the wire-equivalence harness pinning JT400's reference
+shape. End-to-end live-validated against IBM Cloud V7R6M0; the
+JT400 fixture trace is captured for byte-for-byte comparison.
+
+### Fixed: INSERT / UPDATE / DELETE filing + cache-hit dispatch end-to-end
+
+The two known driver-side gaps documented under v0.7.3 are now
+closed. End-to-end verified against IBM Cloud V7R6M0:
+
+- **`hostserver.ExecutePreparedSQL` now files DML statements.** The
+  earlier empty-marker workaround at `db_exec.go:187-200` is
+  replaced with the JT400 wire shape: `0x3808=01` (prepare-option
+  filing flag) plus full CP `0x3804` (package name) on
+  `PREPARE_DESCRIBE`, CP `0x3801` (package library) added on
+  `CREATE_RPB` to satisfy the server's SQL-112 prerequisite, and
+  CP `0x3804` re-emitted on the follow-up `EXECUTE`. The
+  `nameOverride_` rebind the earlier comment block predicted
+  turned out unnecessary -- JT400 doesn't use one either; the
+  server resolves the server-renamed filed plan via the package
+  marker plus the RPB handle. Verified by capturing
+  `prepared_package_filing_iud.trace:273+379` and re-running the
+  shape from Go: `GOIUDT9899` files three statements (INSERT,
+  UPDATE, DELETE) on V7R6M0 with `NUMBER_STATEMENTS=3`.
+
+- **`preparedParamsFromCached` no longer leaks SQLDA length bytes
+  into Precision/Scale for non-decimal types.** The cached SQLDA
+  encodes Precision in the high byte and Scale in the low byte of
+  the per-field "length" field, which is meaningful for
+  `DECIMAL` / `NUMERIC` / `DECFLOAT` but garbage for everything
+  else (an INTEGER with `FieldLength=4` decoded as `Precision=0`
+  `Scale=4`, enough to make the server silently zero out the
+  bound value on cache-hit `EXECUTE`). The fix mirrors JT400's
+  cache-hit wire bytes: non-decimal types get
+  `Precision=Scale=0`, decimal types retain the SQLDA's split.
+  ParamType is forced to `0x00` to match JT400's cache-hit
+  byte sequence (was `0xF0`, which the server tolerated but
+  diverged from JT400's reference shape).
+
+- **`driver/stmt.go` cache-hit dispatch reaches IUD.** Replaced
+  `len(outDests) == 0` (which is always false for any
+  parameterised call -- the slice is preallocated to
+  `len(args)`) with a new `hasOutDest()` helper that walks the
+  slice for actual non-nil `*sql.Out` entries. Without this fix
+  every parameterised `db.Exec` skipped the cache-hit fast path
+  regardless of filing state.
+
+- **`ExecuteImmediate` / `ExecutePreparedSQL` / `ExecutePreparedCached`
+  now decode rows-affected** from the SQLCA at byte offset 104
+  (SQLERRD[3] under SQL-standard 1-indexing, the same slot
+  JT400's `getRowsAffected` reads). The earlier `TODO(M7)`
+  placeholders returned 0 unconditionally.
+
+### Validated
+
+Under `DB2I_TEST_FILING=1` against IBM Cloud V7R6M0:
+
+- **17 SQL types round-trip end-to-end** through filing +
+  cache-hit dispatch -- `TestCacheHit_SelectTypeMatrix` passes
+  for INTEGER, BIGINT, SMALLINT, DECIMAL(15,4), NUMERIC(10,2),
+  REAL, DOUBLE, DECFLOAT(16), VARCHAR(64), CHAR(20),
+  `VARCHAR(40) FOR BIT DATA`, DATE, TIME, TIMESTAMP, BOOLEAN,
+  BINARY(16), VARBINARY(64). 35.7s total.
+- **All four IUD-filing tests pass**: `TestFiling_InsertVerified`,
+  `TestFiling_UpdateVerified`, `TestFiling_DeleteVerified`,
+  `TestFiling_AllThreeInOnePackage`. `GOTCHE9899` records 3
+  filed statements (one per verb).
+- **`TestFiling_ParamBindingRoundTrip`** runs unconditionally
+  (not requireFiling-gated) so the SQLDA-leak regression has a
+  smoke test that fires on every CI pass.
+
+### Added
+
+- **`testdata/jtopen-fixtures/.../PackageFilingIUD`** JT400
+  fixture: wipes the package, runs parameterised INSERT/UPDATE/DELETE
+  4 times each on a pinned conn, queries `SYSPACKAGESTAT` +
+  `SYSPACKAGESTMTSTAT`. Trace captures JT400's EXECUTE wire shape
+  for filed IUDs (CP 0x3804 + CP 0x380D + CP 0x3830 + CP 0x3812
+  + CP 0x381F, in that order). Run + golden file checked in
+  alongside the existing `prepared_package_filing_verify` case.
+- **`hostserver.DBReply.RowsAffected()`** method -- reusable
+  SQLCA decoder for the SQLERRD[3] / rows-affected slot.
+- **Auto-populate `Conn.pkg.Cached` after first-time filing.**
+  `Conn.pkg.Cached` is now a `map[string]*PackageStatement` (was
+  a linear slice). On each filing-eligible PREPARE the conn ticks
+  a per-SQL `LocalPrepareCount`; once it hits an entry on the
+  retry schedule (3 / 6 / 12 -- the first matches IBM's documented
+  SI30855 threshold), the dispatch site issues a follow-up
+  `RETURN_PACKAGE` to learn the server-renamed name, and the
+  next call of the same SQL dispatches via the cache-hit fast
+  path. Capped at `hostserver.MaxFilingRefreshAttempts = 3` so a
+  SQL the server refuses to file (package full, locked, etc.)
+  doesn't burn unbounded refreshes. Measured ~50% reduction in
+  per-call latency (35 ms vs 71 ms) after the threshold crosses.
+- **`hostserver.DecodeDBRequest` / `DecodeDBRequestFrame`** --
+  inverse of `BuildDBRequest`, preserves param order. Plus
+  `SwapWireHook` for tests that need to restore a prior hook
+  on defer. Together they back the new wire-equivalence harness.
+- **`hostserver.TestWireEquivalence_PackageFilingIUDFixture`** --
+  unit test that decodes the JT400 trace and asserts JT400's
+  CREATE_PACKAGE, PREPARE_DESCRIBE, and EXECUTE wire shapes for
+  filing IUD. Pins the JT400 reference so a regenerated fixture
+  (different SQL, different release) fails the test rather than
+  silently shifting our reference.
+- **`TestFiling_WireEquivalenceWithJT400`** -- live conformance
+  test that hooks `SetWireHook`, runs a 4-iter parameterised
+  INSERT through filing + cache-hit dispatch, and asserts the
+  driver's PREPARE_DESCRIBE + EXECUTE CP set matches JT400's
+  for the regular path. Documents the intentional cache-hit
+  divergence (CP 0x3806 statement-name override in place of
+  CP 0x3804 RPB+package-marker resolution) as a logged
+  observation, not a failure. Captures 3 PREPARE + 3 regular
+  EXECUTE + 1 cache-hit EXECUTE on V7R6M0 as expected.
+
+### Known driver-side limitations (still tracked)
+
+- **LOB-bind filing** continues to fall through to the cache-miss
+  path per JT400's `JDPackageManager` filter -- documented
+  behaviour, not a regression.
+
+### Investigation: extended-dynamic filing on V7R6M0 IBM Cloud + V7R5M0 PUB400
+
+v0.7.2 documented a "filing-suppression" limitation on the IBM
+Cloud V7R6M0 LPAR: `NUMBER_STATEMENTS` in
+`QSYS2.SYSPACKAGESTAT` stayed at 0 after running parameterised
+SQL through extended-dynamic. The diagnosis was wrong on two
+counts, both surfaced 2026-05-11 by IBM's own docs and direct
+ground-truth experiments:
+
+1. **Verification SQL used the wrong package name.** Previous
+   queries searched `PACKAGE_NAME = 'GOJTPKG'` (the JDBC `package=`
+   property value). JT400 — and `hostserver.BuildPackageName()`
+   — append a 4-char session-options hash so the on-wire name is
+   `'GOJTPK9899'` (V7R6M0) or `'GOJTPK9689'` (V7R5M0). Exact-name
+   matches always returned zero rows; `LIKE 'GOJTPK%'` is the
+   correct verification pattern.
+
+2. **The 3-PREPARE filing threshold wasn't being crossed.** IBM's
+   [SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
+   documents (verbatim): "Starting with IBM i 6.1 PTF SI30855, a
+   statement must be prepared 3 times before it is added to the
+   SQL package. This change was made to prevent filling the
+   package with statements that aren't used frequently." The
+   v0.7.2 tests PREPAREd once and concluded the LPAR was broken;
+   the LPAR was working as designed all along.
+
+With both methodology bugs corrected — `LIKE 'BASE%'` + a 4-iter
+prepare loop on a pinned `*sql.Conn` — filing is end-to-end
+working on both V7R6M0 (`GOTCHE9899`, 2 statements, used_size
+65744) and V7R5M0 (`GOJTPK9689`, 2 statements, used_size 58880).
+
+### Changed
+
+- **`driver.packageEligibleFor()` byte-equivalent to JT400's
+  `JDSQLStatement.isPackaged()`.** Previously the default-criterion
+  branch only accepted parameterised statements and the select-
+  criterion branch incorrectly accepted VALUES / WITH. JT400's
+  gate (verified against `IBM/JTOpen f14abcc`, also documented by
+  IBM in the SQL Package Questions and Answers page: parameter
+  markers, INSERT with subselect, DECLARE PROCEDURE, positioned
+  UPDATE/DELETE) includes `(isInsert_ && isSubSelect_)`,
+  `(isSelect_ && isForUpdate_)`, and `isDeclare_` under the
+  default criterion, and explicitly *excludes* VALUES / WITH
+  from the select-criterion widening. After this change a Go
+  client and a Java client running the same SQL agree on whether
+  the statement enters the shared `*PGM`. Pure refactor — no
+  wire-format change for parameterised SQL, which remains the
+  dominant filing trigger.
+
+### Added
+
+- **`testdata/jtopen-fixtures/.../PackageFilingVerify`** — new
+  ground-truth Java fixture case that wipes any prior `GOJTPK*`
+  package, then runs each parameterised SQL 4 times (crossing
+  IBM's 3-PREPARE threshold) and queries
+  `SYSPACKAGESTAT WHERE PACKAGE_NAME LIKE 'GOJTPK%'`. The
+  captured trace proves JT400 emits `0x3808=01` on the wire
+  for parameterised statements
+  (`prepared_package_filing_verify.trace:273` + `:379`); the
+  captured golden documents the server-side filing result.
+  Validated against IBM Cloud V7R6M0 and PUB400 V7R5M0 on
+  2026-05-11.
+
+- **`TestFiling_ServerSideStateVerified`** in
+  `test/conformance/cache_hit_test.go` — Go-side mirror of the
+  Java fixture. Pins one `*sql.Conn`, runs two distinct
+  parameterised SELECTs 4 times each, then queries
+  `SYSPACKAGESTAT` from a fresh connection (the view has a
+  visibility delay within the owning conn). Asserts
+  `NUMBER_STATEMENTS >= 2`. Gated behind `DB2I_TEST_FILING=1`
+  for environments without DLTOBJ authority on the package
+  schema. Passes on V7R6M0 (`GOTCHE9899`, 2 entries,
+  used_size=65744).
+
+- **`wipePackage` + `filingPrepareCount` helpers** in
+  `test/conformance/cache_hit_test.go`. `wipePackage` invokes
+  `DLTOBJ` via `QSYS2.QCMDEXC` with a wildcard pattern so the
+  4-char options-hash suffix `BuildPackageName` appends is
+  matched. `filingPrepareCount=4` is one over IBM's documented
+  3-PREPARE threshold (SI30855 since 6.1).
+
+### Known driver-side gaps (tracked for future releases)
+
+- **INSERT / UPDATE / DELETE filing.** `hostserver/db_exec.go:187`
+  hard-codes `0x3808=0` for the EXECUTE_IMMEDIATE path because
+  prepare-option=1 + full package name triggers a server-side
+  rename of the RPB-bound statement (SQL-518 "STMT0001 IS NOT
+  PREPARED" on the follow-up EXECUTE). JT400 handles this via a
+  `nameOverride_` round-trip the driver hasn't yet implemented.
+  Result: only SELECTs file through the Go driver today.
+
+- **Cache-hit param binding.** When a filed SELECT is later
+  dispatched via the v0.7.1 cache-hit fast path
+  (`ExecutePreparedCached` / `OpenSelectPreparedCached`),
+  parameter values are silently dropped — the server runs the
+  cached plan with default-zero parameters. Filing-dependent
+  cache-hit tests still SKIP without `DB2I_TEST_FILING=1` and
+  this regression doesn't affect the cache-miss path.
+
+### Documentation
+
+- **`docs/package-caching.md`** — rewrote the "NUMBER_STATEMENTS
+  stays at 0" troubleshooting entry. Cites IBM's SQL Package
+  Q&A page for the 3-PREPARE threshold, documents the
+  base-name-vs-wire-name table, and explains the same-conn
+  visibility delay.
+
 ## [0.7.2] - 2026-05-11
 
 Fifth tagged release. Full conformance suite green at 168 s on

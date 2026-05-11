@@ -583,13 +583,18 @@ func TestPackageEligibleFor_DefaultCriteria(t *testing.T) {
 		hasParams bool
 		want      bool
 	}{
+		// Hot path: parameterised statements file under default.
 		{"SELECT 1 FROM SYSIBM.SYSDUMMY1", false, false},
 		{"SELECT ? FROM SYSIBM.SYSDUMMY1", true, true},
 		{"INSERT INTO T VALUES (?)", true, true},
 		{"INSERT INTO T VALUES (1)", false, false},
-		{"DECLARE C CURSOR FOR ...", true, false},
-		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
 		{"UPDATE T SET X=1 WHERE Y=2", false, false},
+		// JT400 isPackaged_ extras (post-2011 widening).
+		{"INSERT INTO T (A) SELECT 1 FROM SYSIBM.SYSDUMMY1", false, true},
+		{"SELECT * FROM T FOR UPDATE", false, true},
+		{"DECLARE C CURSOR FOR SELECT 1", false, true},
+		// CURRENT OF wins over everything else.
+		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.sql, func(t *testing.T) {
@@ -622,10 +627,12 @@ func TestPackageEligibleFor_SelectCriteria(t *testing.T) {
 	}{
 		{"SELECT 1 FROM SYSIBM.SYSDUMMY1", false, true}, // newly eligible
 		{"SELECT ? FROM SYSIBM.SYSDUMMY1", true, true},
-		{"VALUES 1", false, true},
-		{"WITH C AS (SELECT 1) SELECT * FROM C", false, true},
+		// JT400's select-criterion isPackaged_ explicitly excludes
+		// VALUES / WITH: it ORs `|| isSelect_`, not `|| isStatementType_`.
+		{"VALUES 1", false, false},
+		{"WITH C AS (SELECT 1) SELECT * FROM C", false, false},
 		{"INSERT INTO T VALUES (1)", false, false}, // still not
-		{"DECLARE C CURSOR FOR ...", true, false},
+		{"DECLARE C CURSOR FOR SELECT 1", false, true}, // inherited from default
 		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
 	}
 	for _, tc := range cases {
@@ -705,14 +712,16 @@ func TestPackageLookup(t *testing.T) {
 			PackageLibrary:  "QGPL",
 		},
 		pkg: &hostserver.PackageManager{
-			Cached: []hostserver.PackageStatement{
-				{
-					Name:    "QZAF481815E802E001",
-					SQLText: "SELECT ? FROM SYSIBM.SYSDUMMY1",
+			Cached: map[string]*hostserver.PackageStatement{
+				"SELECT ? FROM SYSIBM.SYSDUMMY1": {
+					Name:      "QZAF481815E802E001",
+					NameBytes: make([]byte, 18),
+					SQLText:   "SELECT ? FROM SYSIBM.SYSDUMMY1",
 				},
-				{
-					Name:    "QZAF4818AAAAAA0002",
-					SQLText: "INSERT INTO T VALUES (?, ?)",
+				"INSERT INTO T VALUES (?, ?)": {
+					Name:      "QZAF4818AAAAAA0002",
+					NameBytes: make([]byte, 18),
+					SQLText:   "INSERT INTO T VALUES (?, ?)",
 				},
 			},
 		},
