@@ -131,6 +131,9 @@ func (r *Result) fetchLastInsertId() (int64, error) {
 	}
 }
 
+// RowsAffected returns the row count parsed out of the EXECUTE
+// reply's SQLERRD3 slot (CP 0x3807 SQLCA bytes 100..103). Implements
+// database/sql/driver.Result.RowsAffected.
 func (r *Result) RowsAffected() (int64, error) {
 	return r.rowsAffected, nil
 }

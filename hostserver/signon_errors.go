@@ -36,6 +36,10 @@ func (e *SignonError) Subcode() uint16 {
 	return uint16(e.ReturnCode)
 }
 
+// Error formats the signon failure as "hostserver: signon RC=0xNNNN:
+// <message>" where the message is pulled from JTOpen's vocabulary
+// when we recognise the RC, or "(category=0xNN subcode=0xNN, ...)"
+// when we don't. Implements the error interface.
 func (e *SignonError) Error() string {
 	if msg := signonErrorMessage(e.ReturnCode); msg != "" {
 		return fmt.Sprintf("hostserver: signon RC=0x%08X: %s", e.ReturnCode, msg)

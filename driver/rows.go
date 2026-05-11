@@ -28,6 +28,9 @@ type Rows struct {
 	closed    bool
 }
 
+// Columns returns the per-column names parsed from the
+// PREPARE_DESCRIBE reply, in SELECT order. Implements
+// database/sql/driver.Rows.Columns.
 func (r *Rows) Columns() []string {
 	cols := r.cursor.Columns()
 	out := make([]string, len(cols))
@@ -284,6 +287,9 @@ func parseTemporalISO(sqlType uint16, s string) (time.Time, error) {
 // SelectColumn already has TypeName, DisplaySize, Nullable, Signed
 // from the M5 metadata work; thread them through.
 
+// ColumnTypeDatabaseTypeName returns the server-reported SQL type
+// name for the column at the given index (e.g. "DECIMAL", "VARCHAR",
+// "TIMESTAMP"). Implements database/sql.RowsColumnTypeDatabaseTypeName.
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	return r.cursor.Columns()[index].TypeName
 }
@@ -328,10 +334,17 @@ func (r *Rows) ColumnTypeLabel(index int) string {
 	return r.cursor.Columns()[index].Label
 }
 
+// ColumnTypeNullable reports whether the column at index allows NULLs,
+// per the server-side SQLType code (odd-valued SQL types are
+// nullable). Implements database/sql.RowsColumnTypeNullable.
 func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	return r.cursor.Columns()[index].Nullable, true
 }
 
+// ColumnTypeLength returns the declared character length for the
+// CHAR / VARCHAR family of columns. Returns ok=false for fixed-width
+// types where Length isn't a meaningful column attribute. Implements
+// database/sql.RowsColumnTypeLength.
 func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
 	c := r.cursor.Columns()[index]
 	switch c.SQLType {
@@ -341,6 +354,10 @@ func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool) {
 	return 0, false
 }
 
+// ColumnTypePrecisionScale returns DECIMAL / NUMERIC precision and
+// scale, or the DECFLOAT precision (16 or 34) when applicable.
+// Returns ok=false for non-numeric column types. Implements
+// database/sql.RowsColumnTypePrecisionScale.
 func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
 	c := r.cursor.Columns()[index]
 	switch c.SQLType {
@@ -355,6 +372,12 @@ func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok b
 	return 0, 0, false
 }
 
+// ColumnTypeScanType returns the Go type Next promotes a column's
+// raw bytes into before exposing it on the driver.Value slot --
+// time.Time for DATE/TIME/TIMESTAMP, []byte for FOR BIT DATA and
+// BLOB, string for CHAR/VARCHAR/CLOB, the appropriate numeric type
+// for everything else. Implements
+// database/sql.RowsColumnTypeScanType.
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	c := r.cursor.Columns()[index]
 	switch c.SQLType {

@@ -24,6 +24,11 @@ type Stmt struct {
 // currently bind parameters via this path (M3 deferred work).
 func (s *Stmt) NumInput() int { return -1 }
 
+// Close releases any client-side resources tied to the prepared
+// statement. The IBM i Db2 prepared-statement handle is bound to the
+// underlying connection's RPB slot, so the server-side cleanup
+// happens when the next PREPARE rebinds the same slot rather than on
+// statement Close. Implements database/sql/driver.Stmt.Close.
 func (s *Stmt) Close() error { return nil }
 
 // CheckNamedValue lets database/sql forward our LOB bind type

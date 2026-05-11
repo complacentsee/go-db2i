@@ -591,6 +591,8 @@ type NonBMPRuneError struct {
 	Index int    // rune index in the input string
 }
 
+// Error formats the offending rune, its index in the source string,
+// and the CCSID that rejected it. Implements the error interface.
 func (e *NonBMPRuneError) Error() string {
 	return fmt.Sprintf("hostserver: rune U+%04X at index %d is outside the BMP and not representable in CCSID %d (UCS-2 BE)", e.Rune, e.Index, e.CCSID)
 }

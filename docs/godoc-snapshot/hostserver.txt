@@ -1,0 +1,1764 @@
+package hostserver // import "github.com/complacentsee/goJTOpen/hostserver"
+
+Package hostserver implements the IBM i host-server datastream protocol that
+JT400 speaks on TCP ports 8470-8476 (TLS variants 9470-9476).
+
+This package is the wire-format layer underneath the database/sql driver in
+github.com/complacentsee/goJTOpen/driver. Most application code should import
+the driver package and use the standard database/sql APIs instead of calling
+into hostserver directly. The types and functions exposed here are public so
+advanced callers can build connection-pooling shims, custom request flows,
+or wire-level debug tools without forking the driver.
+
+# Wire format
+
+Every frame on the database / sign-on socket is a 20-byte Header (DSS header)
+followed by an operation-specific template (typically 20 bytes for the database
+service) and a sequence of LL/CP/DATA parameter blobs:
+
+    0..3    Length (total frame including header)
+    4..5    HeaderID (varies; high bit signals whole-datastream RLE)
+    6..7    ServerID (high byte 0xE0 sanity marker)
+    8..11   CSInstance
+    12..15  CorrelationID
+    16..17  TemplateLength
+    18..19  ReqRepID (request / reply identifier)
+    20..   Template + parameters
+
+Parameters are LL(4)+CP(2)+DATA, where LL covers the full block. CP codepoints
+in the 0x3800..0x38FF range are SQL-level (statement text, descriptors,
+SQLCA); 0x1100..0x11FF are signon-service CPs. ParseDBReply walks a database
+reply and surfaces the template fields (ORS bitmap echo, ErrorClass,
+ReturnCode) plus the parameter list. RLE-compressed replies (template[4:8]
+high bit set) are unwrapped transparently via the whole-datastream decompressor
+[decompressDataStreamRLE]; the per-CP RLE variant inside CP 0x380F LOB Data is
+handled by [parseLOBReply] + [decompressRLE1].
+
+# Top-level entry points
+
+Connection setup:
+
+  - SignOn -- exchange attributes + sign on (port 8476)
+  - StartDatabaseService -- exchange seeds + start service (port 8471)
+  - SetSQLAttributes -- date format, isolation, default library, client CCSID
+    (CP 0x3801), LOB threshold (CP 0x3822), and the extended-metadata enable in
+    one round trip
+
+Statement execution:
+
+  - SelectStaticSQL -- buffered SELECT (drains all rows up front)
+  - SelectPreparedSQL -- buffered SELECT with parameter binding
+  - OpenSelectStatic -- streaming SELECT, returns *Cursor; accepts SelectOption
+    variadics (e.g. WithExtendedMetadata)
+  - OpenSelectPrepared -- streaming SELECT with parameter binding + SelectOption
+    variadics
+  - ExecuteImmediate -- single-frame INSERT / UPDATE / DELETE / DDL
+  - ExecutePreparedSQL -- prepared INSERT / UPDATE / DELETE with binds
+
+LOB I/O:
+
+  - RetrieveLOBData -- server-side locator -> client bytes; request-side RLE bit
+    on by default, ParseDBReply unwraps
+  - WriteLOBData -- chunked LOB upload for prepared binds
+
+Transaction control:
+
+  - Commit / Rollback / AutocommitOff / AutocommitOn
+
+# CCSID handling
+
+Untagged CHAR / VARCHAR / CLOB columns decode through the per-column CCSID
+via [ebcdicForCCSID]. CCSID 65535 (FOR BIT DATA) is the raw-bytes sentinel --
+columns at that CCSID return []byte without EBCDIC decode. CCSID 1208 (UTF-8) is
+a no-op passthrough on V7R3+ servers. The driver layer offers a `?ccsid=N` DSN
+knob (plumbed through to DBAttributesOptions.ClientCCSID) for callers that need
+to override the connection-default for untagged columns; tagged columns always
+win on the read side.
+
+# LOB compression
+
+V7R6 servers respond to RetrieveLOBData with a whole-datastream RLE-wrapped
+reply when the request asks for it (the bit is on by default). ParseDBReply
+detects the compression marker (high bit of the 32-bit word at template offset
+4, matching JT400's DBBaseReplyDS.parse) and inflates the CP 0x3832 wrapper
+via [decompressDataStreamRLE] before returning. Highly compressible LOBs
+(constant-content BLOBs, JSON/XML with repeating structure) shrink to a handful
+of wire bytes for an arbitrary-sized payload; mixed-entropy LOBs pay no per-byte
+cost because the server skips RLE when it wouldn't help.
+
+The per-CP RLE-1 variant (used inside CP 0x380F LOB Data) is a different
+wire format (6-byte record: escape + 1-byte value + 4-byte BE count, vs the
+whole-datastream 5-byte record). Both decoders ship; [parseLOBReply] picks the
+per-CP variant automatically when CP 0x380F's declared `actualLen` differs from
+the wire byte count.
+
+# Extended metadata
+
+WithExtendedMetadata on OpenSelectStatic / OpenSelectPrepared asks the server
+to populate CP 0x3811 with per-column schema, base table, base column,
+and label. Requires two distinct knobs on PREPARE_DESCRIBE: the ORS bit
+ORSExtendedColumnDescrs (0x00020000) AND the per-statement CP 0x3829 = 0xF1
+(ExtendedColumnDescriptorOption). With only the ORS bit the server ships CP
+0x3811 with zero data (JT400 source calls this out as "Received empty extended
+column descriptor"); both knobs are needed for the payload to actually arrive.
+The fields land on SelectColumn as Schema, Table, BaseColumnName, Label.
+
+# Cursor lifecycle
+
+OpenSelectStatic / OpenSelectPrepared return a *Cursor that owns one server-side
+cursor (CRSR0001) and one Request Parameter Block (RPB at slot 1). Initial
+open issues CREATE_RPB -> PREPARE_DESCRIBE -> OPEN_DESCRIBE_FETCH; subsequent
+row pulls (via Cursor.Next from the driver layer) issue continuation FETCH on
+demand, returning a 32 KB block-buffer's worth at a time. Cursor.Close issues
+CLOSE (idempotent) + RPB DELETE so the next statement on the same Conn doesn't
+trip on a half-open slot.
+
+# Errors
+
+Server-side SQL errors come back as *Db2Error with SQLSTATE, SQLCODE, the IBM
+message id, and the substitution token list pulled from the SQLCA (CP 0x3807).
+Predicate methods (IsNotFound / IsConstraintViolation / IsConnectionLost /
+IsLockTimeout) classify the common cases.
+
+I/O-level errors (TCP drops, short frames, deadline exceeded) stay as their
+underlying types -- the driver package wraps them with driver.ErrBadConn
+semantics for the database/sql pool.
+
+# Cross-references
+
+Wire-format references for contributors:
+
+  - docs/lob-bind-wire-protocol.md LOB binds (CP 0x381D, 0x381E, 0x381F, 0x3813,
+    WRITE_LOB_DATA)
+  - docs/lob-known-gaps.md LOB SELECT quirks + closure log
+  - docs/configuration.md Driver DSN reference
+  - docs/PLAN.md Milestone history + risks
+
+JT400 sources to cross-reference when adding new wire flows live in
+/home/complacentsee/JTOpen/src/main/java/com/ibm/as400/access/ on a typical dev
+box; the canonical map is in docs/PLAN.md "Cross-reference: JTOpen sources by
+topic".
+
+CONSTANTS
+
+const (
+	ReqXChgRandSeed uint16 = 0x7001
+	ReqStartServer  uint16 = 0x7002
+
+	RepXChgRandSeed uint16 = 0xF001
+	RepStartServer  uint16 = 0xF002
+)
+    Database-service request / reply identifiers (DSS Header.ReqRepID).
+
+    Unlike the as-signon service (which negotiates via 0x7003/0xF003
+    exchange-attributes), as-database opens with a smaller pair of flows:
+    0x7001/0xF001 swaps random seeds, then 0x7002/0xF002 starts the server
+    prestart job for this user. Both of these are also used by the other
+    host-server services (rmtcmd, dtaq, file, etc.) -- the constants live here
+    because as-database is the first service in goJTOpen that drives them.
+
+const (
+	DateFormatJOB byte = 0xF0 // server default -- CP 0x3807 not sent
+	DateFormatUSA byte = 0xF1 // MM/DD/YYYY (10 chars), index 4
+	DateFormatISO byte = 0xF2 // YYYY-MM-DD (10 chars), index 5
+	DateFormatEUR byte = 0xF3 // DD.MM.YYYY (10 chars), index 6
+	DateFormatJIS byte = 0xF4 // YYYY-MM-DD (10 chars), index 7
+	DateFormatMDY byte = 0xF5 // MM/DD/YY (8 chars),    index 1
+	DateFormatDMY byte = 0xF6 // DD/MM/YY (8 chars),    index 2
+	DateFormatYMD byte = 0xF7 // YY-MM-DD (8 chars),    index 3
+)
+    DateFormat constants for DBAttributesOptions.DateFormat. The byte values
+    are EBCDIC digits ('0'..'7') for historical reasons and form the API
+    surface; on the wire we send the integer index (0..7) at CP 0x3807
+    (DateFormatParserOption) per JTOpen's mapping. JOB means "let the server
+    pick"; the CP is omitted in that case so the server falls through to its job
+    default.
+
+const (
+	IsolationDefault       int16 = -1 // don't send the CP -- server picks
+	IsolationCommitNone    int16 = 0  // *NONE -- no isolation, no journaling
+	IsolationReadCommitted int16 = 1  // *CS   -- cursor stability (JDBC TRANSACTION_READ_COMMITTED)
+	IsolationAllCS         int16 = 2  // *ALL  -- read uncommitted (TRANSACTION_READ_UNCOMMITTED, ish)
+	IsolationRepeatableRd  int16 = 3  // *RR   -- repeatable read
+	IsolationSerializable  int16 = 4  // *RS   -- serializable
+)
+    CommitmentControlLevel values for DBAttributesOptions.IsolationLevel.
+    CP 0x380E (short). Maps the standard JDBC isolation constants
+    to IBM i's commitment control names; values per JT400's
+    DBSQLAttributesDS.setCommitmentControlLevelParserOption.
+
+const (
+	SQLTypeVarChar         uint16 = 448
+	SQLTypeChar            uint16 = 452
+	SQLTypeVarCharNonBlank uint16 = 456 // VARCHAR with NULL indicator pre-fixed
+	SQLTypeCharNonBlank    uint16 = 460
+	SQLTypeInteger         uint16 = 496
+	SQLTypeSmallInt        uint16 = 500
+	SQLTypeBigInt          uint16 = 492
+	// JTOpen pairs each SQL type with two adjacent codes: even = NN
+	// (not nullable), odd = nullable. The "NN" suffix on legacy
+	// constants below is the not-nullable form.
+	SQLTypeDateNN      uint16 = 384
+	SQLTypeDate        uint16 = 385
+	SQLTypeTimeNN      uint16 = 388
+	SQLTypeTime        uint16 = 389
+	SQLTypeTimestampNN uint16 = 392
+	SQLTypeTimestamp   uint16 = 393
+	SQLTypeFloat4      uint16 = 480
+	SQLTypeFloat8      uint16 = 480 // distinguished by length
+	SQLTypeDecimal     uint16 = 484
+	SQLTypeNumeric     uint16 = 488
+)
+    SQL type codes from JTOpen's SQLData / DBSQLDescriptorDS. Only the types we
+    actually decode in M2 are listed; more land as M3+.
+
+const (
+	ReqDBSQLChangeDescriptor uint16 = 0x1E00
+	ReqDBSQLDeleteDescriptor uint16 = 0x1E01
+)
+    SQL function IDs in the descriptor (0x1E__) family. JTOpen splits "describe
+    parameters" off from "execute statement": between PREPARE and OPEN, the
+    client sends a CHANGE_DESCRIPTOR (0x1E00) frame carrying the input-parameter
+    shape via CP 0x381E (DBExtendedDataFormat). Without it, the OPEN that ships
+    parameter values via CP 0x381F (DBExtendedData) has no shape to bind to.
+
+const (
+	// SQL service function IDs.
+	ReqDBSetSQLAttributes      uint16 = 0x1F80 // request server attribs change + reply
+	ReqDBRetrieveSQLAttributes uint16 = 0x1F81
+
+	// Generic DB reply.
+	RepDBReply uint16 = 0x2800
+
+	// "End of conversation" request -- closes the connection cleanly.
+	ReqDBEndConversation uint16 = 0x1FFF
+)
+    Database-server (as-database, server ID 0xE004) request and reply IDs.
+    Unlike the as-signon and start-server flows -- which speak a pair of
+    dedicated request IDs (0x7001/0xF001 etc.) -- as-database runs over a
+    generic "DB request" datastream whose ReqRepID distinguishes the function
+    (server attributes, prepare, execute, etc.) and whose reply is always the
+    generic 0x2800 reply.
+
+    Function IDs we care about right now (more land in M2..M5):
+
+const (
+	ORSReturnData           uint32 = 0x80000000
+	ORSMessageID            uint32 = 0x40000000
+	ORSFirstLevelText       uint32 = 0x20000000
+	ORSSecondLevelText      uint32 = 0x10000000
+	ORSDataFormat           uint32 = 0x08000000
+	ORSResultData           uint32 = 0x04000000
+	ORSSQLCA                uint32 = 0x02000000
+	ORSServerAttributes     uint32 = 0x01000000
+	ORSParameterMarkerFmt   uint32 = 0x00800000
+	ORSPackageInfo          uint32 = 0x00100000
+	ORSExtendedColumnDescrs uint32 = 0x00020000
+
+	// ORSVarFieldComp asks the server to use variable-length-field
+	// compression in the result data, AND to echo the bit back in
+	// the reply's ORS bitmap when it actually used VLF. The reply
+	// echo is the only reliable way to distinguish VLF from the
+	// fixed-row-padding layout PUB400 uses for multi-column
+	// fixed-width results -- detection by total length is fragile
+	// (a single-column VARCHAR's VLF overhead can land on the
+	// same byte count as a non-VLF row of declared rowSize).
+	//
+	// JT400 calls this ORS_BITMAP_VARIABLE_LENGTH_FIELD_COMPRESSION
+	// (DBBaseRequestDS) and DBBaseReplyDS reads the same bit out of
+	// the response template via get16bit(20) & 0x0001.
+	ORSVarFieldComp uint32 = 0x00010000
+)
+    Operation Result Set (ORS) bitmap flags. The DB request template carries
+    a 4-byte bitmap that selects which results the server should send back.
+    Bit 1 (0x80000000) is "send reply at all"; the other bits select what's
+    interesting in that reply.
+
+    JTOpen wires up many of these by default; for our M2 work we only need a
+    subset. Flags listed here are the ones we actively set or compare against;
+    more land as M2..M5 fill in.
+
+const (
+	ReqDBSQLPrepareDescribe   uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
+	ReqDBSQLFetch             uint16 = 0x180B // continuation FETCH from existing cursor
+	ReqDBSQLOpenDescribeFetch uint16 = 0x180E // OPEN + DESCRIBE + FETCH
+	ReqDBSQLClose             uint16 = 0x180A // CLOSE cursor
+	ReqDBSQLRPBCreate         uint16 = 0x1D00 // CREATE Request Parameter Block
+	ReqDBSQLRPBDelete         uint16 = 0x1D02 // DELETE RPB (frees RPB slot for next CREATE)
+	ReqDBSQLDeleteResultsSet  uint16 = 0x1F01 // DELETE_RESULTS_SET
+)
+    SQL function IDs sent over the as-database (server ID 0xE004) service.
+    We only define the ones we use right now.
+
+const (
+	SQLCodeEndOfData int32 = 100
+	// SQLCodeCursorNotOpen is what PUB400 returns when we issue a
+	// continuation FETCH after the initial OPEN_DESCRIBE_FETCH
+	// already drained the cursor (single-batch result). We treat
+	// it as "done", not an error.
+	SQLCodeCursorNotOpen int32 = -501
+)
+    SQLCode constants we treat specially across the result-set parser. JT400
+    + IBM i return positive SQLCODE values in the SQLCA template's ReturnCode
+    field (low 32 bits) and signal "no more rows" with +100.
+
+const (
+	ReqDBSQLCommit   uint16 = 0x1807
+	ReqDBSQLRollback uint16 = 0x1808
+)
+    Transaction control function IDs in the SQL service. Per JT400's
+    DBSQLRequestDS.FUNCTIONID_COMMIT / FUNCTIONID_ROLLBACK; both are
+    fire-no-params frames whose semantics depend on whether the connection
+    currently has autocommit on or off.
+
+const (
+	ReqExchangeAttributesSignon  uint16 = 0x7003 // sent over ServerSignon
+	ReqExchangeAttributesHostCnn uint16 = 0x7103 // sent over the HOSTCNN service
+	ReqSignonInfo                uint16 = 0x7004 // user/password authentication
+
+	RepExchangeAttributesSignon  uint16 = 0xF003 // signon's reply to 0x7003
+	RepExchangeAttributesHostCnn uint16 = 0xF103 // hostcnn's reply to 0x7103
+	RepSignonInfo                uint16 = 0xF004 // signon's reply to 0x7004
+)
+    Sign-on service request/reply identifiers (DSS Header.ReqRepID).
+
+const HeaderLength = 20
+    HeaderLength is the size of the fixed DSS header in bytes.
+
+const LOBBlockSize = 1_000_000
+    LOBBlockSize is the per-frame byte size used when chunking
+    a `[]byte` or `string` LOB bind. It mirrors JT400's
+    AS400JDBCPreparedStatement.LOB_BLOCK_SIZE = 1_000_000, with the JT400 source
+    comment "@pdc Match Native JDBC Driver" -- so this is also the block size
+    IBM's own native JDBC driver uses.
+
+    Background. Single-frame WRITE_LOB_DATA frames carrying many megabytes
+    are exposed to a server-side performance cliff on IBM i V7R6: a 64 MiB
+    single-frame BLOB+CLOB INSERT measured 195s on a quiet 1-CPU LPAR (~0.33
+    KB/ms, two orders of magnitude below GbE wire speed), and 128 MiB hit our
+    previous 10-minute context timeout. Chunking the upload at 1 MB frames --
+    matching JT400's stream-bind path -- avoids the worst of that cliff (64 MiB
+    BLOB+CLOB drops to ~115s) without measurably hurting small LOBs. It does NOT
+    fully linearise large-LOB throughput though; the IBM i host server still
+    exhibits super-linear scaling above ~16 MiB regardless of chunk strategy,
+    so 128 MiB+ writes remain slow. Tracking the residual server-side cost is a
+    separate line of work.
+
+const LOBStreamChunkSize = 32 * 1024
+    LOBStreamChunkSize is the per-frame byte size used when uploading a
+    LOBStream. 32 KB matches the read-side DefaultLOBChunkSize and is well below
+    the wire-format int32 cap.
+
+const (
+	ReqDBNDBAddLibraryList uint16 = 0x180C
+)
+    NDB (Native Database) request IDs that share the as-database TCP connection
+    with the SQL service. PUB400 V7R5 routes by the ServerID field in the DSS
+    header, so all three (SQL=0xE004, NDB=0xE005, ROI=0xE006) ride the same
+    socket on port 8471.
+
+    Without an NDB ADD_LIBRARY_LIST somewhere between SET_SQL_ATTRIBUTES and
+    the first PREPARE_DESCRIBE, PUB400 V7R5 returns SQL -401 ("operands not
+    compatible") for any PREPARE on the SQL service. Empirically, even adding
+    the user's home library that's *already* on the job's library list is enough
+    to flip this off; the NDB call is treated as a session-init handshake more
+    than an actual library mutation.
+
+const ReqDBSQLExecute uint16 = 0x1805
+    EXECUTE function ID. Per JT400's DBSQLRequestDS.FUNCTIONID_EXECUTE --
+    runs an INSERT / UPDATE / DELETE that was previously PREPAREd against the
+    same RPB. Differs from EXECUTE_IMMEDIATE in that the statement text is not
+    re-sent (the RPB carries it) and parameter values arrive via CP 0x381F just
+    like the prepared SELECT path.
+
+const ReqDBSQLExecuteImmediate uint16 = 0x1806
+    EXECUTE_IMMEDIATE function ID. Per JT400's
+    DBSQLRequestDS.FUNCTIONID_EXECUTE_IMMEDIATE -- runs a single SQL statement
+    (INSERT / UPDATE / DELETE / DDL) without the PREPARE+DESCRIBE+OPEN dance,
+    since there's no result set to describe and no cursor to open.
+
+const ReqDBSQLRetrieveLOBData uint16 = 0x1816
+    RETRIEVE_LOB_DATA function ID. Per JT400's
+    DBSQLRequestDS.FUNCTIONID_RETRIEVE_LOB_DATA -- given a LOB locator handle
+    plus an offset/length, asks the server to return the bytes from that range.
+    Used to materialise BLOB / CLOB / DBCLOB columns whose values arrived as
+    locators in the SELECT result row instead of inlined.
+
+const ReqDBSQLWriteLOBData uint16 = 0x1817
+    WRITE_LOB_DATA function ID. Per JT400's
+    DBSQLRequestDS.FUNCTIONID_WRITE_LOB_DATA -- uploads bytes for a LOB locator
+    that the server allocated during PREPARE_DESCRIBE. Each frame writes a slice
+    of the LOB at the given offset; the truncate indicator on the last frame
+    finalises the value before EXECUTE references the locator from CP 0x381F.
+
+
+VARIABLES
+
+var (
+	ErrUserIDUnknown      = errors.New("user ID not found on system")
+	ErrUserIDDisabled     = errors.New("user ID disabled")
+	ErrPasswordIncorrect  = errors.New("password incorrect")
+	ErrPasswordExpired    = errors.New("password expired")
+	ErrPasswordIsNone     = errors.New("password is *NONE")
+	ErrUserIDLengthBad    = errors.New("user ID length not valid")
+	ErrPasswordLengthBad  = errors.New("password length not valid")
+	ErrSignonRequestBad   = errors.New("sign-on request not valid")
+	ErrPasswordWillExpire = errors.New("password incorrect; profile will be disabled on next attempt")
+)
+    Sentinel errors for the most common auth-failure paths. Callers can use
+    errors.Is(err, ErrPasswordIncorrect) without parsing the raw RC.
+
+var ErrShortFrame = errors.New("hostserver: short DSS frame")
+    ErrShortFrame is returned when a frame's Length field promises more bytes
+    than are available on the wire.
+
+
+FUNCTIONS
+
+func AutocommitOff(conn io.ReadWriter, corr uint32) error
+    AutocommitOff turns autocommit OFF for conn via a SET_SQL_ATTRIBUTES
+    (0x1F80) request that bundles three CPs the same way JT400 does when JDBC's
+    setAutoCommit(false) is invoked:
+
+        CP 0x3824 = 0xD5  -- autocommit OFF (EBCDIC 'N')
+        CP 0x380E = *CS   -- start a commitment definition at cursor
+                             stability (wire value 2 per JT400's
+                             COMMIT_MODE_CS_); without this the server
+                             stays in *NONE and COMMIT/ROLLBACK return
+                             SQL -211 errorClass=0x0002 even with a real
+                             INSERT pending.
+        CP 0x3830 = 1     -- LocatorPersistence "scoped to transaction"
+                             (matches JT400 default and is required for
+                             the file's commitment definition to actually
+                             get started).
+
+    Validated live against AFTRAEGE11.DCLVRP02 on PUB400 (journaled). JT400's
+    tx_commit fixture sent #8 has the exact byte layout this builds.
+
+func AutocommitOn(conn io.ReadWriter, corr uint32) error
+    AutocommitOn turns autocommit back on. Mirrors AutocommitOff: flips the
+    same three CPs back to JT400's "autocommit, no commitment, no locator
+    persistence" baseline. Used after an explicit transaction completes
+    so subsequent simple SELECT/INSERT runs don't keep a stale commitment
+    definition open.
+
+func BuildDBRequest(reqRepID uint16, tpl DBRequestTemplate, params []DBParam) (Header, []byte, error)
+    BuildDBRequest builds a DB-service request payload (everything after the
+    20-byte DSS header). It returns the populated Header (Length, ServerID =
+    SQL, TemplateLength = 20, ReqRepID set) and the payload bytes. CorrelationID
+    is the caller's responsibility to set on hdr before writing -- JTOpen uses
+    an incrementing per-connection sequence.
+
+func ChangeDescriptorRequest(params []PreparedParam) (Header, []byte, error)
+    ChangeDescriptorRequest builds the 0x1E00 frame body that uploads the
+    input-parameter shape to the RPB created by CREATE_RPB. JTOpen sends this
+    between PREPARE_DESCRIBE and OPEN_DESCRIBE_FETCH on every prepared SELECT
+    with parameters; without it OPEN's CP 0x381F has no matching shape on the
+    server side.
+
+func Commit(conn io.ReadWriter, nextCorrelation uint32) error
+    Commit sends a SQL service COMMIT (0x1807) on conn. The connection
+    must have already opted out of autocommit (via AutocommitOff or
+    DBAttributesOptions.AutoCommit = false at connection-attribute time);
+    otherwise PUB400 returns SQL -7008 ("not valid for operation") because
+    there's nothing to commit.
+
+    nextCorrelation is the request correlation ID; caller advances its own
+    counter.
+
+func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error)
+    EncodeDBExtendedData builds the CP 0x381F payload (parameter values for
+    one or more bound rows). For M3 we only emit a single row of values,
+    since database/sql QueryContext binds one tuple per call.
+
+        header (20 bytes):
+          0..3   consistency token (always 1)
+          4..7   row count (always 1 for M3)
+          8..9   column count
+          10..11 indicator size (always 2)
+          12..15 reserved (compression flag in JTOpen; 0 here)
+          16..19 row size (sum of FieldLength across columns)
+        indicator block (rowCount * colCount * indicatorSize bytes):
+          one int16 per column-per-row; 0 = not-null, -1 = null
+        data block (rowCount * rowSize bytes):
+          fields packed in declaration order
+
+    values must have the same length as params and supply one Go value per
+    parameter slot (currently int32 only).
+
+func EncodeDBExtendedDataFormat(params []PreparedParam) []byte
+    EncodeDBExtendedDataFormat builds the CP 0x381E payload (parameter shape
+    descriptor):
+
+        header (16 bytes):
+          0..3   consistency token (always 1)
+          4..7   number of fields
+          8..11  reserved
+          12..15 row size (sum of FieldLength across fields)
+        per-field record (64 bytes each):
+          0..1   field description length (always 64)
+          2..3   SQL type
+          4..7   field length
+          8..9   scale
+          10..11 precision
+          12..13 CCSID
+          14     parameter type
+          15..16 reserved
+          17..20 LOB locator
+          21..29 reserved
+          30..33 LOB max size
+          34..45 reserved
+          46..47 field name length
+          48..49 field name CCSID
+          50..63 field name (max 14 bytes)
+
+func ExchangeAttributesRequest(server ServerID, clientVersion uint32, clientDSLevel uint16, clientSeed []byte) (Header, []byte, error)
+    ExchangeAttributesRequest builds a SIGNON / HOSTCNN exchange- attributes
+    request payload (everything after the 20-byte DSS header). Together with the
+    matching Header it forms one wire frame.
+
+      - server: ServerSignon (most common) or the HOSTCNN service.
+      - clientVersion: client protocol version. JTOpen always sends 1.
+      - clientDSLevel: datastream level. 10 selects password level 4 (SHA-512 +
+        PBKDF2 + SHA-256 salt); 5 selects password level 2 or 3 (SHA-1 token).
+      - clientSeed: optional 8-byte client random seed used in the password
+        challenge. nil omits the parameter (server cannot then ask for an
+        encrypted password reply).
+
+    Returns the payload bytes and a Header pre-filled for sending. The caller is
+    expected to apply correlation IDs etc. before writing.
+
+func IsDb2Error(err error) bool
+    IsDb2Error tests whether err (or anything wrapped by it) is a *Db2Error.
+    Convenience wrapper for the common errors.As pattern.
+
+func IsLOBSQLType(sqlType uint16) bool
+    IsLOBSQLType reports whether the IBM i SQL type code refers to a LOB locator
+    that needs the WRITE_LOB_DATA / RETRIEVE_LOB_DATA path rather than inline
+    value transfer:
+
+        960 / 961  BLOB locator
+        964 / 965  CLOB locator
+        968 / 969  DBCLOB locator
+
+    The even/odd parity distinguishes NN (not nullable) from nullable; both
+    forms route through the locator path.
+
+func NDBAddLibraryList(conn io.ReadWriter, library string, correlationID uint32) error
+    NDBAddLibraryList sends one NDB-service ADD_LIBRARY_LIST frame to conn.
+    library is one EBCDIC library name (10 chars max, space-padded by JTOpen but
+    the NDB protocol just takes the declared length).
+
+    JTOpen hardcodes the indicator byte to ASCII 'C' (0x43), converted to EBCDIC
+    0xC3, with no public name for the meaning. We pass the same byte; if any
+    future caller needs a different indicator (e.g. 'F' for front-of-list,
+    'B' for back), generalise this helper then.
+
+func ReadDBReplyMatching(r io.Reader, wantCorrelation uint32, maxDrain int) (Header, []byte, error)
+    ReadDBReplyMatching reads frames from r and returns the first one whose
+    CorrelationID matches wantCorrelation. Any frames with a different
+    correlation are drained silently (they're typically server-side trailers
+    like an empty 40-byte template-only reply PUB400 sends after a successful
+    SET_SQL_ATTRIBUTES with 0x3825/0x3821 client-support flags).
+
+    Returns the matching frame's Header + payload, or the underlying I/O error
+    if r drops before a matching frame arrives. maxDrain caps how many stale
+    frames we'll skip; if exceeded, the function returns an error so a runaway
+    server doesn't lock the caller in a read loop.
+
+func ReadFrame(r io.Reader) (Header, []byte, error)
+    ReadFrame reads one complete DSS frame from r and returns the parsed header
+    plus the payload bytes that followed it (Length-20 bytes).
+
+    It does not retain a reference to r after returning. A frame whose Length
+    field is < 20 returns an error without consuming further bytes.
+
+func Rollback(conn io.ReadWriter, nextCorrelation uint32) error
+    Rollback sends a SQL service ROLLBACK (0x1808) on conn. Same autocommit-off
+    prerequisite as Commit.
+
+func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error)
+    SetSQLAttributesRequest builds a 0x1F80 SET_SQL_ATTRIBUTES request payload
+    (without the DSS header). The request asks the server to (a) accept the
+    attributes the client wants to use and (b) reply with its own attribute set
+    so the client can adjust to it.
+
+    The ORS bitmap is set to 0x81040000:
+
+        0x80000000 (Bit 1)  reply should be sent immediately
+        0x01000000 (Bit 8)  Server Attributes
+        0x00040000 (Bit 14) RLE compression reply desired -- harmless
+                            on uncompressed replies (server ignores)
+
+    This matches what JTOpen sends in our captured fixture.
+
+func SignOn(conn io.ReadWriter, userID, password string) (
+	*ExchangeAttributesReply,
+	*SignonInfoReply,
+	error,
+)
+    SignOn runs the as-signon service handshake on conn and returns both halves
+    of the negotiation: the ExchangeAttributesReply from step 1 (server VRM,
+    datastream level, server seed, password level, job name) and the
+    SignonInfoReply from step 2 (RC, sign-on dates, server CCSID, password
+    expiration).
+
+    The flow:
+
+     1. Generate an 8-byte random client seed (crypto/rand).
+     2. Send ExchangeAttributesRequest with the seed; parse reply.
+     3. Use the server's seed + password level to encrypt password.
+     4. Send SignonInfoRequest; parse reply.
+
+    conn is any io.ReadWriter -- typically a *net.TCPConn from the caller.
+    SignOn does not close conn; the caller owns lifecycle.
+
+    Only password levels 2 and 3 (SHA-1) are wired up at the moment. Levels 0/1
+    (DES) and 4 (PBKDF2-HMAC-SHA-512) return an error describing the gap.
+
+func SignonInfoRequest(
+	scheme AuthScheme,
+	userID string,
+	authBytes []byte,
+	serverLevel uint16,
+	clientCCSID uint32,
+	addAuthFactor []byte,
+) (Header, []byte, error)
+    SignonInfoRequest builds a SIGNON-service signon-info frame (ReqRepID
+    0x7004) -- the message that carries the actual user credential. authBytes
+    must already be encrypted; the encryption algorithm to use depends on the
+    password level returned by the preceding ParseExchangeAttributesReply (lives
+    in a separate package).
+
+    Inputs:
+      - scheme: AuthSchemePassword for the password path; the others select the
+        corresponding token CP.
+      - userID: Unicode user name. Encoded to 10 bytes EBCDIC CCSID 37,
+        space-padded. May be empty for token-only schemes; omits the 0x1104
+        parameter in that case.
+      - authBytes: already-encrypted password OR token bytes. For
+        AuthSchemePassword, length determines the template byte: 8 -> 0x01
+        (DES), 20 -> 0x03 (SHA-1), other -> 0x07 (PBKDF2-SHA-512).
+      - serverLevel: datastream level from the prior reply. >= 5 adds the
+        "return error messages" flag CP. >= 18 enables the AAF CP when
+        addAuthFactor is non-empty.
+      - clientCCSID: client CCSID claimed in CP 0x1113. JTOpen always sends 1200
+        (UTF-16 BE).
+      - addAuthFactor: optional MFA token. nil/empty omits CP 0x112F.
+
+    Returns the Header (Length set, CorrelationID left at zero -- caller owns
+    sequencing) and the payload bytes. Use WriteFrame to write the whole thing
+    to a Writer.
+
+func StartDatabaseService(conn io.ReadWriter, userID, password string) (
+	*XChgRandSeedReply,
+	*StartServerReply,
+	error,
+)
+    StartDatabaseService runs the as-database (port 8471) handshake on conn --
+    the second host-server connection a JTOpen client opens after as-signon.
+    It performs:
+
+     1. 0x7001 XChgRandSeed: client seed (8 bytes) -> server seed + password
+        level. Same conceptual flow as the as-signon exchange-attributes,
+        but a smaller, simpler frame; the password level lives in the reply's
+        HeaderID byte instead of a separate CP.
+     2. 0x7002 StartServer: encrypted password + EBCDIC user ID -> RC + prestart
+        job name (e.g. "344425/QUSER/QZDASOINIT").
+
+    On success, the connection is authenticated and the next frame the client
+    sends should be a database-server-attributes request (0x1F80) -- but that's
+    M2 territory.
+
+    Only password levels 2 and 3 (SHA-1) are wired up; 0/1 (DES) and 4
+    (PBKDF2-HMAC-SHA-512) return a clearly named error pointing at the
+    unimplemented auth package.
+
+    conn lifecycle (open + close) is the caller's responsibility.
+
+func StartServerRequest(server ServerID, scheme AuthScheme, userID string, authBytes []byte) (Header, []byte, error)
+    StartServerRequest builds a 0x7002 frame -- the second leg of the
+    host-server handshake on the database (and other) services. It carries the
+    actual credential the user is signing on with.
+
+    authBytes is the already-encrypted password (or token) bytes;
+    for SHA-1 (password level 2/3) that's a 20-byte substitute computed by
+    auth.EncryptPasswordSHA1 against the client+server seeds from the preceding
+    XChgRandSeed exchange. The length determines the auth scheme byte at
+    template offset 0:
+
+        scheme==Password,  len 8  -> 0x01 (DES)
+        scheme==Password,  len 20 -> 0x03 (SHA-1)
+        scheme==Password,  other  -> 0x07 (PBKDF2-SHA-512)
+        scheme==GSSToken          -> 0x05
+        scheme==IdentityToken     -> 0x06
+        otherwise                 -> 0x02
+
+    userID is encoded to 10 bytes EBCDIC CCSID 37 + space pad (the same as the
+    signon service). Empty userID omits CP 0x1104 -- a token-only flow.
+
+    The optional MFA / verification-ID / client-IP CPs from JTOpen's 7-arg
+    AS400StrSvrDS constructor are not surfaced here yet; PUB400 and the
+    production target don't require them. They land when M3+ drags a real
+    authentication-token path through the codebase.
+
+func WriteFrame(w io.Writer, hdr Header, payload []byte) error
+    WriteFrame writes hdr followed by payload to w. hdr.Length is overwritten
+    with HeaderLength + len(payload).
+
+func WriteLOBData(conn io.ReadWriter, handle uint32, offset int64, requestedSize uint32, data []byte, truncate, compressed bool, nextCorr uint32) error
+    WriteLOBData uploads a slice of LOB content tied to handle. Mirrors JT400's
+    JDLobLocator.writeData: emits one WRITE_LOB_DATA (0x1817) frame with
+    truncation, locator handle, requested-size, start-offset, compression,
+    and the data CP set. Returns nil on success or a *Db2Error when the server
+    flags the upload.
+
+    Single-frame default: callers with a full byte slice in hand pass offset=0,
+    truncate=true, and the entire content; JT400 ships any size in one DSS
+    frame (a 64 KiB BLOB went out as a single 65 632-byte frame in our captured
+    fixture). Stream callers issue multiple WriteLOBData calls with advancing
+    offset and truncate=false on every call except the last.
+
+    `requestedSize` is the byte count for BLOB / character count for CLOB
+    / character count for DBCLOB (caller passing bytes for a DBCLOB should
+    pass len(data)/2; JT400 does the same). For BLOB and CLOB binds it equals
+    len(data).
+
+    `compressed` should be false today; the server handshake doesn't negotiate
+    compression and JT400's writeData always passes 0xF0.
+
+    nextCorr is the request correlation ID; one frame consumed.
+
+    CCSID tag on the data CP is fixed at 0xFFFF (binary) -- callers that want
+    the server to transcode their bytes (e.g. UTF-8 source for an EBCDIC CLOB
+    column) use WriteLOBDataCCSID instead.
+
+func WriteLOBDataCCSID(conn io.ReadWriter, handle uint32, offset int64, requestedSize uint32, data []byte, dataCCSID uint16, truncate, compressed bool, nextCorr uint32) error
+    WriteLOBDataCCSID is the CCSID-aware variant of WriteLOBData. The CP 0x381D
+    payload is tagged with `dataCCSID`; the server uses that tag to decide
+    whether/how to transcode the bytes to the column's declared CCSID.
+
+    Common values:
+
+        0xFFFF  binary -- bytes pass through unchanged. Use this for
+                BLOB binds and for CLOB binds where the caller has
+                already encoded the string in the column's CCSID.
+        1208    UTF-8 -- supported on V7R3+ servers. The server
+                transcodes UTF-8 to the column CCSID; avoids needing
+                a Go-side codec for every EBCDIC table.
+        273     German EBCDIC SBCS (when calling code already has
+                bytes in that exact encoding). Same shape applies for
+                any single-byte EBCDIC CCSID.
+
+    The function does NOT validate that the bytes are well-formed in dataCCSID;
+    that's the caller's responsibility.
+
+func XChgRandSeedRequest(server ServerID, clientSeed []byte) (Header, []byte, error)
+    XChgRandSeedRequest builds the 28-byte 0x7001 frame that a host- server
+    client sends right after TCP-connect (and before any authentication)
+    to exchange random seeds and probe the server's password-encryption
+    capabilities. server identifies the host-server service: typically
+    ServerDatabase for the database service on port 8471, but the same flow is
+    used by the other services too.
+
+    clientSeed must be exactly 8 bytes. JTOpen uses the current-millis low/high
+    split as its source of "random"; goJTOpen callers should pass crypto/rand
+    bytes via the orchestrator in StartDatabaseService.
+
+
+TYPES
+
+type AuthScheme int
+    AuthScheme classifies what kind of credential a SignonInfoRequest carries.
+
+const (
+	// AuthSchemePassword sends an encrypted password. The exact
+	// encryption depends on the server's password level (DES, SHA-1,
+	// or PBKDF2-SHA-512) negotiated via [ExchangeAttributesReply].
+	AuthSchemePassword AuthScheme = iota
+	// AuthSchemeGSSToken carries a Kerberos GSS-API token.
+	AuthSchemeGSSToken
+	// AuthSchemeIdentityToken carries an IBM i identity token.
+	AuthSchemeIdentityToken
+	// AuthSchemeProfileToken carries a profile token created by an
+	// earlier authenticated session (or by a privileged process).
+	AuthSchemeProfileToken
+)
+type Cursor struct {
+	// Has unexported fields.
+}
+    Cursor is an open server-side SELECT cursor with rows pending.
+    The driver creates one via OpenSelectStatic / OpenSelectPrepared and
+    drains it row-by-row through Next; Close releases the RPB slot and any
+    partially-consumed cursor on the server.
+
+    Cursor is NOT safe for concurrent use. database/sql guarantees only one Rows
+    iteration per Conn at a time, which is the only caller we currently support.
+
+    Lifecycle:
+
+        c, err := OpenSelectStatic(conn, sql, nextCorr)
+        if err != nil { ... }
+        defer c.Close()
+        for {
+            row, err := c.Next()
+            if errors.Is(err, io.EOF) { break }
+            if err != nil { return err }
+            use(row)
+        }
+
+    Calling Close on an already-drained cursor is a no-op. Calling Close before
+    draining sends an RPB DELETE (the server uses the implicit cursor-on-RPB
+    association to release the cursor along with the RPB slot, which is what
+    JT400 does too).
+
+    On the JT400 "fetch/close" fast path -- ErrorClass=2, RC=700 in the
+    OPEN_DESCRIBE_FETCH reply, the typical case for SELECTs that fit in one
+    block-fetch buffer -- the server delivers all rows AND auto-closes the
+    cursor in one round trip. Cursor records that via serverClosed and skips
+    the explicit CLOSE in Close, matching JT400's wire pattern (OPEN -> RPB
+    DELETE only). This is what makes captured fixtures replay cleanly without
+    synthesising CLOSE / continuation-FETCH replies the server never sends.
+
+func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error)
+    OpenSelectPrepared opens a streaming cursor for a parameterised SELECT.
+    Same shape as OpenSelectStatic, plus the CHANGE_DESCRIPTOR + bound-value
+    frames between PREPARE and OPEN.
+
+func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error)
+    OpenSelectStatic opens a streaming cursor for a static (no-param) SELECT.
+    Mirrors the SelectStaticSQL bytes through the initial PREPARE_DESCRIBE +
+    OPEN_DESCRIBE_FETCH pair, but stops after the first batch is parsed -- the
+    caller drains via Cursor.Next.
+
+    nextCorr supplies fresh correlation IDs on demand; the cursor holds onto it
+    so continuation FETCH (issued lazily from Next) and RPB DELETE (from Close)
+    keep advancing the same counter the driver Conn uses.
+
+func (c *Cursor) Close() error
+    Close releases server-side resources. When the server already auto-closed
+    the cursor (JT400's "fetch/close" path -- recorded via c.serverClosed when
+    the OPEN/FETCH reply carried EC=2 RC=700 or SQL-501 / 24501), Close skips
+    the explicit CLOSE (0x180A) and emits only RPB DELETE -- matching JT400's
+    own wire pattern. In that case the prepared statement (STMT0001) was
+    dropped along with the cursor on the server, so no orphan SQL-519 / 24506 is
+    possible on a follow-up PREPARE.
+
+    When the cursor is still open server-side (no auto-close signal,
+    or Close is called mid-iteration), Close emits CLOSE first with REUSE_NO
+    so both the cursor AND the prepared statement go away. Without that CLOSE,
+    the next PREPARE_DESCRIBE on the same RPB slot returns SQL-519 / SQLSTATE
+    24506 ("prepared statement identifying open cursor cannot be re-prepared")
+    because STMT0001 is still in use.
+
+    closeCursor swallows the SQL-501 / 24501 "cursor not open" warning some
+    server versions emit when the cursor was already auto-closed; safe to call
+    regardless of cursor state.
+
+    Idempotent; safe to call from a defer.
+
+func (c *Cursor) Columns() []SelectColumn
+    Columns returns the result-set descriptor list. Stable for the lifetime of
+    the cursor (server cannot change column shape mid- iteration).
+
+func (c *Cursor) Next() (SelectRow, error)
+    Next returns the next row. Returns io.EOF when the cursor is drained. Errors
+    from continuation FETCH are surfaced verbatim (typically *Db2Error with the
+    OP="FETCH" tag); the cursor remains open so the caller can still Close it.
+
+type DBAttributesOptions struct {
+	// ClientCCSID is the CCSID we want the server to use when
+	// returning string data to us. 13488 (UCS-2 BE) is JTOpen's
+	// default and is what the captured fixture uses.
+	ClientCCSID uint16
+	// LanguageFeatureCode is the 4-digit numeric language code
+	// (CP 0x3802). JTOpen V7R5+ on PUB400 sends "2924"; encoder
+	// uses CCSID 37 + EBCDIC numeric mapping.
+	LanguageFeatureCode string
+	// ClientFunctionalLevel is the 10-char level identifier; JTOpen
+	// V7R5+ sends "V7R2M01   ". Padding to 10 bytes with EBCDIC
+	// spaces is the encoder's job.
+	ClientFunctionalLevel string
+	// DefaultSQLLibrary is the per-user default schema (CP 0x380F).
+	// Empty = don't send the CP. JTOpen sends the user's home
+	// library here ("AFTRAEGE11" on PUB400 for AFTRAEGE1).
+	DefaultSQLLibrary string
+	// DateFormat overrides the session date format CP 0x3807
+	// (DateFormatParserOption). It controls how the server formats
+	// DATE columns in result sets AND how it parses DATE bytes in
+	// prepared-statement binds. The default DateFormatJOB lets the
+	// server pick its job-default format -- on PUB400 that's YMD
+	// ("YY-MM-DD"). Set to DateFormatISO to receive dates in
+	// 10-char "YYYY-MM-DD" with no century-boundary guesswork in
+	// the decoder; or to DateFormatJOB to keep the fixture-
+	// compatible default.
+	//
+	// NOTE: pre-2026-05-08 builds of goJTOpen pumped this byte into
+	// CP 0x3805, which is actually the TranslateIndicator (per
+	// JTOpen's DBSQLAttributesDS.setTranslateIndicator). DateFormatJOB
+	// happened to coincide with the only valid TranslateIndicator
+	// value (0xF0); any other DateFormat silently broke the
+	// connection's translate behaviour AND left the date format at
+	// the server default. The CP is now correctly routed to 0x3807
+	// (short int, 0..7 per JTOpen's parser-option mapping).
+	DateFormat byte
+	// IsolationLevel controls CP 0x380E (commitment control level)
+	// in SET_SQL_ATTRIBUTES. Default IsolationDefault leaves the CP
+	// unchanged (matches the long-standing fixture-compat default
+	// of *NONE). Set to IsolationReadCommitted for transactions
+	// that need rollback support; IsolationCommitNone disables
+	// transactions entirely (suitable for non-journaled tables).
+	IsolationLevel int16
+	// LOBThreshold is the byte count at and below which the server
+	// inlines LOB columns in result data (and accepts inline LOB
+	// shapes on bind) instead of allocating a server-side locator.
+	// Sent as CP 0x3822 in SET_SQL_ATTRIBUTES; mirrors JT400's
+	// JDProperties.LOB_THRESHOLD ("lob threshold" JDBC URL knob).
+	//
+	// 0 = use the wire-default 32768 (the historical hard-coded
+	// value goJTOpen has always sent). Set to a smaller value to
+	// keep large CLOBs out of the row-data buffer; set to a larger
+	// value (up to 15728640, the server's documented cap) to inline
+	// bigger LOBs and skip the RETRIEVE_LOB_DATA round trip for
+	// repetitive small-LOB workloads.
+	LOBThreshold uint32
+}
+    DBAttributesOptions is the subset of DBSQLAttributesDS knobs that goJTOpen
+    sets on every database connection. The defaults match what JTOpen sends when
+    the JDBC driver is opened with no extra URL properties:
+
+        ClientCCSID = 13488 (UCS-2 BE; the negotiated client charset)
+        LanguageFeatureCode = "2924" (4-digit numeric ID; "2924" is
+                               English/Germany blend, what JTOpen
+                               captured against PUB400 sends)
+        ClientFunctionalLevel = "V7R2M01   " (10-char ID, EBCDIC CCSID 37,
+                               padded with spaces; gates which protocol
+                               features the server enables)
+        DefaultSQLLibrary = "AFTRAEGE11" (per-user library; PUB400's
+                               reply may be truncated without this set)
+
+    Callers tweak these via NewDBAttributesOptions().With...(); the raw struct
+    is exposed so power-users can override anything.
+
+func DefaultDBAttributesOptions() DBAttributesOptions
+    DefaultDBAttributesOptions returns the minimum-acceptable defaults for an
+    as-database session. These match the JTOpen JDBC driver V7R5+ when opened
+    without overrides; they're enough for PUB400 to accept a PREPARE_DESCRIBE
+    without falling back to a legacy mode that returns SQL -401.
+
+type DBParam struct {
+	CodePoint uint16
+	Data      []byte
+}
+    DBParam is one variable-length parameter on a DB request. Each one is
+    wire-encoded as LL(4) + CP(2) + Data, where LL includes its own 4 bytes
+    (i.e. LL = 6 + len(Data)). Helpers below build the flavours JTOpen uses
+    (CCSID-prefixed strings, UCS-2 strings, raw bytes, etc.).
+
+func DBParamByte(cp uint16, v byte) DBParam
+    DBParamByte packs a 1-byte param -- e.g. autocommit (0x3824),
+    input-locator-type (0x3829).
+
+func DBParamFixedString(cp uint16, ccsid uint16, valueBytes []byte) DBParam
+    DBParamFixedString packs a fixed-length CCSID-tagged string (JTOpen's
+    `addParameter(int, ConvTable, String, true)` overload): CCSID(2) + raw
+    bytes + 2 trailing pad bytes. The 2 trailing bytes look like an oversight
+    in JTOpen (DBBaseRequestDS.addParameter calls lock(len+4) but only writes
+    CCSID+data, leaving two bytes uninitialised), but PUB400's parser appears
+    to treat the LL as authoritative -- if we send the "tight" 18-byte version
+    the server quietly downgrades the session and returns SQL -401 on the next
+    PREPARE_DESCRIBE. Matching the wire shape JTOpen actually sends (LL = len +
+    4 + 6, 2 trailing zero bytes) keeps the server happy.
+
+    Used for identifiers like client functional level, NLSS sort- table name,
+    application name.
+
+func DBParamNumericString(cp uint16, s string) DBParam
+    DBParamNumericString packs a "numeric-only" string the way JTOpen's
+    `addParameter(int, String)` overload does: a hard-coded CCSID 37 (US-English
+    EBCDIC) followed by each character mapped to its EBCDIC numeric byte (digit
+    n -> 0xF0 | n; ' ' -> 0x40). No SL.
+
+    Used for compact numeric identifiers like the language-feature code
+    (CP 0x3802 = "2924") or the application functional level digit suffix.
+    The caller passes `s` as ASCII; the helper does the digit mapping inline so
+    callers don't have to think about EBCDIC for these specific cases.
+
+func DBParamShort(cp uint16, v int16) DBParam
+    DBParamShort packs a 2-byte big-endian short -- the encoding for CPs
+    that JTOpen describes as "short", e.g. ambiguous-select-option (0x3811),
+    naming-convention (0x3806), date-format (0x3807).
+
+func DBParamVarString(cp uint16, ccsid uint16, valueBytes []byte) DBParam
+    DBParamVarString packs a variable-length CCSID-tagged string (JTOpen's
+    `addParameter(int, ConvTable, String)` default overload): CCSID(2) +
+    StreamLength(2) + raw bytes. Used for statement text, package names, etc.
+    that may legitimately be short or long.
+
+type DBReply struct {
+	ORSBitmap  uint32
+	ErrorClass uint16
+	ReturnCode uint32
+	Params     []DBParam
+}
+    DBReply is the parsed shell of a 0x2800 reply. ErrorClass / ReturnCode
+    are the SQLCA-style status word from the template; anything else
+    is folded into a CP map that specific reply-type parsers (e.g.
+    ParseDBReplyServerAttributes) interpret.
+
+    JTOpen names errorClass / returnCode out of DBBaseReplyDS at template
+    offsets 14 / 16 -- which in our payload-only world (header stripped before
+    we get here) are offsets 14 / 16 within the 20-byte template, i.e. payload
+    offsets 14 / 16.
+
+    ORSBitmap is the response bitmap echoed in payload[0:4]. Per JT400
+    (DBBaseReplyDS#parse) bit 16 / 0x00010000 means "variable- length-field
+    compression actually used in the result data" -- callers parsing CP 0x380E
+    need this to pick VLF vs the fixed row-padding layout. Other bits mostly
+    mirror what the request asked for.
+
+func ParseDBReply(payload []byte) (*DBReply, error)
+    ParseDBReply walks the 0x2800 reply payload: the 20-byte template followed
+    by zero or more LL/CP/data parameters. It surfaces ErrorClass and ReturnCode
+    out of the template, then collects every CP/data pair so that callers can
+    pick out the ones relevant to the function they invoked. Unknown CPs are
+    kept (rather than skipped) so debugging tools can dump the full reply if
+    needed.
+
+    Whole-datastream RLE-1 compression (template's high bit of the 32-bit word
+    at offset 4) is unwrapped transparently: when the post-template payload
+    arrives as a single CP 0x3832 wrapper, the helper decompresses its inner
+    bytes and walks the resulting LL/CP/data stream as if it had arrived
+    uncompressed. Mirrors JT400's DBBaseReplyDS.parse rleCompressed_ path.
+
+func (r *DBReply) FindServerAttributes() (*ServerAttributes, error)
+    FindServerAttributes scans rep.Params for CP 0x3804 and returns the parsed
+    payload. The CP carries 2 reserved bytes at the start (0x0000 in observed
+    traces) which we skip before handing the bytes to ParseServerAttributes.
+
+    Returns nil, nil if the reply doesn't include the CP.
+
+func (r *DBReply) VLFCompressed() bool
+    VLFCompressed reports whether the server set the variable-length-
+    field compression bit (0x00010000) in the response ORS bitmap. True
+    means CP 0x380E result data must be decoded with the row- info-header +
+    row-info-array layout; false means each row occupies exactly rowSize bytes
+    with VARCHAR slots padded to their declared max width.
+
+type DBRequestTemplate struct {
+	ORSBitmap                 uint32
+	ReturnORSHandle           uint16
+	FillORSHandle             uint16
+	BasedOnORSHandle          uint16
+	RPBHandle                 uint16
+	ParameterMarkerDescriptor uint16
+}
+    DBRequestTemplate is the 20-byte fixed template that follows the DSS header
+    on every database-service request. Layout (relative to start of template,
+    i.e. payload offset 0):
+
+        0..3   ORSBitmap                   (uint32 BE)
+        4..7   reserved (zero on the wire)
+        8..9   ReturnORSHandle             (uint16 BE)
+        10..11 FillORSHandle               (uint16 BE)
+        12..13 BasedOnORSHandle            (uint16 BE)
+        14..15 RPBHandle                   (uint16 BE)
+        16..17 ParameterMarkerDescriptor   (uint16 BE)
+        18..19 ParameterCount              (uint16 BE; filled in by encoder)
+
+    Both ORSBitmap and the handles are typically left at the JTOpen defaults:
+    bitmap selects which results to send, handles are 0/1 scratch slots inside
+    the server's SQL state.
+
+type Db2Error struct {
+	SQLState      string
+	SQLCode       int32
+	MessageID     string
+	Message       string
+	ErrorClass    uint16
+	MessageTokens []string
+
+	// Op identifies the host-server operation that produced the
+	// error (e.g. "PREPARE_DESCRIBE", "EXECUTE", "FETCH"). Set by
+	// the wrapping helper at each call site so log lines can point
+	// to the right wire frame.
+	Op string
+}
+    Db2Error is the typed form of a server-side SQL error. Callers can
+    `errors.As(err, &dbErr)` and inspect SQLState / SQLCode to drive retry /
+    classification logic instead of regexing the formatted string.
+
+    SQLState is the 5-character SQLSTATE the IBM i Db2 returns; "00000" means
+    "no error" but we never construct a Db2Error in that case. "01xxx" is a
+    warning (we don't currently surface those as errors -- SelectStaticSQL etc.
+    swallow them via isSQLWarning). "02000" is the not-found / end-of-data
+    sentinel and we generally swallow that too, but exposed as IsNotFound() for
+    the rare caller that wants to see it directly.
+
+    SQLCode is the IBM SQL error code (negative = error, 0 = ok, positive =
+    warning). Examples relevant to labelverification-gw:
+
+        -204  table not found
+        -206  column not found
+        -302  numeric value out of range / truncation
+        -407  null insert into NOT NULL column
+        -530  foreign-key violation
+        -803  unique-key violation (duplicate row)
+        -911  deadlock / lock timeout
+        -913  unsuccessful execution / lock timeout warning
+
+    MessageID is the 8-char IBM message identifier (e.g. "SQL0204") pulled
+    from the SQLERRP slot. Useful for log greping but not part of the standard
+    exception interface.
+
+    ErrorClass is the legacy DB-reply error class (0=ok, 1=warning,
+    2=application/SQL error, 3+=system errors). Surface for parity with the
+    prior fmt.Errorf format; new callers should prefer SQLState / SQLCode
+    predicates.
+
+    MessageTokens are the substitution variables the server inserts into the
+    message text (table name, column name, etc.). Each token is a Go string
+    already EBCDIC-decoded. Empty when the server didn't supply any (DDL errors,
+    system errors).
+
+func (e *Db2Error) Error() string
+    Error formats the error in a single-line, log-friendly way:
+
+        hostserver: <Op> SQL<sqlcode> <sqlstate> <message-id>: <message>
+
+    When Message is empty (server returned only the codes), falls back to a
+    numeric form. Designed to be readable and grep-friendly; do not parse this
+    string -- use the typed fields instead.
+
+func (e *Db2Error) IsConnectionLost() bool
+    IsConnectionLost reports SQLSTATE 08xxx (connection exception) -- server
+    dropped the connection, can't reach the DB, etc. Callers should treat the
+    underlying database/sql conn as dead and let the pool create a fresh one.
+
+func (e *Db2Error) IsConstraintViolation() bool
+    IsConstraintViolation reports SQLSTATE 23xxx (integrity constraint
+    violation) -- duplicate keys, foreign-key violations, NOT NULL violations,
+    check-constraint failures. Engine retry logic should generally surface these
+    to the caller rather than retry.
+
+func (e *Db2Error) IsLockTimeout() bool
+    IsLockTimeout reports SQLCODE -911 / -913 (deadlock or lock timeout).
+    Retry-friendly with backoff -- distinct from a real constraint violation.
+
+func (e *Db2Error) IsNotFound() bool
+    IsNotFound reports SQLSTATE 02xxx (no-data) or SQLCODE +100. Engines can
+    scan/QueryRow loops can use this to distinguish "no row matched" from a real
+    error without looking at sql.ErrNoRows.
+
+type ExchangeAttributesReply struct {
+	// ReturnCode is the operation status; 0 = success. Non-zero values
+	// have meanings documented in the IBM i Information Center under
+	// "Sign-on server return codes".
+	ReturnCode uint32
+
+	// ServerVersion is the IBM i VRM packed as a uint32, e.g.
+	// 0x00070500 = V7R5M0. The high byte is reserved.
+	ServerVersion uint32
+
+	// ServerLevel is the negotiated host-server datastream level.
+	// JTOpen requests 10 (password level 4); the server picks a value
+	// no higher than what it supports (commonly 15 on V7R5+).
+	ServerLevel uint16
+
+	// ServerSeed is an 8-byte random nonce the client mixes into the
+	// password encryption challenge. Empty if CP 0x1103 was absent.
+	ServerSeed []byte
+
+	// PasswordLevel selects the encryption scheme:
+	//   0, 1: DES
+	//   2, 3: SHA-1
+	//   4:    PBKDF2-HMAC-SHA-512 + SHA-256-salted token
+	// 0 if CP 0x1119 was absent (treat as level 0).
+	PasswordLevel uint8
+
+	// JobName is the EBCDIC byte sequence for the prestart job that's
+	// servicing this connection (e.g. "341513/QUSER/QZSOSIGN"). nil
+	// if CP 0x111F was absent. Decode through the CCSID indicated by
+	// JobNameCCSID.
+	JobName      []byte
+	JobNameCCSID uint32
+
+	// AAFIndicator is true when the server is asking for an
+	// additional authentication factor (e.g. MFA token). False if
+	// CP 0x112E is absent or carries 0.
+	AAFIndicator bool
+}
+    ExchangeAttributesReply is the parsed form of a 0xF003 / 0xF103 reply
+    payload from the as-signon (or as-hostcnn) service.
+
+    The first three fields are at fixed offsets (RC, server version, server
+    level); everything else is a variable-length parameter addressed by code
+    point. Optional CPs that the server doesn't send leave their corresponding
+    field at the zero value.
+
+func ParseExchangeAttributesReply(payload []byte) (*ExchangeAttributesReply, error)
+    ParseExchangeAttributesReply decodes the payload of a 0xF003 / 0xF103
+    frame (i.e., the bytes after the 20-byte DSS header). It rejects malformed
+    length-prefixed parameters but is forgiving about unknown CPs -- they are
+    silently skipped so a newer server doesn't break older clients.
+
+type ExecResult struct {
+	RowsAffected int64
+}
+    ExecResult is what ExecuteImmediate returns -- just a rows-affected count
+    for now (decoded from SQLCA when present; 0 if the SQLCA didn't carry one).
+
+func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*ExecResult, error)
+    ExecuteImmediate runs INSERT / UPDATE / DELETE / DDL against conn using
+    the SQL service's EXECUTE_IMMEDIATE (0x1806) function. The statement text
+    is sent UCS-2 BE encoded (matching what SelectStaticSQL does for SELECT).
+    No column descriptors come back because there's no result set, so this
+    function deliberately doesn't try to parse one.
+
+    nextCorrelation is the request correlation ID; caller advances its own
+    counter. Currently does not loop / paginate; suitable for single-statement
+    Exec where the server answers in one frame.
+
+    Returns ExecResult with rows-affected when the SQLCA carries it, or zero
+    when the server didn't (e.g. DDL).
+
+func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*ExecResult, error)
+    ExecutePreparedSQL runs a parameterised INSERT / UPDATE / DELETE against
+    conn. Mirrors the JT400 prepared-DML flow:
+
+     1. CREATE_RPB (1D00) -- allocate request parameter block
+     2. PREPARE_DESCRIBE (1803) -- send statement text, ask for SQLCA
+     3. CHANGE_DESCRIPTOR (1E00) -- upload input parameter shapes
+     4. EXECUTE (1805) -- send parameter values, run statement
+
+    nextCorrelation is the starting CorrelationID; the four frames consume
+    nextCorrelation through nextCorrelation+3.
+
+    Returns ExecResult (rows-affected currently always 0; SQLCA decoding
+    lands with M7). SQL +100 ("no rows matched") is treated as success with
+    rows-affected=0, matching ExecuteImmediate.
+
+    Caller is responsible for ensuring the SQL text starts with INSERT, UPDATE,
+    or DELETE -- the function does not validate the verb, since callers (the
+    driver) already classify with isSelect().
+
+type Header struct {
+	Length         uint32
+	HeaderID       uint16
+	ServerID       ServerID
+	CSInstance     uint32
+	CorrelationID  uint32
+	TemplateLength uint16
+	ReqRepID       uint16
+}
+    Header is the 20-byte DSS frame header that prefixes every host- server
+    datastream. All multi-byte fields are big-endian.
+
+        bytes  field             notes
+        0..3   Length            total frame size including this header
+        4..5   HeaderID          0 for client requests; varies for replies
+        6..7   ServerID          0xE0xx; high byte 0xE0 is a sanity marker
+        8..11  CSInstance        client/server instance
+        12..15 CorrelationID     matches a request to its reply
+        16..17 TemplateLength    bytes of fixed-format template after header
+        18..19 ReqRepID          request or reply identifier
+
+func (h Header) MarshalBinary() ([]byte, error)
+    MarshalBinary returns a 20-byte big-endian encoding of h.
+
+func (h *Header) UnmarshalBinary(b []byte) error
+    UnmarshalBinary parses h from b. b must be at least 20 bytes; extra bytes
+    are ignored.
+
+type LOBData struct {
+	CCSID         uint16
+	CurrentLength uint64
+	Bytes         []byte
+}
+    LOBData is the result of a successful RETRIEVE_LOB_DATA round trip.
+    Bytes carries the actual LOB payload returned by the server (truncated to
+    the requested size); CurrentLength is the LOB's total length on the server,
+    useful for callers that want to stream more chunks.
+
+    CCSID is the encoding tag the server stamped on the data:
+
+        65535       BLOB / FOR BIT DATA -- bytes are binary
+        1208        CLOB tagged as UTF-8
+        13488       DBCLOB tagged as UCS-2 BE
+        else        CLOB tagged with an SBCS / EBCDIC table; caller
+                    transcodes via ebcdic.* converters as appropriate.
+
+    Bytes is always returned verbatim from the wire -- no transcode. Callers
+    who want a Go string for a CLOB need to decode it themselves once they've
+    consumed all chunks; the driver layer does that transparently when a BLOB /
+    CLOB column is scanned via database/sql.
+
+func RetrieveLOBData(conn io.ReadWriter, handle uint32, offset, size int64, columnIndex int, nextCorrelation uint32) (*LOBData, error)
+    RetrieveLOBData runs a single RETRIEVE_LOB_DATA round trip: asks the server
+    for `size` bytes starting at `offset` of the locator identified by `handle`.
+    nextCorrelation is the request correlation ID; one frame consumed.
+
+    Callers needing more than one chunk re-call this with an updated offset; the
+    locator stays valid for the life of the cursor / statement that produced it.
+    The locator is automatically dropped when the producing statement is freed
+    (Cursor.Close / RPB DELETE).
+
+    Empty result: when the requested range is beyond the LOB or the LOB itself
+    is empty, Bytes is nil and CurrentLength reflects whatever the server
+    reported (commonly 0).
+
+type LOBLocator struct {
+	Handle    uint32
+	SQLType   uint16
+	MaxLength uint32
+	CCSID     uint16
+}
+    LOBLocator is a placeholder value emitted by the result-data decoder
+    when a SELECT row carries a BLOB / CLOB / DBCLOB column as a server-side
+    locator instead of inlining the bytes. The driver layer uses Handle + the
+    connection's RetrieveLOBData to materialise the actual content when the
+    caller scans the column; callers using the hostserver layer directly issue
+    their own RetrieveLOBData calls with this Handle.
+
+    SQLType identifies the locator flavour:
+
+        960 / 961   BLOB locator   (CCSID 65535 -- binary)
+        964 / 965   CLOB locator   (CCSID is the column's char encoding)
+        968 / 969   DBCLOB locator (CCSID 13488 -- UCS-2 BE, double-byte)
+
+    MaxLength is the column's declared maximum LOB size (in bytes for BLOB,
+    characters for CLOB, double-bytes for DBCLOB). The actual content length is
+    whatever RetrieveLOBData returns in LOBData.CurrentLength.
+
+type LOBStream interface {
+	LOBLength() int64
+	LOBNextChunk(buf []byte) (n int, err error)
+}
+    LOBStream is the interface a streamed bind value satisfies. The driver-layer
+    LOBValue (driver/lob_value.go) implements it for the Reader-driven path
+    where the caller cannot hand us the full byte array up front.
+
+    LOBLength is the total payload size in bytes (for BLOB), in characters for
+    CLOB after caller-side CCSID transcoding, or in double-bytes for DBCLOB.
+    LOBNextChunk fills buf with the next portion of the payload and returns the
+    byte count read; the dispatcher invokes it repeatedly until LOBLength bytes
+    have been pulled or it returns io.EOF.
+
+type NonBMPRuneError struct {
+	CCSID uint16 // column CCSID that forbids surrogates (13488)
+	Rune  rune   // first offending rune
+	Index int    // rune index in the input string
+}
+    NonBMPRuneError is the typed error encodeUCS2BEStrict returns when it sees
+    a codepoint outside the Basic Multilingual Plane while encoding for a CCSID
+    that forbids surrogate pairs (CCSID 13488 is the only such target today).
+    The default substitute path used by bindOneLOB does not produce this error;
+    callers that opt into strict mode by calling encodeUCS2BEStrict directly
+    receive it so they can surface a meaningful message instead of letting the
+    server reply with SQL-330.
+
+func (e *NonBMPRuneError) Error() string
+    Error formats the offending rune, its index in the source string, and the
+    CCSID that rejected it. Implements the error interface.
+
+type ParameterMarkerField struct {
+	SQLType     uint16
+	FieldLength uint32
+	Scale       uint16
+	Precision   uint16
+	CCSID       uint16
+	ParamType   byte
+	LOBLocator  uint32
+	LOBMaxSize  uint32
+	Name        string
+}
+    ParameterMarkerField is one input parameter as the server
+    described it in the PREPARE_DESCRIBE reply. The fields
+    mirror JT400's DBSuperExtendedDataFormat getters that the
+    AS400JDBCPreparedStatement.bindParameter path consumes.
+
+    LOBLocator is the per-parameter locator handle the server has pre-allocated
+    when the parameter targets a LOB column. Non-LOB parameters carry zero.
+    Captured handles for our PUB400 V7R5M0 fixtures: first LOB parameter ->
+    0x100, second -> 0x200.
+
+    SQLType is the raw IBM i type code; the LOB families are 960/961 (BLOB),
+    964/965 (CLOB), 968/969 (DBCLOB).
+
+func (p ParameterMarkerField) IsLOB() bool
+    IsLOB reports whether this parameter targets a LOB column and therefore
+    needs the WRITE_LOB_DATA path on bind.
+
+type PreparedParam struct {
+	SQLType     uint16
+	FieldLength uint32
+	Precision   uint16
+	Scale       uint16
+	CCSID       uint16
+	ParamType   byte
+	Value       any
+	// DateFormat selects the wire format for SQLType 384/385 (DATE).
+	// Zero means "infer from FieldLength" (10 -> ISO, 8 -> YMD) for
+	// back-compat with callers that pre-date the format-aware bind
+	// path. Non-zero values are DateFormat* byte constants from
+	// db_attributes.go and must agree with FieldLength (10 for
+	// ISO/JIS/USA/EUR, 8 for MDY/DMY/YMD). Ignored for non-DATE
+	// SQL types.
+	DateFormat byte
+}
+    PreparedParam is one bound parameter for SelectPreparedSQL. SQLType,
+    FieldLength, Precision, Scale, CCSID describe the wire shape; Value is the
+    Go value to bind (currently only int32 is supported -- M3 scope; M4 widens
+    to int64/float64/string/decimal/time).
+
+    For nullable types, set Nullable=true and the encoder sets the JTOpen
+    "nullable" SQL type flavour (e.g. 497 for INTEGER nullable rather than 496).
+
+type SelectColumn struct {
+	Name      string
+	SQLType   uint16 // raw IBM i SQL type (e.g. 392=TIMESTAMP, 448=VARCHAR)
+	Length    uint32
+	Scale     uint16
+	Precision uint16
+	CCSID     uint16
+
+	// Derived metadata. TypeName mirrors java.sql's
+	// JDBCType.getName conventions ("INTEGER", "VARCHAR",
+	// "DECIMAL", ...). DisplaySize is the maximum number of
+	// characters needed to print the value; Nullable reflects the
+	// type code's NN/nullable parity (even = not nullable, odd =
+	// nullable per JT400 convention). Signed is true for numeric
+	// types that can be negative.
+	TypeName    string
+	DisplaySize int
+	Nullable    bool
+	Signed      bool
+
+	// Extended-metadata fields (populated when the request set the
+	// ORSExtendedColumnDescrs bit; otherwise empty). Sourced from
+	// the CP 0x3811 reply parameter and decoded per JT400's
+	// DBColumnDescriptorsDataFormat: 0x3900 = base column name,
+	// 0x3901 = base table name, 0x3902 = column label (carries its
+	// own CCSID), 0x3904 = schema name.
+	//
+	// Schema, Table, BaseColumnName are EBCDIC bytes pre-decoded
+	// through the column's server-job CCSID; Label is decoded
+	// through the CCSID the server stamped on its 0x3902 record.
+	// All four are empty strings when the server didn't include
+	// them, the caller didn't ask for extended metadata, or the
+	// query target doesn't have a single base table (e.g. computed
+	// columns, joins, expressions).
+	Schema         string
+	Table          string
+	BaseColumnName string
+	Label          string
+}
+    SelectColumn describes one column of a SELECT result set, parsed out of the
+    super-extended data format CP. Mirrors the fields a JDBC ResultSetMetaData /
+    database/sql ColumnType caller will reach for, so the M6 driver wrapper can
+    answer ColumnTypes without re-deriving anything.
+
+type SelectOption func(*selectOpts)
+    SelectOption tweaks request-side behaviour of OpenSelectStatic /
+    OpenSelectPrepared. Compose with the variadic tail of each:
+
+        hostserver.OpenSelectStatic(conn, sql, nextCorr,
+            hostserver.WithExtendedMetadata(true))
+
+    Zero options reproduces the historical behaviour byte-for-byte.
+
+func WithExtendedMetadata(b bool) SelectOption
+    WithExtendedMetadata asks the server to ship per-column schema, table,
+    base column name, and label in the PREPARE_DESCRIBE reply. Mirrors JT400's
+    `extended metadata=true` JDBC URL knob.
+
+    The default-OFF behaviour keeps the wire shape byte-identical to
+    pre-M4-deferred captures so existing fixtures still replay cleanly;
+    callers opt in per-statement when they need `Rows.ColumnTypeSchemaName` /
+    `Rows.ColumnTypeTableName`.
+
+type SelectResult struct {
+	Columns []SelectColumn
+	Rows    []SelectRow
+}
+    SelectResult bundles the column descriptors with the rows returned for a
+    single SELECT round trip.
+
+func SelectPreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*SelectResult, error)
+    SelectPreparedSQL runs the JTOpen prepared-SELECT flow:
+
+     1. CREATE_RPB (1D00)
+     2. PREPARE_DESCRIBE (1803) -- with ORSParameterMarkerFmt set
+     3. CHANGE_DESCRIPTOR (1E00) -- with input-param shapes
+     4. OPEN_DESCRIBE_FETCH (180E) -- with input-param values
+
+    nextCorrelation is the starting CorrelationID; the four frames consume
+    nextCorrelation through nextCorrelation+3.
+
+    M3 scope: int32 and string parameters; null-bind, decimal, and
+    time/timestamp land with M4. The function returns the parsed SelectResult
+    identical to SelectStaticSQL.
+
+func SelectStaticSQL(conn io.ReadWriter, sql string, nextCorrelation uint32) (*SelectResult, error)
+    SelectStaticSQL runs a static (non-parameterised) SELECT through the
+    JTOpen-style 3-call sequence:
+
+     1. CREATE_RPB (0x1D00) -- create a Request Parameter Block named "STMT0001"
+        / "CRSR0001". Discards reply.
+     2. PREPARE_DESCRIBE (0x1803) -- send statement text + ask for column
+        descriptors. Reply carries SQLCA + super-extended data format (CP
+        0x3812).
+     3. OPEN_DESCRIBE_FETCH (0x180E) -- execute + fetch all rows in one round
+        trip. Reply carries SQLCA + extended result data (CP 0x380E) -- the row
+        bytes.
+
+    nextCorrelation is the starting CorrelationID to use; the three frames
+    consume nextCorrelation, nextCorrelation+1, nextCorrelation+2.
+
+    Limitations (M2-scope):
+      - Static SQL only (no parameter markers); when M3 lands a parallel
+        SelectPreparedSQL adds the parameter-marker side.
+      - First-fetch only. The server returns a row buffer that may indicate
+        "more rows available" via the SQLCA but we don't currently issue
+        follow-up FETCHes.
+      - Result-set holdability / cursor scroll are hardcoded to the JTOpen
+        defaults captured in the select_dummy fixture.
+
+type SelectRow []any
+    SelectRow is one row decoded from a SELECT result set. Each element is a Go
+    value matching the column's SQL type:
+
+        TIMESTAMP -> string ("YYYY-MM-DD-HH.MM.SS.ffffff")
+        VARCHAR   -> string
+        CHAR      -> string (not space-trimmed)
+        INTEGER   -> int32
+        (more types added as M2..M5 fill in)
+
+type ServerAttributes struct {
+	// Numeric POs.
+	DateFormatPO           uint16
+	DateSeparatorPO        uint16
+	TimeFormatPO           uint16
+	TimeSeparatorPO        uint16
+	DecimalSeparatorPO     uint16
+	NamingConventionPO     uint16
+	IgnoreDecimalDataError uint16
+	CommitmentControlLevel uint16
+	DRDAPackageSize        uint16
+	TranslationIndicator   uint8
+	ServerCCSID            uint16
+	ServerNLSSValue        uint16
+
+	// EBCDIC bytes (decode through CCSID 37 for these).
+	ServerLanguageId           []byte // 3 bytes,  e.g. "ENU"
+	ServerLanguageTable        []byte // 10 bytes, e.g. "*HEX      "
+	ServerLanguageTableLibrary []byte // 10 bytes
+	LanguageFeatureCode        []byte // 4 bytes,  e.g. "2924"
+	ServerFunctionalLevel      []byte // 10 bytes, e.g. "V7R5M00016"
+	RelationalDBName           []byte // 18 bytes, e.g. "PUB400            "
+	DefaultSQLLibraryName      []byte // 10 bytes, e.g. "AFTRAEGE11"
+	ServerJobIdentifier        []byte // 26 bytes: 10 job + 10 user + 6 number
+	DefaultSQLSchemaName       []byte // variable, length given inline
+}
+    ServerAttributes is the parsed form of a 0x3804 CP payload -- the result
+    of a 0x1F80 SET_SQL_ATTRIBUTES request. Field offsets mirror JTOpen's
+    DBReplyServerAttributes (which indexes off the CP data start, i.e. after the
+    2 reserved bytes that follow LL/CP). We only surface fields that goJTOpen
+    actually consumes; the rest land if/when needed.
+
+    EBCDIC strings come back as raw bytes -- caller decodes through the
+    appropriate CCSID converter. For names that JTOpen treats as CCSID 37 (US
+    English -- the "system" CCSID), CCSID37.Decode is the right call.
+
+func ParseServerAttributes(data []byte) (*ServerAttributes, error)
+    ParseServerAttributes decodes the bytes inside CP 0x3804 (the ones AFTER the
+    2 reserved-byte prefix that DBReplyServerAttributes skips with offset+8 vs
+    offset+6). The required minimum length is 114 bytes (everything up through
+    ServerJobIdentifier); the schema-length+name tail at offset 114+ is optional
+    -- PUB400 has been observed to omit it on a freshly-opened connection while
+    the same fixture captured under a different session includes it.
+
+    The 2 prefix bytes are NOT included in `data`; pass the slice that begins at
+    the DateFormatPO field (offset 0 in JTOpen's DBReplyServerAttributes).
+
+func SetSQLAttributes(conn io.ReadWriter, opts DBAttributesOptions) (*ServerAttributes, error)
+    SetSQLAttributes runs a SET_SQL_ATTRIBUTES round trip on conn and returns
+    the parsed ServerAttributes from the server's reply. The caller must have
+    already completed StartDatabaseService() on this connection -- this is the
+    next step.
+
+    On success, the client knows the server's CCSID, the default SQL library,
+    the prestart-job identifier in the SQL service, etc. M2 SELECT round trips
+    will use these (especially CCSID and the schema name) to format their
+    statement text correctly.
+
+func (a *ServerAttributes) VRM() uint32
+    VRM extracts the V/R/M (version/release/modification) numbers embedded
+    in the ServerFunctionalLevel string. JTOpen reads the low nibble of
+    bytes at offsets 51, 53, 55 of the attribute payload (which sit inside
+    ServerFunctionalLevel at relative offsets 1, 3, 5 -- e.g. "V7R5M00016" -> 7,
+    5, 0).
+
+    Returns 0 if the level string is too short or doesn't follow the expected
+    V?R?M? layout.
+
+type ServerID uint16
+    ServerID identifies which IBM i host server a frame belongs to. Wire
+    values are always 0xE0xx -- the high byte is JTOpen's sanity marker (see
+    ClientAccessDataStream.construct).
+
+const (
+	ServerCentral   ServerID = 0xE000
+	ServerFile      ServerID = 0xE002
+	ServerNetPrint  ServerID = 0xE003
+	ServerDatabase  ServerID = 0xE004
+	ServerDataQueue ServerID = 0xE007
+	ServerCommand   ServerID = 0xE008
+	ServerSignon    ServerID = 0xE009
+)
+    Service identifiers from JTOpen's AS400Server.getServerId.
+
+func (s ServerID) String() string
+    String returns the JTOpen service name for s, e.g. "as-signon".
+
+type SignonError struct {
+	// ReturnCode is the raw 4-byte RC the server reported.
+	ReturnCode uint32
+}
+    SignonError wraps a non-zero ReturnCode from a sign-on reply (XChgRandSeed,
+    ExchangeAttributes, SignonInfo) into a typed value callers can switch
+    on without re-parsing magic numbers. Mirrors the subset of return codes
+    JT400 surfaces via AS400SecurityException -- not every documented code is
+    enumerated here, but the common auth-failure paths (bad password, disabled
+    profile, expired password) are spelled out so a real driver can map them to
+    useful application-layer behaviour.
+
+    The full IBM i sign-on RC vocabulary is documented in JTOpen's
+    AS400ImplRemote.returnSecurityException; codes not in signonErrorMessages
+    render as "unknown" with the raw hex.
+
+func (e *SignonError) Category() uint16
+    Category returns the high 16 bits of ReturnCode -- the IBM i "error class"
+    grouping. 0x0001 = bad request data, 0x0002 = userID problems, 0x0003 =
+    password problems, 0x0004 = general security, etc.
+
+func (e *SignonError) Error() string
+    Error formats the signon failure as "hostserver: signon RC=0xNNNN:
+    <message>" where the message is pulled from JTOpen's vocabulary when we
+    recognise the RC, or "(category=0xNN subcode=0xNN, ...)" when we don't.
+    Implements the error interface.
+
+func (e *SignonError) Subcode() uint16
+    Subcode returns the low 16 bits of ReturnCode -- the per-category detail.
+    e.g. category=0x0003 subcode=0x000B = "password incorrect."
+
+func (e *SignonError) Unwrap() error
+    Unwrap lets errors.Is / errors.As walk through to the sentinel for the
+    categorised codes. Returns nil for codes without a dedicated sentinel.
+
+type SignonInfoReply struct {
+	// ReturnCode is 0 on success. Non-zero values are documented in
+	// the IBM i sign-on server reference and wrapped by
+	// [SignonError] (use [wrapSignonRC] to get one). Common codes:
+	// 0x0003000B = password incorrect, 0x00020001 = user ID
+	// unknown, 0x00020002 = user ID disabled, 0x0003000D =
+	// password expired.
+	ReturnCode uint32
+
+	// CurrentSignonDate is the timestamp the server stamps onto this
+	// sign-on (server local time, no timezone). Zero if absent.
+	CurrentSignonDate time.Time
+
+	// LastSignonDate is when this user last signed on prior to now.
+	// Zero if absent.
+	LastSignonDate time.Time
+
+	// ExpirationDate is when the user's password expires. Zero if
+	// absent (no expiration set, or the server didn't report it).
+	ExpirationDate time.Time
+
+	// PWDExpirationWarningDays is the number of days before
+	// ExpirationDate at which the system would have started warning
+	// about pending expiry. 0 if absent.
+	PWDExpirationWarningDays uint32
+
+	// ServerCCSID is the IBM i job's CCSID (e.g., 37 = US English,
+	// 273 = German). Use this when decoding subsequent EBCDIC strings
+	// returned from the database server. 0 if absent.
+	ServerCCSID uint32
+
+	// UserID is the canonical EBCDIC user ID the server registered for
+	// this sign-on (CP 0x1104). nil if absent. Caller decodes through
+	// CCSID 37.
+	UserID []byte
+}
+    SignonInfoReply is the parsed form of a 0xF004 reply payload.
+
+    The fixed 4-byte template carries the operation status (RC); every other
+    field is a variable-length parameter that may be absent. Zero values mean
+    "the server didn't include this CP."
+
+func ParseSignonInfoReply(payload []byte) (*SignonInfoReply, error)
+    ParseSignonInfoReply decodes the payload of a 0xF004 frame. Unknown CPs are
+    silently skipped.
+
+type StartServerReply struct {
+	// ReturnCode is 0 on success. Non-zero values are documented in
+	// the IBM i sign-on / database server reference and are
+	// authentication-failure-shaped.
+	ReturnCode uint32
+	// UserID is the canonical 10-byte EBCDIC user ID the server
+	// registered for this connection (CP 0x1104). nil if absent.
+	UserID []byte
+	// JobName is the EBCDIC bytes of the prestart job that's now
+	// servicing this connection (e.g. "344425/QUSER/QZDASOINIT").
+	// CCSID is in JobNameCCSID; zero CCSID means "no CCSID prefix
+	// in the CP" (some servers send 4 bytes of zero there).
+	JobName      []byte
+	JobNameCCSID uint32
+}
+    StartServerReply is the parsed form of a 0xF002 frame. The fixed template
+    carries only the RC; the user ID and prestart-job name arrive as optional
+    CPs in the variable section.
+
+func ParseStartServerReply(payload []byte) (*StartServerReply, error)
+    ParseStartServerReply decodes a 0xF002 payload. The fixed-template length is
+    4 bytes (just the RC); CPs follow per the LL/CP/data scheme.
+
+    Per JTOpen's AS400StrSvrReplyDS.findCP, the CP scan starts at frame offset
+    24 (which is payload offset 4). We tolerate both the 10-byte-prefix
+    layout that AS400StrSvrReplyDS expects (LL+CP+4 CCSID-bytes+data) and
+    a no-CCSID fallback for the user-ID CP -- JTOpen's getUserIdBytes uses
+    get32bit(offset)-10 unconditionally, so we match.
+
+type XChgRandSeedReply struct {
+	// ReturnCode is 0 on success.
+	ReturnCode uint32
+	// ServerSeed is the 8-byte nonce the client mixes into its
+	// password encryption. Always present on a successful reply.
+	ServerSeed []byte
+	// PasswordLevel is the encryption scheme the server requires:
+	//   0, 1: DES (pre-V5R1)
+	//   2, 3: SHA-1
+	//   4:    PBKDF2-HMAC-SHA-512 (V7R1+)
+	// Carried in HeaderID's low byte; mirrors JTOpen's
+	// getServerAttributes() return value.
+	PasswordLevel uint8
+	// AAFIndicator is true iff the server includes CP 0x112E with
+	// data byte 0x01 -- a request for the additional-auth-factor
+	// flow (MFA token).
+	AAFIndicator bool
+}
+    XChgRandSeedReply is the parsed form of a 0xF001 frame.
+
+    Per JTOpen's AS400XChgRandSeedReplyDS, the server seed lives in the 12-byte
+    template (RC + 8-byte seed) and the password level is carried in the second
+    byte of the HeaderID field (data_[5] in JTOpen). Optional CPs follow the
+    template; we surface AAFIndicator from CP 0x112E if present.
+
+func ParseXChgRandSeedReply(headerID uint16, payload []byte) (*XChgRandSeedReply, error)
+    ParseXChgRandSeedReply decodes the 12-byte fixed template plus any optional
+    CP parameters from a 0xF001 payload. headerID is the HeaderID field of the
+    DSS frame -- needed because the password level is carried there, not in the
+    payload.
+

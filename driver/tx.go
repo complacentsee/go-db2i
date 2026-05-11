@@ -13,6 +13,9 @@ type Tx struct {
 	conn *Conn
 }
 
+// Commit issues a host-server COMMIT (CP 0x1807) on the underlying
+// connection, then re-enables autocommit. Implements
+// database/sql/driver.Tx.Commit.
 func (t *Tx) Commit() error {
 	if err := hostserver.Commit(t.conn.conn, t.conn.nextCorr()); err != nil {
 		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: commit: %w", err))
@@ -23,6 +26,9 @@ func (t *Tx) Commit() error {
 	return nil
 }
 
+// Rollback issues a host-server ROLLBACK (CP 0x1808) on the
+// underlying connection, then re-enables autocommit. Implements
+// database/sql/driver.Tx.Rollback.
 func (t *Tx) Rollback() error {
 	if err := hostserver.Rollback(t.conn.conn, t.conn.nextCorr()); err != nil {
 		return t.conn.classifyConnErr(fmt.Errorf("gojtopen: rollback: %w", err))

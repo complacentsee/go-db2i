@@ -19,6 +19,9 @@ const (
 	Received
 )
 
+// String returns the lowercase tag JTOpen prints in trace headers
+// ("sent" or "received"), or the unknown-direction fallback
+// "Direction(N)".
 func (d Direction) String() string {
 	switch d {
 	case Sent:

@@ -615,7 +615,18 @@ Track A (foundations):
   empty username. Two fuzz-found corpus seeds preserved as
   regression gates (`driver/testdata/fuzz/FuzzParseDSN/...`,
   `hostserver/testdata/fuzz/FuzzParseDBReply/...`).
-- **M8-2 godoc audit** ⏳
+- **M8-2 godoc audit** ✅ 2026-05-11 — every exported symbol in
+  `driver/`, `hostserver/`, `ebcdic/`, `internal/wirelog/` now has a
+  leading-identifier doc comment (interface methods like Columns,
+  ColumnType*, Commit, Rollback, RowsAffected, Stmt.Close,
+  Direction.String, NonBMPRuneError.Error, SignonError.Error were
+  the residual gaps). New `ExampleDsnKnobs` covers the
+  `?lob-threshold` / `?ccsid` / `?tls=true` knob mix the M8 plan
+  called out. Existing examples (`ExampleLOBValue` /
+  `ExampleLOBReader` / `ExampleDb2Error` / DSN parse) already
+  covered the other high-traffic types. Snapshot of `go doc -all`
+  output across the four packages committed to
+  `docs/godoc-snapshot/` for diffability.
 - **M8-3 slog integration** ⏳
 - **M8-4 OpenTelemetry spans** ⏳
 - **M8-5 JTOpen DSN migration guide** ⏳

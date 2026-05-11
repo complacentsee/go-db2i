@@ -1,0 +1,686 @@
+package driver // import "github.com/complacentsee/goJTOpen/driver"
+
+Package driver registers goJTOpen as a database/sql driver under the name
+"gojtopen", letting Go applications talk to IBM i (Db2 for i) over the
+host-server datastream protocol on ports 8471 (as-database) and 8476 (as-signon)
+-- no CGo, no Java sidecar, no IBM client libraries.
+
+# Quick start
+
+Anonymous import wires up the registration:
+
+    import _ "github.com/complacentsee/goJTOpen/driver"
+
+Then use the standard database/sql APIs:
+
+    db, err := sql.Open("gojtopen", "gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso")
+    rows, err := db.Query("SELECT id, name FROM mylib.mytable WHERE status = ?", "OPEN")
+
+# DSN syntax
+
+    gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
+
+PORT defaults to 8471 (as-database). Recognised query-string keys:
+
+    library      Default schema for unqualified SQL names. Sent via
+                 SET_SQL_ATTRIBUTES CP 0x380F. Required if the user's
+                 job library list doesn't already contain the schema.
+                 Upper-cased on parse.
+    signon-port  Port for the as-signon service. Default 8476.
+    date         Session date format. One of job, iso, usa, eur, jis,
+                 mdy, dmy, ymd. Default job (uses the job's locale).
+    isolation    Session commitment level. One of none (*NONE), cs
+                 (*CS), all (*ALL), rs (*RS), rr (*RR). Default none
+                 (matches IBM i Db2's autocommit-permissive baseline).
+                 db.Begin() flips to *CS for the duration of the
+                 transaction.
+    lob          BLOB / CLOB / DBCLOB scan mode. One of materialise
+                 (default; full content into []byte / string at Scan
+                 time, fits the small-to-medium LOB common case) or
+                 stream (returns *gojtopen.LOBReader -- an io.Reader
+                 + io.Closer the caller drives via successive
+                 RETRIEVE_LOB_DATA chunks). Stream mode is the only
+                 way to handle multi-GB LOBs without exhausting Go
+                 heap. Spelt either materialise or materialize.
+    tls          true | false. Wraps both as-signon and as-database
+                 sockets in crypto/tls. Default false; when true the
+                 default ports flip to 9476 / 9471 (the IBM i SSL
+                 host-server pair) unless the caller overrode them.
+    tls-insecure-skip-verify  Disables server-cert verification.
+                 Useful for self-signed IBM i certs that lack DNS
+                 SANs; equivalent to JT400's setUseSSL with cert
+                 validation off.
+    tls-server-name  Overrides the SNI / cert-verify hostname.
+    ccsid        Application-data CCSID. Overrides the connection-
+                 level "ClientCCSID" negotiated at sign-on (CP 0x3801)
+                 and the parameter-bind CCSID tag for string values.
+                 Columns that explicitly tag a CCSID in their schema
+                 ignore this on the read side -- per-column CCSID
+                 always wins. Default 0 = auto: 13488 (UCS-2 BE)
+                 for the SET_SQL_ATTRIBUTES negotiation,
+                 1208 (UTF-8) for parameter binds on V7R3+ servers
+                 and CCSID 37 elsewhere. Common explicit values are
+                 1208 (UTF-8) and 37 (US English EBCDIC).
+
+# Connection lifecycle
+
+Each pooled connection opens two TCP sockets in sequence: one to as-signon
+(8476) for password-substitute negotiation, then one to as-database (8471) for
+SQL traffic. The signon socket is closed once StartDatabaseService completes;
+the as-database socket lives for the lifetime of the Conn.
+
+Authentication uses the IBM i password level the server announces in the
+random-seed exchange:
+
+    0, 1  DES (spec-validated only; no live target available)
+    2, 3  SHA-1 password substitute
+    4     PBKDF2-HMAC-SHA-512 (10022 iterations, UTF-8 password)
+
+# Errors
+
+Server-side SQL errors (syntax, constraint violations, lock timeouts, etc.) come
+back as *hostserver.Db2Error. Use errors.As plus the predicate methods to drive
+retry logic:
+
+    var dbErr *hostserver.Db2Error
+    if errors.As(err, &dbErr) {
+        switch {
+        case dbErr.IsConstraintViolation(): // SQLSTATE 23xxx
+        case dbErr.IsLockTimeout():         // SQLCODE -911 / -913
+        case dbErr.IsConnectionLost():      // SQLSTATE 08xxx
+        }
+    }
+
+TCP-level failures (peer drops, I/O timeouts, short frames) get wrapped so they
+satisfy errors.Is(err, driver.ErrBadConn). The database/sql pool then retires
+the dead connection and creates a fresh one transparently.
+
+# Context cancellation
+
+Stmt.QueryContext / Stmt.ExecContext propagate ctx to the underlying net.Conn
+via SetDeadline plus a context.AfterFunc, so a canceled or timed-out request
+unblocks the in-flight host-server read instead of hanging for the connection's
+full timeout. The returned error satisfies errors.Is(err, context.Canceled) /
+context.DeadlineExceeded regardless of which I/O step bailed.
+
+# Streaming Rows
+
+SELECT result sets stream batch-by-batch via continuation FETCH rather than
+buffering everything in memory. A million-row query pays one ~32 KB-buffer
+round-trip per batch, not one per row; memory stays bounded.
+
+# Server compatibility
+
+V7R3+ servers accept CCSID 1208 (UTF-8) string binds, preserving the full
+Unicode repertoire on the wire. Older releases fall back to CCSID 37 (US English
+EBCDIC). The choice is automatic based on the server VRM captured at sign-on;
+nothing for the caller to configure.
+
+V7R6 (V7R6M0) is the wire-validated target; V7R3-V7R5 should work at protocol
+parity but are not regularly tested.
+
+Requires Go 1.23+ (uses context.AfterFunc).
+
+CONSTANTS
+
+const DefaultLOBChunkSize = 32 * 1024
+    DefaultLOBChunkSize is the per-`Read` round-trip size LOBReader requests
+    from the server when the caller's buffer is larger. 32 KB matches the
+    default block-fetch buffer used elsewhere in the driver and is well below
+    the IBM i wire-format int32 cap.
+
+
+VARIABLES
+
+var ErrNoLastInsertId = errors.New("gojtopen: INSERT did not generate an IDENTITY value (table has no IDENTITY column)")
+    ErrNoLastInsertId is returned by Result.LastInsertId when the underlying
+    INSERT did not generate an IDENTITY value -- typically because the target
+    table has no IDENTITY column. Distinct from a generic "not supported" error
+    so callers can tell the difference between "the driver doesn't support this"
+    (impossible here) and "this particular table doesn't use it".
+
+
+TYPES
+
+type Config struct {
+	User       string
+	Password   string
+	Host       string
+	DBPort     int    // as-database service (default 8471)
+	SignonPort int    // as-signon service  (default 8476)
+	Library    string // default SQL schema; empty = no override
+	DateFormat byte   // hostserver.DateFormat* constant; 0 = JOB
+	Isolation  int16  // hostserver.Isolation* constant; -1 = default (CS)
+
+	// TLS controls whether the driver wraps the as-signon and
+	// as-database sockets in crypto/tls. When true, the dial uses
+	// tls.Dial against the configured ports; the default ports flip
+	// to 9476 (signon) / 9471 (database) -- the IBM i SSL host-
+	// server pair -- if the caller didn't override them.
+	TLS bool
+
+	// TLSInsecureSkipVerify disables server-cert verification. IBM i
+	// host-server certs are commonly self-signed and lack DNS SANs;
+	// crypto/tls otherwise rejects them. Use with care: setting this
+	// true makes the connection vulnerable to MITM attack on the
+	// network path between client and server.
+	TLSInsecureSkipVerify bool
+
+	// TLSServerName overrides the SNI / cert-verify hostname. When
+	// empty, defaults to Host. Useful when the cert was issued for
+	// a different name than the address you connect to (e.g. the
+	// short hostname vs the FQDN in DNS).
+	TLSServerName string
+
+	// LOBStream switches BLOB / CLOB / DBCLOB columns from the
+	// default "materialise on Scan" behaviour to the streaming
+	// LOBReader API. When true, Rows.Next writes a *LOBReader into
+	// the destination slot for LOB columns; callers must scan into
+	// **gojtopen.LOBReader and Read / Close it before advancing
+	// the row. The materialise default keeps existing callers
+	// working unchanged.
+	LOBStream bool
+
+	// CCSID overrides the application-data CCSID negotiated at
+	// SET_SQL_ATTRIBUTES (CP 0x3801, "ClientCCSID"). It tells the
+	// server which CCSID to encode CHAR / VARCHAR / CLOB column data
+	// in when the column itself doesn't tag a CCSID, AND the CCSID
+	// the driver tags on string parameter binds.
+	//
+	// The default 0 means "auto-pick": 13488 (UCS-2 BE) for the
+	// SET_SQL_ATTRIBUTES negotiation (matching JT400's default), and
+	// 1208 (UTF-8) for parameter-bind tagging on V7R3+ servers /
+	// CCSID 37 on older releases (see preferredStringCCSID).
+	//
+	// Common explicit values:
+	//   1208   UTF-8 -- preserves the full Unicode repertoire on
+	//          the wire when both client and server speak UTF-8.
+	//          V7R3+ targets only.
+	//   37     US English EBCDIC -- minimal SBCS subset, every IBM i
+	//          job understands it. Use for legacy installs.
+	//   273    German EBCDIC -- the historical PUB400 default; pin
+	//          this if the server's job CCSID is 273 and you want
+	//          parameter-bind to land on the same table.
+	//
+	// Columns that explicitly tag a CCSID in their definition (e.g.
+	// `VARCHAR(64) CCSID 1208`) ignore this setting on the read side
+	// -- the per-column CCSID always wins. CCSID is for the
+	// "untagged" / connection-default case.
+	CCSID uint16
+
+	// LOBThreshold is the byte count below which the server returns
+	// LOB columns inline in row data (and accepts inline LOB shapes
+	// on bind) instead of allocating a server-side locator. Sent as
+	// CP 0x3822 in SET_SQL_ATTRIBUTES; matches JT400's "lob
+	// threshold" JDBC URL knob. Configured via the DSN
+	// "lob-threshold" query key.
+	//
+	// 0 = the historical default (32768). Raising it inlines bigger
+	// LOBs at the cost of buffer memory; lowering it forces the
+	// locator path so RETRIEVE_LOB_DATA covers anything beyond the
+	// chosen threshold.
+	LOBThreshold uint32
+
+	// ExtendedMetadata, when true, asks the server to include CP
+	// 0x3811 (extended column descriptors) in every PREPARE_DESCRIBE
+	// reply by ORing the ORSExtendedColumnDescrs (0x00020000) bit
+	// into the request ORS bitmap. The driver then surfaces the
+	// per-column schema name, base table name, base column name,
+	// and column label through goJTOpen-specific Rows methods
+	// (Rows.ColumnTypeSchemaName / Rows.ColumnTypeTableName etc.).
+	// Mirrors JT400's "extended metadata=true" JDBC URL knob;
+	// configured via the DSN "extended-metadata=true" query key.
+	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	ExtendedMetadata bool
+}
+    Config is the parsed form of a gojtopen DSN. Public so tests can build
+    connections without round-tripping through the URL parser.
+
+func DefaultConfig() Config
+    DefaultConfig returns the values used when DSN doesn't specify a given key.
+    Public so callers can construct Configs programmatically and only override
+    the fields they care about.
+
+    Isolation defaults to *NONE (commitNone). This matches IBM i Db2's
+    autocommit-permissive default and allows DML against non-journaled tables
+    without a transaction wrapper. Callers that need real transactions opt in
+    via db.Begin() -- the driver's Begin handler flips to *CS for the duration
+    of the transaction (see hostserver.AutocommitOff) and back to *NONE on
+    Commit/Rollback.
+
+    Override via the DSN "isolation" query key if you specifically want the
+    connection to start in a different commitment-control level.
+
+type Conn struct {
+	// Has unexported fields.
+}
+    Conn implements driver.Conn (and the Context-aware extensions). One Conn =
+    one as-database socket plus the per-connection correlation-ID counter the
+    host-server protocol requires.
+
+func (c *Conn) Begin() (driver.Tx, error)
+    Begin / BeginTx start a transaction by flipping autocommit off (which
+    also bundles the commitment level + locator persistence per JT400 -- see
+    hostserver.AutocommitOff for the wire details).
+
+    Drains the result of any prior session change before returning the Tx
+    wrapper.
+
+func (c *Conn) Close() error
+    Close releases the as-database socket.
+
+func (c *Conn) IsValid() bool
+    IsValid implements driver.Validator. database/sql calls this before handing
+    the conn to a caller; returning false makes the pool discard the conn
+    without using it. Cheap (just a flag check); does not touch the wire.
+
+func (c *Conn) Prepare(query string) (driver.Stmt, error)
+    Prepare returns a Stmt that buffers the SQL string. Real PREPARE-on-the-wire
+    happens at execute time; this matches how our hostserver.SelectStaticSQL and
+    ExecuteImmediate work today.
+
+    (M3 deferred: a true PREPARE that returns a server-side handle to reuse
+    across executions. Lands when we add prepared-bind I/U/D.)
+
+func (c *Conn) ResetSession(ctx context.Context) error
+    ResetSession implements driver.SessionResetter. database/sql calls this
+    before reusing a connection from the pool. We use it as the "is this conn
+    still alive?" gate -- returning driver.ErrBadConn here makes the pool
+    discard the conn and create a fresh one, without the caller having to retry.
+
+    We currently don't reset any session-level state on this hook (no
+    temporary tables, no SET-options that survive across requests in the
+    labelverification-gw use case). If that changes, this is the place to send
+    the cleanup frames.
+
+type Connector struct {
+	// Has unexported fields.
+}
+    Connector lets database/sql open multiple connections from one parsed DSN.
+    Implements driver.Connector.
+
+func (c *Connector) Connect(ctx context.Context) (driver.Conn, error)
+    Connect implements driver.Connector. Opens both as-signon (8476) and
+    as-database (8471) sockets, runs sign-on + start-database- service, applies
+    SQL attributes (date format, isolation, default library), and primes the
+    host-server library list.
+
+    ctx may be nil (when called from the legacy driver.Driver.Open path)
+    or carry a deadline / cancellation. The dial honours the deadline;
+    the host-server protocol exchanges currently use a fixed 30s timeout (the
+    underlying net.Conn deadline).
+
+func (c *Connector) Driver() driver.Driver
+
+type Driver struct{}
+    Driver registered as "gojtopen" via sql.Register at init time.
+
+func (d *Driver) Open(dsn string) (driver.Conn, error)
+    Open implements driver.Driver. database/sql calls it with the DSN the caller
+    passed to sql.Open. We delegate to OpenConnector so the DSN parsing path is
+    exercised the same regardless of whether the caller goes through sql.Open or
+    sql.OpenDB(driver.OpenConnector(dsn)).
+
+func (d *Driver) OpenConnector(dsn string) (driver.Connector, error)
+    OpenConnector parses the DSN into a Connector that can spawn fresh
+    driver.Conn values on demand. Implements driver.DriverContext.
+
+type LOBReader struct {
+	// Has unexported fields.
+}
+    LOBReader streams a BLOB / CLOB / DBCLOB column from the server via
+    successive RETRIEVE_LOB_DATA round trips. Returned from Rows.Next when
+    the connection was opened with the DSN option `?lob=stream` -- otherwise
+    the driver materialises the full LOB into []byte (BLOB) or string (CLOB /
+    DBCLOB) at Scan time, the historical behaviour.
+
+    Lifecycle:
+
+        rows, err := db.Query("SELECT B FROM T WHERE ID = ?", id)
+        for rows.Next() {
+            var r *gojtopen.LOBReader
+            rows.Scan(&r)
+            defer r.Close()
+            io.Copy(dst, r)
+        }
+
+    The locator backing the reader stays valid only while the producing cursor
+    is open. Reading after Rows.Next has advanced to a later row is undefined;
+    reading after Rows.Close returns an error from the server. Callers that need
+    to keep LOB content past the cursor lifetime must copy the bytes through
+    io.ReadAll (or similar) before advancing.
+
+    CCSID semantics for character LOBs:
+
+        BLOB    (SQLType 960/961) -- bytes are binary regardless of CCSID tag
+        CLOB    (SQLType 964/965) -- bytes are characters in CCSID:
+                                        65535  raw passthrough
+                                        1208   UTF-8 (no transcode)
+                                        else   EBCDIC (caller transcodes)
+        DBCLOB  (SQLType 968/969) -- bytes are 16-bit codepoints (UCS-2 BE / UTF-16 BE)
+
+    The LOBReader emits the bytes the server transmitted; transcoding is
+    the caller's responsibility (see ebcdic.CCSID37.Decode for EBCDIC,
+    encoding/utf16 for DBCLOB).
+
+func (r *LOBReader) CCSID() uint16
+    CCSID is the column's CCSID as reported in the SELECT result-set metadata.
+    65535 means "binary / FOR BIT DATA"; other values describe how to interpret
+    the bytes for CLOB / DBCLOB.
+
+func (r *LOBReader) Close() error
+    Close marks the reader inactive. It does NOT issue any wire frame -- the
+    server-side locator is dropped automatically when the producing cursor's RPB
+    DELETE runs (Rows.Close). Subsequent Read calls return an error.
+
+    Idempotent.
+
+func (r *LOBReader) Length() int64
+    Length returns the total LOB size in bytes as reported by the server.
+    Returns 0 until the first Read has populated it (the server returns the
+    current length as part of the data reply, so no extra round trip is required
+    -- but we don't issue any I/O from the getter).
+
+func (r *LOBReader) Read(p []byte) (int, error)
+    Read pulls bytes from the LOB into p. Implements io.Reader.
+
+    On the first call (or any call after the local buffer drains) Read issues
+    one RETRIEVE_LOB_DATA round trip, asking for up to chunkSize bytes (32 KB
+    by default; bounded by len(p) so a small caller buffer doesn't waste a 32
+    KB pull). Any bytes the server returns past len(p) are buffered for the next
+    Read call so we don't drop data on the floor.
+
+    Returns io.EOF once the server-reported total length is reached.
+    Connection-level errors are wrapped through Conn.classifyConnErr so the pool
+    retires the conn on a dead socket.
+
+func (r *LOBReader) SQLType() uint16
+    SQLType is the IBM i SQL type code for the LOB column (960/961 = BLOB,
+    964/965 = CLOB, 968/969 = DBCLOB; the even/odd parity distinguishes NN from
+    nullable).
+
+type LOBValue struct {
+	// Bytes is the materialised LOB content. Mutually exclusive
+	// with Reader; if both are non-nil Bytes wins.
+	Bytes []byte
+
+	// Reader is the streamed source. Length must be set when
+	// Reader is non-nil. The driver Reads exactly Length bytes
+	// across one or more WRITE_LOB_DATA frames; supplying a
+	// shorter or longer stream is an error.
+	Reader io.Reader
+
+	// Length is the total byte count for the streamed path. Unused
+	// when Bytes is set (the byte count comes from len(Bytes)).
+	Length int64
+}
+    LOBValue is the bind-side counterpart of *LOBReader. Pass one to db.Exec /
+    Stmt.Exec / Stmt.Query when binding a BLOB / CLOB / DBCLOB column and you
+    want the driver to upload the bytes via WRITE_LOB_DATA frames rather than
+    inlining a small []byte / string.
+
+    Two modes:
+
+        // Materialised — driver ships Bytes in a single WRITE_LOB_DATA
+        // frame. Equivalent to passing []byte directly except that
+        // LOBValue makes the LOB intent explicit at the call site.
+        db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
+            &gojtopen.LOBValue{Bytes: payload})
+
+        // Streamed — driver chunks the Reader into LOBStreamChunkSize
+        // (32 KiB by default) frames at advancing offsets. Length is
+        // MANDATORY because the IBM i host server allocates a locator
+        // per-prepared-statement and needs the total size declared at
+        // PREPARE_DESCRIBE; the driver passes Length to the server
+        // implicitly via the LOB column's declared CCSID/MaxSize.
+        f, _ := os.Open("video.mp4")
+        stat, _ := f.Stat()
+        db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
+            &gojtopen.LOBValue{Reader: f, Length: stat.Size()})
+
+    Bytes and Reader are mutually exclusive. If both are set Bytes wins (the
+    streamed path is opt-in).
+
+    CCSID semantics:
+
+      - For BLOB columns (SQL types 960/961) the driver ships the bytes
+        verbatim, regardless of CCSID.
+      - For CLOB columns (SQL types 964/965) Bytes/Reader content is treated
+        as already encoded in the column's declared CCSID (the server tags it
+        0xFFFF on the wire, matching JT400's pattern). Pass a Go string instead
+        if you want the driver to transcode for you via internal/ebcdic.
+      - For DBCLOB columns (968/969) Bytes/Reader content must be UTF-16
+        BE (a.k.a. UCS-2 BE); the driver halves the byte count for the
+        requested-size CP per JT400's graphic-LOB convention. Go strings are
+        also accepted -- the driver runs them through unicode/utf16 to produce
+        the wire bytes.
+
+    LOBValue itself doesn't track byte counts as it streams; if Reader returns
+    fewer than Length bytes the driver returns an error rather than guessing --
+    the host server has already pre-allocated buffer for the declared length and
+    a short upload would leak that buffer across the rest of the connection's
+    life.
+
+func (v *LOBValue) LOBLength() int64
+    LOBLength reports the byte count the driver will upload. Implements the
+    hostserver.LOBStream interface so the bind dispatcher can stream this value
+    across multiple frames.
+
+func (v *LOBValue) LOBNextChunk(buf []byte) (int, error)
+    LOBNextChunk pulls bytes from Reader for the bind dispatcher. The hostserver
+    layer invokes it repeatedly with shrinking buffers until LOBLength bytes
+    have been read or io.EOF is returned.
+
+    For the Bytes path this method is never called -- the dispatcher detects
+    len(Bytes)>0 and routes through hostserver.WriteLOBData directly.
+
+type Result struct {
+	// Has unexported fields.
+}
+    Result implements driver.Result.
+
+    LastInsertId issues a follow-up `VALUES IDENTITY_VAL_LOCAL()` against
+    the same connection that ran the INSERT. The result is cached so repeated
+    LastInsertId calls don't hit the wire more than once. When the table has no
+    IDENTITY column, the server returns NULL and we surface ErrNoLastInsertId so
+    callers can distinguish "not supported" from "no rows affected".
+
+    RowsAffected currently returns the row count carried back via the Exec path;
+    SQLCA decoding (CP 0x3807 SQLERRD[2]) lands with M7 -- today the host-server
+    layer pre-fills 0.
+
+func (r *Result) LastInsertId() (int64, error)
+    LastInsertId returns the IDENTITY value most recently generated in this
+    session, via a `VALUES IDENTITY_VAL_LOCAL()` round trip. Cached after the
+    first call on a given Result so repeated invocations are free.
+
+    Important caveat: IBM i `IDENTITY_VAL_LOCAL()` is session-scoped,
+    not statement-scoped. It returns the IDENTITY value from the most recent
+    IDENTITY-generating INSERT on the session, regardless of which table the
+    most recent INSERT (or this Result's INSERT) hit. Concretely:
+
+     1. INSERT INTO has_identity → LastInsertId() = N
+     2. INSERT INTO no_identity → LastInsertId() STILL = N (sticky)
+
+    Callers who need to know whether a specific INSERT generated an IDENTITY
+    value should compare LastInsertId() before-and-after, or use `INSERT INTO
+    ... SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1` to scope the lookup.
+    JDBC / JT400 has the same limitation.
+
+    Returns ErrNoLastInsertId when no IDENTITY-generating INSERT has run on the
+    session yet (IDENTITY_VAL_LOCAL() returns NULL). Returns a connection error
+    when the underlying SELECT itself fails -- in that case the conn is also
+    marked dead via classifyConnErr per the usual error path.
+
+func (r *Result) RowsAffected() (int64, error)
+    RowsAffected returns the row count parsed out of the EXECUTE
+    reply's SQLERRD3 slot (CP 0x3807 SQLCA bytes 100..103). Implements
+    database/sql/driver.Result.RowsAffected.
+
+type Rows struct {
+	// Has unexported fields.
+}
+    Rows iterates a SELECT result lazily. Underneath it holds an open
+    server-side cursor that pulls the next batch via continuation FETCH on
+    demand -- callers walking a million rows pay one 32 KB-buffer round-trip per
+    batch, not one per row.
+
+    The streaming variant is the public API; the buffered
+    hostserver.SelectResult shape is still used for offline tests and the
+    cmd/smoketest harness via SelectStaticSQL / SelectPreparedSQL.
+
+func (r *Rows) Close() error
+    Close releases the server-side cursor and the RPB slot. Idempotent per the
+    database/sql contract -- repeated calls return the same (cached) error.
+
+func (r *Rows) ColumnTypeBaseColumnName(index int) string
+    ColumnTypeBaseColumnName returns the underlying base column name for an
+    aliased SELECT column, or empty when extended metadata wasn't requested
+    or the column isn't a direct projection of a base column. Mirrors JT400's
+    DBColumnDescriptorsDataFormat .getBaseColumnName.
+
+func (r *Rows) ColumnTypeDatabaseTypeName(index int) string
+    ColumnTypeDatabaseTypeName returns the server-reported SQL type name for
+    the column at the given index (e.g. "DECIMAL", "VARCHAR", "TIMESTAMP").
+    Implements database/sql.RowsColumnTypeDatabaseTypeName.
+
+func (r *Rows) ColumnTypeLabel(index int) string
+    ColumnTypeLabel returns the column label (SQL `AS` alias)
+    the server reports, or empty when extended metadata wasn't
+    requested or the server didn't include a label. Mirrors JT400's
+    DBColumnDescriptorsDataFormat.getColumnLabel.
+
+func (r *Rows) ColumnTypeLength(index int) (length int64, ok bool)
+    ColumnTypeLength returns the declared character length for the
+    CHAR / VARCHAR family of columns. Returns ok=false for fixed-width
+    types where Length isn't a meaningful column attribute. Implements
+    database/sql.RowsColumnTypeLength.
+
+func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool)
+    ColumnTypeNullable reports whether the column at index allows NULLs,
+    per the server-side SQLType code (odd-valued SQL types are nullable).
+    Implements database/sql.RowsColumnTypeNullable.
+
+func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool)
+    ColumnTypePrecisionScale returns DECIMAL / NUMERIC precision
+    and scale, or the DECFLOAT precision (16 or 34) when applicable.
+    Returns ok=false for non-numeric column types. Implements
+    database/sql.RowsColumnTypePrecisionScale.
+
+func (r *Rows) ColumnTypeScanType(index int) reflect.Type
+    ColumnTypeScanType returns the Go type Next promotes a column's raw
+    bytes into before exposing it on the driver.Value slot -- time.Time
+    for DATE/TIME/TIMESTAMP, []byte for FOR BIT DATA and BLOB, string for
+    CHAR/VARCHAR/CLOB, the appropriate numeric type for everything else.
+    Implements database/sql.RowsColumnTypeScanType.
+
+func (r *Rows) ColumnTypeSchemaName(index int) string
+    ColumnTypeSchemaName returns the base schema for the named column,
+    or empty when the connection didn't request extended metadata (DSN
+    "extended-metadata=true") or the query target doesn't have a single
+    underlying table (computed columns, joins, expressions). Mirrors JDBC's
+    ResultSetMetaData.getSchemaName.
+
+    Not part of the database/sql.RowsColumnType* interface set; reach it via
+    type assertion:
+
+        if mr, ok := rows.(interface{ ColumnTypeSchemaName(int) string }); ok {
+            schema := mr.ColumnTypeSchemaName(0)
+        }
+
+func (r *Rows) ColumnTypeTableName(index int) string
+    ColumnTypeTableName returns the base table for the named column,
+    or empty under the same conditions as ColumnTypeSchemaName. Mirrors JDBC's
+    ResultSetMetaData.getTableName.
+
+func (r *Rows) Columns() []string
+    Columns returns the per-column names parsed from the PREPARE_DESCRIBE reply,
+    in SELECT order. Implements database/sql/driver.Rows.Columns.
+
+func (r *Rows) Next(dest []driver.Value) error
+    Next copies the next row into dest. Returns io.EOF when exhausted (the
+    database/sql convention).
+
+    hostserver decodes DATE / TIME / TIMESTAMP columns to ISO strings because
+    those are the wire's natural shape; here we promote them to time.Time so
+    callers can Scan into *time.Time. Strings remain strings -- callers that
+    want Time-shaped DATE values can opt back into the raw string by scanning
+    into *string instead, since time.Time is convertible both ways through
+    database/sql's convertAssign.
+
+type Stmt struct {
+	// Has unexported fields.
+}
+    Stmt holds the SQL string for later Exec/Query. We don't currently PREPARE
+    on the server until execute time, so Stmt is essentially a closure over
+    (conn, query). NumInput returns -1 (unknown) so the runtime won't try to
+    count parameter markers itself; the bind path validates count when it builds
+    the wire format.
+
+func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error
+    CheckNamedValue lets database/sql forward our LOB bind type (*LOBValue)
+    through the driver boundary without the default parameter converter
+    rejecting it for not being one of the six driver.Value flavours. Returning
+    nil tells database/sql "leave the value alone, the driver knows what to do
+    with it"; returning driver.ErrSkip tells it to fall back to its default
+    conversion (int -> int64, etc.).
+
+    Implements database/sql/driver.NamedValueChecker.
+
+func (s *Stmt) Close() error
+    Close releases any client-side resources tied to the prepared statement.
+    The IBM i Db2 prepared-statement handle is bound to the underlying
+    connection's RPB slot, so the server-side cleanup happens when the next
+    PREPARE rebinds the same slot rather than on statement Close. Implements
+    database/sql/driver.Stmt.Close.
+
+func (s *Stmt) Exec(args []driver.Value) (driver.Result, error)
+    Exec runs INSERT / UPDATE / DELETE / DDL. With no args it uses the
+    single-frame ExecuteImmediate; with args it goes through the prepared-DML
+    flow (CREATE_RPB / PREPARE_DESCRIBE / CHANGE_DESCRIPTOR / EXECUTE). Both
+    paths return the affected-row count via Result -- today always 0 since SQLCA
+    decoding is M7 work.
+
+    Errors flow through classifyConnErr so a TCP-level failure marks the
+    parent Conn dead; the next checkout from the database/sql pool then sees
+    driver.ErrBadConn and gets a fresh connection. Statement-level errors
+    (syntax, constraint, etc.) flow through unchanged as *Db2Error.
+
+func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error)
+    ExecContext implements driver.StmtExecContext. Plumbs ctx through to the
+    underlying net.Conn via SetDeadline so a canceled / timed- out request
+    unblocks the in-flight wire read instead of hanging for the connection's
+    full timeout. Returns ctx.Err() (Canceled / DeadlineExceeded) when the
+    cancellation is the actual cause, regardless of which I/O step bailed.
+
+func (s *Stmt) NumInput() int
+    NumInput: -1 means "let the driver figure it out" -- we don't currently bind
+    parameters via this path (M3 deferred work).
+
+func (s *Stmt) Query(args []driver.Value) (driver.Rows, error)
+    Query runs a SELECT (or VALUES / WITH). With no args it opens a streaming
+    cursor via OpenSelectStatic; with args it opens via OpenSelectPrepared. The
+    cursor pulls subsequent batches lazily as the caller's Rows.Next iterates
+    -- a million-row SELECT pays one 32 KB-buffer FETCH round-trip per batch
+    instead of one per row.
+
+func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error)
+    QueryContext implements driver.StmtQueryContext. Same plumbing as
+    ExecContext.
+
+type Tx struct {
+	// Has unexported fields.
+}
+    Tx wraps Commit/Rollback through our hostserver primitives. After Commit
+    or Rollback succeeds, autocommit is restored to ON so subsequent simple
+    statements don't accumulate state.
+
+func (t *Tx) Commit() error
+    Commit issues a host-server COMMIT (CP 0x1807) on the underlying connection,
+    then re-enables autocommit. Implements database/sql/driver.Tx.Commit.
+
+func (t *Tx) Rollback() error
+    Rollback issues a host-server ROLLBACK (CP 0x1808) on the
+    underlying connection, then re-enables autocommit. Implements
+    database/sql/driver.Tx.Rollback.
+

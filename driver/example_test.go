@@ -223,6 +223,30 @@ func Example_lobReader() {
 	}
 }
 
+// Example_dsnKnobs exercises the three most commonly tuned DSN knobs
+// at once: ?lob-threshold=N caps the inline-LOB cutoff the server
+// uses for parameter-marker writes (matching JT400's "lob threshold"
+// JDBC property), ?ccsid=1208 forces UTF-8 on the application-data
+// CCSID so non-ASCII characters round-trip without locale-dependent
+// EBCDIC ambiguity, and ?tls=true wraps both as-signon and
+// as-database sockets in crypto/tls (flipping the default ports to
+// 9476 / 9471). The keys are independent -- mix and match per
+// deployment.
+func Example_dsnKnobs() {
+	dsn := "gojtopen://USER:PASSWORD@host.example.com/" +
+		"?library=MYLIB" +
+		"&lob-threshold=8192" +
+		"&ccsid=1208" +
+		"&tls=true" +
+		"&tls-server-name=host.example.com"
+	db, err := sql.Open("gojtopen", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	_ = db.Ping()
+}
+
 // Example_contextTimeout shows that QueryContext / ExecContext
 // honor ctx cancellation. A canceled ctx unblocks the in-flight
 // host-server read via net.Conn.SetDeadline; the call returns

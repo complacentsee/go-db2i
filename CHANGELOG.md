@@ -12,6 +12,22 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
+- M8-2 godoc audit. Every exported symbol across `driver/`,
+  `hostserver/`, `ebcdic/`, and `internal/wirelog/` now carries a
+  leading-identifier doc comment that's compatible with `go doc`
+  rendering. The pre-fix gaps were all interface-method
+  implementations whose containing types were already documented:
+  `Rows.Columns`, the five `Rows.ColumnType*` methods,
+  `Result.RowsAffected`, `Stmt.Close`, `Tx.Commit` / `Tx.Rollback`,
+  `Direction.String`, `NonBMPRuneError.Error`, `SignonError.Error`.
+  Add a new `ExampleDsnKnobs` walking the `?lob-threshold` / `?ccsid`
+  / `?tls=true` DSN knob mix in package driver's example file
+  (existing examples already covered `LOBValue`, `LOBReader`,
+  `Db2Error`, and the basic DSN parse pattern). A snapshot of
+  `go doc -all` output for each package is committed under
+  `docs/godoc-snapshot/` so future diffs surface accidental API
+  drift; total ~2,584 lines across four files.
+
 - M8-1 fuzz tests covering the wire-touching parsers most likely to
   mishandle adversarial input: `internal/wirelog.ParseJTOpenTrace`,
   `hostserver.ParseDBReply`, `hostserver.decompressRLE1`,
