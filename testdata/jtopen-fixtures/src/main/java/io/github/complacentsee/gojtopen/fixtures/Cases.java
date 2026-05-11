@@ -1,5 +1,6 @@
 package io.github.complacentsee.gojtopen.fixtures;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -95,6 +96,17 @@ final class Cases {
         // Transactions.
         cases.add(new TxCommit(schema));
         cases.add(new TxRollback(schema));
+
+        // Stored procedures (M9). Each case targets a dedicated GOSPROCS
+        // library under the test user; WithStoredProcs.setup() bootstraps
+        // the schema + procedures idempotently, so the very first capture
+        // run also doubles as live evidence that JT400 can create + call
+        // the procs against the LPAR.
+        cases.add(new CallInOnly());
+        cases.add(new CallInOut());
+        cases.add(new CallResultSet());
+        cases.add(new CallMultiSet());
+        cases.add(new CallInout());
 
         // Negative paths — SQLException to SQLCARD parsing.
         cases.add(new ErrorSyntax());
@@ -652,6 +664,223 @@ final class Cases {
                 }
             } finally {
                 conn.setAutoCommit(true);
+            }
+        }
+    }
+
+    /**
+     * Bootstraps the {@code GOSPROCS} library, supporting tables, and the
+     * four stored procedures exercised by the M9 fixtures. Idempotent:
+     * tables are dropped + recreated for deterministic seed data; procedures
+     * use {@code CREATE OR REPLACE} (V7R2+) so re-runs reset the bodies.
+     *
+     * The procs:
+     * <ul>
+     *   <li>{@code P_INS(IN code VARCHAR(10), IN qty INTEGER)} — IN-only,
+     *       inserts to {@code INS_AUDIT}. No result sets.</li>
+     *   <li>{@code P_LOOKUP(IN code VARCHAR(10), OUT name VARCHAR(64), OUT qty INTEGER)} —
+     *       IN + two OUT scalars, SELECT INTO from {@code WIDGETS}.</li>
+     *   <li>{@code P_INVENTORY(IN min_qty INTEGER)} — DYNAMIC RESULT SETS 2;
+     *       opens two cursors against {@code INVENTORY} (below / at-or-above
+     *       the threshold).</li>
+     *   <li>{@code P_ROUNDTRIP(INOUT counter INTEGER)} — INOUT scalar
+     *       incremented by one.</li>
+     * </ul>
+     */
+    private static abstract class WithStoredProcs extends Case {
+        protected static final String LIBRARY = "GOSPROCS";
+
+        WithStoredProcs(String name) { super(name); }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                // CREATE SCHEMA — ignore SQLSTATE 42710 (schema already
+                // exists). DB2 for i has no CREATE SCHEMA IF NOT EXISTS.
+                try {
+                    st.execute("CREATE SCHEMA " + LIBRARY);
+                } catch (SQLException e) {
+                    if (!"42710".equals(e.getSQLState())) {
+                        throw e;
+                    }
+                }
+
+                // Supporting tables: drop + recreate every run for a
+                // deterministic seed.
+                for (String tbl : new String[]{"INS_AUDIT", "WIDGETS", "INVENTORY"}) {
+                    try {
+                        st.execute("DROP TABLE " + LIBRARY + "." + tbl);
+                    } catch (SQLException ignored) { }
+                }
+                st.execute("CREATE TABLE " + LIBRARY + ".INS_AUDIT ("
+                        + "CODE VARCHAR(10), QTY INTEGER, "
+                        + "INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+                st.execute("CREATE TABLE " + LIBRARY + ".WIDGETS ("
+                        + "CODE VARCHAR(10) NOT NULL PRIMARY KEY, "
+                        + "NAME VARCHAR(64), QTY INTEGER)");
+                st.execute("INSERT INTO " + LIBRARY + ".WIDGETS "
+                        + "VALUES ('WIDGET', 'Acme Widget', 100)");
+                st.execute("INSERT INTO " + LIBRARY + ".WIDGETS "
+                        + "VALUES ('GADGET', 'Acme Gadget', 5)");
+                st.execute("CREATE TABLE " + LIBRARY + ".INVENTORY ("
+                        + "CODE VARCHAR(10), QTY INTEGER, LOCATION VARCHAR(20))");
+                st.execute("INSERT INTO " + LIBRARY + ".INVENTORY "
+                        + "VALUES ('LOW1', 2, 'A1')");
+                st.execute("INSERT INTO " + LIBRARY + ".INVENTORY "
+                        + "VALUES ('LOW2', 3, 'A2')");
+                st.execute("INSERT INTO " + LIBRARY + ".INVENTORY "
+                        + "VALUES ('HIGH1', 50, 'B1')");
+                st.execute("INSERT INTO " + LIBRARY + ".INVENTORY "
+                        + "VALUES ('HIGH2', 100, 'B2')");
+
+                // Procedures via CREATE OR REPLACE — re-runnable, no
+                // overload disambiguation needed since each name is unique.
+                st.execute("CREATE OR REPLACE PROCEDURE " + LIBRARY + ".P_INS "
+                        + "(IN P_CODE VARCHAR(10), IN P_QTY INTEGER) "
+                        + "LANGUAGE SQL "
+                        + "BEGIN "
+                        + "INSERT INTO " + LIBRARY + ".INS_AUDIT (CODE, QTY) "
+                        + "VALUES (P_CODE, P_QTY); "
+                        + "END");
+                st.execute("CREATE OR REPLACE PROCEDURE " + LIBRARY + ".P_LOOKUP "
+                        + "(IN P_CODE VARCHAR(10), OUT P_NAME VARCHAR(64), "
+                        + " OUT P_QTY INTEGER) "
+                        + "LANGUAGE SQL "
+                        + "BEGIN "
+                        + "SELECT NAME, QTY INTO P_NAME, P_QTY "
+                        + "FROM " + LIBRARY + ".WIDGETS WHERE CODE = P_CODE; "
+                        + "END");
+                st.execute("CREATE OR REPLACE PROCEDURE " + LIBRARY + ".P_INVENTORY "
+                        + "(IN P_MIN_QTY INTEGER) "
+                        + "DYNAMIC RESULT SETS 2 "
+                        + "LANGUAGE SQL "
+                        + "BEGIN "
+                        + "DECLARE C1 CURSOR WITH RETURN FOR "
+                        + "SELECT CODE, QTY FROM " + LIBRARY + ".INVENTORY "
+                        + "WHERE QTY < P_MIN_QTY ORDER BY CODE; "
+                        + "DECLARE C2 CURSOR WITH RETURN FOR "
+                        + "SELECT CODE, QTY FROM " + LIBRARY + ".INVENTORY "
+                        + "WHERE QTY >= P_MIN_QTY ORDER BY CODE; "
+                        + "OPEN C1; "
+                        + "OPEN C2; "
+                        + "END");
+                st.execute("CREATE OR REPLACE PROCEDURE " + LIBRARY + ".P_ROUNDTRIP "
+                        + "(INOUT P_COUNTER INTEGER) "
+                        + "LANGUAGE SQL "
+                        + "BEGIN "
+                        + "SET P_COUNTER = P_COUNTER + 1; "
+                        + "END");
+            }
+        }
+
+        // Teardown leaves the GOSPROCS library in place across cases;
+        // each setup() resets state idempotently. This keeps subsequent
+        // captures fast (no library recreate) while still being
+        // re-runnable from a clean LPAR.
+    }
+
+    /**
+     * {@code prepared_call_in_only.trace} — {@code CALL GOSPROCS.P_INS('A', 10)}
+     * with literal arguments. Exercises JT400's TYPE_CALL routing
+     * (statement type 3) without parameter markers, so the captured wire
+     * shape covers PREPARE+EXECUTE with no CHANGE_DESCRIPTOR.
+     */
+    private static final class CallInOnly extends WithStoredProcs {
+        CallInOnly() { super("prepared_call_in_only"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall(
+                    "CALL " + LIBRARY + ".P_INS('A', 10)")) {
+                int n = cs.executeUpdate();
+                golden.recordUpdateCount(n);
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_call_in_out.trace} — {@code CALL GOSPROCS.P_LOOKUP(?, ?, ?)}
+     * with one IN string and two OUT registrations. The EXECUTE reply
+     * carries a synthetic single-row result-data CP whose row matches the
+     * parameter-marker descriptor; JT400 decodes it via
+     * {@code parameterRow_.setServerData()} (AS400JDBCPreparedStatementImpl.java:722-729).
+     */
+    private static final class CallInOut extends WithStoredProcs {
+        CallInOut() { super("prepared_call_in_out"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall(
+                    "CALL " + LIBRARY + ".P_LOOKUP(?, ?, ?)")) {
+                cs.setString(1, "WIDGET");
+                cs.registerOutParameter(2, Types.VARCHAR);
+                cs.registerOutParameter(3, Types.INTEGER);
+                cs.execute();
+                golden.recordOutParam(2, Types.VARCHAR, cs.getString(2));
+                golden.recordOutParam(3, Types.INTEGER, Integer.valueOf(cs.getInt(3)));
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_call_result_set.trace} — {@code CALL GOSPROCS.P_INVENTORY(5)}
+     * draining only the first dynamic result set. Used to pin the
+     * single-result-set CALL path (M9-1 / M9-3 path A) before M9-3 adds
+     * NextResultSet.
+     */
+    private static final class CallResultSet extends WithStoredProcs {
+        CallResultSet() { super("prepared_call_result_set"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall(
+                    "CALL " + LIBRARY + ".P_INVENTORY(?)")) {
+                cs.setInt(1, 5);
+                cs.execute();
+                try (ResultSet rs = cs.getResultSet()) {
+                    if (rs != null) golden.recordResultSet(rs);
+                }
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_call_multi_set.trace} — same proc, both dynamic
+     * result sets drained via {@code getMoreResults()}. Captures the
+     * advance path: JT400 closes the prior cursor and issues a fresh
+     * OPEN_DESCRIBE (function id 0x180E) on the same statement
+     * (AS400JDBCStatement.java:3406-3470). {@code numberOfResults_} is
+     * sourced from {@code firstSqlca.getErrd(2)} on the original PREPARE
+     * reply.
+     */
+    private static final class CallMultiSet extends WithStoredProcs {
+        CallMultiSet() { super("prepared_call_multi_set"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall(
+                    "CALL " + LIBRARY + ".P_INVENTORY(?)")) {
+                cs.setInt(1, 5);
+                cs.execute();
+                try (ResultSet rs = cs.getResultSet()) {
+                    if (rs != null) golden.recordResultSet(rs);
+                }
+                if (cs.getMoreResults()) {
+                    try (ResultSet rs = cs.getResultSet()) {
+                        if (rs != null) golden.recordResultSet(rs);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_call_inout.trace} — {@code CALL GOSPROCS.P_ROUNDTRIP(?)}
+     * with one INOUT INTEGER. Direction byte 0xF2 lands at descriptor
+     * offset+30 (DBExtendedDataFormat.java:300-302); the parameter ships
+     * BOTH a bind value (the IN side, 5) AND comes back with the OUT
+     * value (6) in the EXECUTE reply's result-data CP.
+     */
+    private static final class CallInout extends WithStoredProcs {
+        CallInout() { super("prepared_call_inout"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall(
+                    "CALL " + LIBRARY + ".P_ROUNDTRIP(?)")) {
+                cs.setInt(1, 5);
+                cs.registerOutParameter(1, Types.INTEGER);
+                cs.execute();
+                golden.recordOutParam(1, Types.INTEGER, Integer.valueOf(cs.getInt(1)));
             }
         }
     }

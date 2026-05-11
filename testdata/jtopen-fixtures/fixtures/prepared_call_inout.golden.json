@@ -1,0 +1,9 @@
+{
+  "case" : "prepared_call_inout",
+  "resultSets" : [ ],
+  "outParams" : [ {
+    "index" : 1,
+    "sqlType" : 4,
+    "value" : 6
+  } ]
+}

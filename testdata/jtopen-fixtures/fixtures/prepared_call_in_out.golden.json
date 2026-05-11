@@ -1,0 +1,13 @@
+{
+  "case" : "prepared_call_in_out",
+  "resultSets" : [ ],
+  "outParams" : [ {
+    "index" : 2,
+    "sqlType" : 12,
+    "value" : "Acme Widget"
+  }, {
+    "index" : 3,
+    "sqlType" : 4,
+    "value" : 100
+  } ]
+}

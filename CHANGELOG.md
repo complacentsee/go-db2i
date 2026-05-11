@@ -8,6 +8,63 @@ The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
 0.5+ once LOB bind, slog observability, and OTel spans all land.
 
+## [Unreleased]
+
+### Added
+
+- M9-0 Foundation for stored-procedure support. Five new fixtures
+  under `testdata/jtopen-fixtures/fixtures/prepared_call_*.{trace,golden.json}`
+  captured against IBM Cloud V7R6M0 via JT400 21.0.4 through the
+  local 127.0.0.1:8471 SSH tunnel. New `GOSPROCS` library on the
+  LPAR holds four SQL procedures:
+    - `P_INS(IN code VARCHAR(10), IN qty INTEGER)` — IN-only,
+      inserts to `INS_AUDIT`. Wire shape: PREPARE+EXECUTE with
+      statement type `0x03` (TYPE_CALL per JT400's JDSQLStatement
+      taxonomy); no CHANGE_DESCRIPTOR when literal args eliminate
+      parameter markers.
+    - `P_LOOKUP(IN code VARCHAR(10), OUT name VARCHAR(64), OUT qty INTEGER)` —
+      IN + two OUT scalars via SELECT INTO from a seeded `WIDGETS`
+      table. Validates JT400's OUT-value path: descriptor direction
+      bytes (0xF0/0xF1/0xF2 at wire offset 30 per JT400's
+      `DBExtendedDataFormat.setFieldParameterType` line 300-302),
+      synthetic single-row result-data CP in the EXECUTE reply
+      decoded via `parameterRow_.setServerData()`. Golden pins
+      `("Acme Widget", 100)`.
+    - `P_INVENTORY(IN min_qty INTEGER) DYNAMIC RESULT SETS 2` —
+      opens two server-side cursors via `DECLARE CURSOR WITH
+      RETURN`. Validates the SQLCA-ERRD(2) advance signal
+      (`numberOfResults_ = firstSqlca.getErrd(2)` per JT400's
+      `AS400JDBCStatement` line 1213) and the `FUNCTIONID_OPEN_DESCRIBE`
+      function code for `getMoreResults()`.
+    - `P_ROUNDTRIP(INOUT counter INTEGER)` — single INOUT scalar
+      incremented by one; validates the 0xF2 direction byte and
+      round-trip of bind-value + OUT-value in a single parameter
+      slot. Golden pins seed `5` → out `6`.
+  The Java fixture harness gained a new `PUB400_PORT` env var that
+  appends `:port` to the JDBC URL, engaging JT400's `skipSignonServer_`
+  codepath (`AS400JDBCConnectionImpl` line 3550-3556) so the harness
+  can reach the LPAR through a local tunnel without needing port
+  449 (port mapper) or 8476 (signon) exposed. The `socket timeout`
+  / `thread used` / `login timeout` properties are skipped on the
+  port-override path because JT400 freezes the AS400 instance
+  before `prepareConnection` runs those mutators on that path.
+  Live evidence: the `WithStoredProcs.setup()` method that the
+  capture run executes performs the full `CREATE OR REPLACE
+  PROCEDURE` sequence for all four procs end-to-end via JT400,
+  which is itself the JT400-side sanity check the M9 plan calls
+  for. Fixture goldens decoded with the expected values across
+  all five cases:
+    - `prepared_call_in_only`: `updateCount=0` (CallableStatement
+      doesn't propagate INSERT row counts up through CALL).
+    - `prepared_call_in_out`: OUT VARCHAR `"Acme Widget"`, OUT
+      INTEGER `100`.
+    - `prepared_call_result_set`: 2 rows `[("LOW1", 2), ("LOW2", 3)]`.
+    - `prepared_call_multi_set`: first set as above, second set
+      `[("HIGH1", 50), ("HIGH2", 100)]`.
+    - `prepared_call_inout`: OUT INTEGER `6`.
+  Five new `.trace` files committed (each 14-22 KB) as the offline
+  regression net for M9-1 / M9-2 / M9-3 replay tests.
+
 ## [0.5.0] - 2026-05-11
 
 First tagged release. M1-M8 complete + live-validated against IBM

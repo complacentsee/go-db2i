@@ -685,6 +685,48 @@ Public API additions (slog + OTel) are purely additive; tagged
 v0.5.0 once the final conformance pass on both plaintext and TLS
 DSNs landed.
 
+### M9 — Stored procedure support (in progress, started 2026-05-11)
+
+The post-v0.5.0 milestone. Closes the biggest remaining parity gap
+vs JT400 JDBC: honest `CallableStatement` semantics via
+database/sql idioms. `db.Exec("CALL p(?, ?)", in, sql.Out{Dest: &out})`
+covers IN / OUT / INOUT; `rows.NextResultSet()` covers multi-
+result-set procs. The full plan (wire facts cited from JT400
+source, ORS bits, four sub-items M9-0 through M9-3, deferred-to-
+M10+ items) lives in the goJTOpen M9 planning document under
+the user's plans/ directory.
+
+- **M9-0 Foundation** ✅ 2026-05-11 — Five fixtures captured against
+  IBM Cloud V7R6M0 via JT400 21.0.4 through the local SSH tunnel
+  (127.0.0.1:8471). The Java harness now honours `PUB400_PORT` to
+  engage JT400's `skipSignonServer_` codepath; new `GOSPROCS`
+  library on the LPAR carries `P_INS` (IN-only), `P_LOOKUP`
+  (IN + 2 OUT scalars), `P_INVENTORY` (DYNAMIC RESULT SETS 2),
+  `P_ROUNDTRIP` (INOUT scalar). Fixtures land under
+  `testdata/jtopen-fixtures/fixtures/prepared_call_*.{trace,golden.json}`:
+    - `prepared_call_in_only` — `CALL GOSPROCS.P_INS('A', 10)`;
+      no params, no result sets, no OUT values.
+    - `prepared_call_in_out` — `CALL GOSPROCS.P_LOOKUP(?, ?, ?)`
+      with IN VARCHAR `'WIDGET'` + two OUT registrations; golden
+      pins OUT values `("Acme Widget", 100)`.
+    - `prepared_call_result_set` — `CALL GOSPROCS.P_INVENTORY(5)`
+      first dynamic result set only; golden pins
+      `[("LOW1", 2), ("LOW2", 3)]`.
+    - `prepared_call_multi_set` — same proc, both result sets
+      drained via `getMoreResults()`; second set golden pins
+      `[("HIGH1", 50), ("HIGH2", 100)]`.
+    - `prepared_call_inout` — `CALL GOSPROCS.P_ROUNDTRIP(?)` with
+      INOUT INTEGER seeded at 5; golden pins OUT value 6.
+  All five fixtures committed; M9-1 / M9-2 / M9-3 replays consume
+  them as their offline regression net. The same `WithStoredProcs`
+  setup() proves JT400 can `CREATE OR REPLACE` all four procs and
+  call them end-to-end against the LPAR — that's the live
+  evidence the plan asks for.
+
+- **M9-1 CALL with IN-only parameters** — pending.
+- **M9-2 OUT and INOUT via `sql.Out`** — pending.
+- **M9-3 Multi-result-set via `Rows.NextResultSet`** — pending.
+
 ## Working rhythm
 
 The pattern that worked for M1 should keep working:

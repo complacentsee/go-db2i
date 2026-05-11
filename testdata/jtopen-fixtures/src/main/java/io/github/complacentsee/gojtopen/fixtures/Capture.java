@@ -62,7 +62,8 @@ public final class Capture {
             }
 
             System.out.println("goJTOpen fixture capture");
-            System.out.println("  host:     " + cfg.host);
+            System.out.println("  host:     " + cfg.host
+                    + (cfg.port == null || cfg.port.isEmpty() ? "" : ":" + cfg.port));
             System.out.println("  user:     " + cfg.user);
             System.out.println("  schema:   " + cfg.schema);
             System.out.println("  fixtures: " + fixturesDir);
@@ -193,7 +194,15 @@ public final class Capture {
 
     private static Connection openConnection(Config cfg,
                                              java.util.Map<String, String> extras) throws SQLException {
+        // PUB400_PORT lets the harness target a non-default database
+        // host-server port -- e.g. when reaching the LPAR through a
+        // local SSH tunnel on 127.0.0.1:8471. A non-empty port engages
+        // JT400's skipSignonServer_ path (AS400JDBCConnectionImpl.java
+        // ~3550); VRM is then auto-detected from SYSIBMADM.ENVSYSINFO.
         String url = "jdbc:as400://" + cfg.host;
+        if (cfg.port != null && !cfg.port.isEmpty()) {
+            url = url + ":" + cfg.port;
+        }
         Properties props = new Properties();
         props.setProperty("user", cfg.user);
         props.setProperty("password", cfg.pwd);
@@ -201,19 +210,33 @@ public final class Capture {
         // (period-qualified), default library = their schema.
         props.setProperty("naming", "sql");
         props.setProperty("libraries", cfg.schema);
-        // Be nice to PUB400; don't leave idle connections lingering.
-        props.setProperty("thread used", "false");
-        // Connection-level socket read timeout in ms. Unlike
-        // Statement.setQueryTimeout (which only affects execute, not
-        // prepare or commit), JTOpen's "socket timeout" property bounds
-        // every read off the JDBC socket -- including the PREPARE
-        // round-trip. We had a run wedge for 30+ min inside
-        // commonPrepare on DLTJRN because PUB400 had a held journal;
-        // this caps that to 30s and surfaces an SQLException instead.
-        props.setProperty("socket timeout", "30000");
-        // Login + connect timeouts so a half-open TCP path can't hang
-        // openConnection itself indefinitely.
-        props.setProperty("login timeout", "30");
+        // The "thread used", "socket timeout", and "login timeout"
+        // properties all flow through AS400.setSocketProperties() /
+        // setThreadUsed(), which throw
+        // {@code ExtendedIllegalStateException("Property was not changed")}
+        // once the AS400 instance has been frozen. With PUB400 (no port
+        // in URL) JT400 goes through the standard signon-server flow and
+        // these set BEFORE the freeze; with an explicit port (our SSH-
+        // tunnel path) the port-override codepath in
+        // AS400JDBCConnectionImpl triggers an early connect that freezes
+        // the AS400 before prepareConnection touches socket props.
+        // Apply them only when no explicit port is specified, matching
+        // the historical PUB400 behaviour.
+        if (cfg.port == null || cfg.port.isEmpty()) {
+            // Be nice to PUB400; don't leave idle connections lingering.
+            props.setProperty("thread used", "false");
+            // Connection-level socket read timeout in ms. Unlike
+            // Statement.setQueryTimeout (which only affects execute, not
+            // prepare or commit), JTOpen's "socket timeout" property
+            // bounds every read off the JDBC socket -- including the
+            // PREPARE round-trip. We had a run wedge for 30+ min inside
+            // commonPrepare on DLTJRN because PUB400 had a held journal;
+            // this caps that to 30s and surfaces an SQLException instead.
+            props.setProperty("socket timeout", "30000");
+            // Login + connect timeouts so a half-open TCP path can't
+            // hang openConnection itself indefinitely.
+            props.setProperty("login timeout", "30");
+        }
         // Apply per-case overrides last so they win over the defaults.
         for (java.util.Map.Entry<String, String> e : extras.entrySet()) {
             props.setProperty(e.getKey(), e.getValue());
@@ -229,15 +252,17 @@ public final class Capture {
 
     private static final class Config {
         final String host;
+        final String port;
         final String user;
         final String pwd;
         final String schema;
         final String fixturesDir;
         final List<String> only;
 
-        private Config(String host, String user, String pwd, String schema,
+        private Config(String host, String port, String user, String pwd, String schema,
                        String fixturesDir, List<String> only) {
             this.host = host;
+            this.port = port;
             this.user = user;
             this.pwd = pwd;
             this.schema = schema;
@@ -247,6 +272,7 @@ public final class Capture {
 
         static Config fromEnv() {
             String host = envOr("PUB400_HOST", "pub400.com");
+            String port = envOr("PUB400_PORT", "");
             String user = required("PUB400_USER");
             String pwd = required("PUB400_PWD");
             String schema = envOr("PUB400_SCHEMA", user).toUpperCase(Locale.ROOT);
@@ -255,7 +281,7 @@ public final class Capture {
             List<String> only = onlyRaw == null || onlyRaw.isEmpty()
                     ? Collections.emptyList()
                     : new ArrayList<>(Arrays.asList(onlyRaw.split(",")));
-            return new Config(host, user, pwd, schema, fixturesDir, only);
+            return new Config(host, port, user, pwd, schema, fixturesDir, only);
         }
 
         private static String envOr(String key, String def) {

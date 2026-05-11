@@ -78,6 +78,39 @@ public class GoldenWriter {
         root.put("updateCount", count);
     }
 
+    /**
+     * Record one OUT / INOUT parameter value returned by a CallableStatement.
+     * Stored Procedure fixtures (M9) consume the synthetic single-row
+     * EXECUTE-reply result-data that JT400 decodes via
+     * {@code parameterRow_.setServerData()}; the Go side asserts the same
+     * decoded values land in the matching {@code *sql.Out.Dest} after
+     * driver-side reflect write-back.
+     *
+     * Values are serialised by Java type:
+     * Integer / Long → numeric JSON, BigDecimal → string (preserves
+     * precision/scale), everything else → {@code String.valueOf(value)}.
+     */
+    public void recordOutParam(int index, int sqlType, Object value) {
+        ArrayNode outs = (ArrayNode) root.get("outParams");
+        if (outs == null) {
+            outs = root.putArray("outParams");
+        }
+        ObjectNode p = outs.addObject();
+        p.put("index", index);
+        p.put("sqlType", sqlType);
+        if (value == null) {
+            p.putNull("value");
+        } else if (value instanceof Integer) {
+            p.put("value", (Integer) value);
+        } else if (value instanceof Long) {
+            p.put("value", (Long) value);
+        } else if (value instanceof BigDecimal) {
+            p.put("value", ((BigDecimal) value).toPlainString());
+        } else {
+            p.put("value", String.valueOf(value));
+        }
+    }
+
     public void recordError(SQLException e) {
         ObjectNode err = root.putObject("error");
         err.put("sqlState", e.getSQLState());

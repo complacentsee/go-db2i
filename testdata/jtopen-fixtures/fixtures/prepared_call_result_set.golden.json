@@ -1,0 +1,31 @@
+{
+  "case" : "prepared_call_result_set",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "CODE",
+      "label" : "CODE",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 10,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "QTY",
+      "label" : "QTY",
+      "typeName" : "INTEGER",
+      "sqlType" : 4,
+      "displaySize" : 11,
+      "precision" : 10,
+      "scale" : 0,
+      "nullable" : 1,
+      "signed" : true,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "LOW1", 2 ], [ "LOW2", 3 ] ]
+  } ]
+}
