@@ -1,66 +1,9 @@
 package hostserver
 
 import (
-	"bytes"
 	"encoding/binary"
-	"fmt"
 	"testing"
 )
-
-// TestExecutePreparedCached_WireShape constructs a synthetic
-// PackageStatement and exercises the cached-EXECUTE frame builder,
-// then re-parses the written bytes to confirm:
-//
-//   - The function code is 0x1805 (EXECUTE), not 0x1803
-//     (PREPARE_DESCRIBE). This is the "fast path" assertion: no
-//     prepare round-trip slips through.
-//   - CP 0x3806 (statement-name override) is present with the
-//     verbatim 18-byte EBCDIC name from the cached package entry.
-//     Byte-equality here is what lets the server match the cached
-//     statement; any normalisation would break it silently.
-//   - CP 0x381E (extended data format) and CP 0x381F (extended data)
-//     are both present, carrying the parameter shape + bound values.
-//   - CP 0x3804 (package-name marker) is NOT present -- it's only
-//     used to ASK the server to file a new statement into the
-//     package; on a cache hit we're using an existing one.
-func TestExecutePreparedCached_WireShape(t *testing.T) {
-	cached := syntheticCachedSelectInt()
-
-	hdr, payload, err := buildCachedExecuteFrame(ReqDBSQLExecute, cached,
-		mustPreparedParams(t, cached.ParameterMarkerFormat),
-		[]any{int64(42)},
-	)
-	if err != nil {
-		t.Fatalf("buildCachedExecuteFrame: %v", err)
-	}
-	if hdr.ReqRepID != ReqDBSQLExecute {
-		t.Errorf("ReqRepID = 0x%04X, want 0x%04X (EXECUTE)", hdr.ReqRepID, ReqDBSQLExecute)
-	}
-
-	saw := scanRequestParams(t, payload)
-	if !saw.has(cpDBPrepareStatementName) {
-		t.Errorf("EXECUTE missing CP 0x%04X (cached name)", cpDBPrepareStatementName)
-	}
-	if !saw.has(cpDBExtendedDataFormat) {
-		t.Errorf("EXECUTE missing CP 0x%04X (cached PMF descriptor)", cpDBExtendedDataFormat)
-	}
-	if !saw.has(cpDBExtendedData) {
-		t.Errorf("EXECUTE missing CP 0x%04X (bound values)", cpDBExtendedData)
-	}
-	if saw.has(cpPackageName) {
-		t.Errorf("EXECUTE unexpectedly carries CP 0x%04X marker -- the cache-hit path should NOT ask the server to file a new statement", cpPackageName)
-	}
-
-	// The statement-name CP payload is CCSID(2) + SL(2) + 18 EBCDIC
-	// bytes -- byte-equal to the cached.NameBytes field.
-	nameWire := saw.dataFor(cpDBPrepareStatementName)
-	if len(nameWire) < 22 {
-		t.Fatalf("statement-name CP payload too short: %d bytes", len(nameWire))
-	}
-	if got, want := nameWire[4:22], cached.NameBytes; !bytes.Equal(got, want) {
-		t.Errorf("statement-name bytes = %x, want %x (cached EBCDIC)", got, want)
-	}
-}
 
 // TestExecutePreparedCached_RejectsOutParameter is the defense-in-
 // depth assertion: a cached PMF with a non-input direction byte must
@@ -73,7 +16,7 @@ func TestExecutePreparedCached_RejectsOutParameter(t *testing.T) {
 	cached.ParameterMarkerFormat[0].ParamType = 0xF1 // OUT
 
 	conn := newFakeConn() // no replies; the call should error before Write
-	_, err := ExecutePreparedCached(conn, cached, []any{int64(42)}, closureFromInt(3))
+	_, err := ExecutePreparedCached(conn, cached, []any{int64(42)}, closureFromInt(3), "GOJTPK9899", "GOTEST", 37)
 	if err == nil {
 		t.Fatalf("expected error for OUT-direction param")
 	}
@@ -87,7 +30,7 @@ func TestExecutePreparedCached_RejectsOutParameter(t *testing.T) {
 func TestExecutePreparedCached_ParamCountMismatch(t *testing.T) {
 	cached := syntheticCachedSelectInt()
 	conn := newFakeConn()
-	_, err := ExecutePreparedCached(conn, cached, nil, closureFromInt(3))
+	_, err := ExecutePreparedCached(conn, cached, nil, closureFromInt(3), "GOJTPK9899", "GOTEST", 37)
 	if err == nil {
 		t.Fatalf("expected error for value-count mismatch")
 	}
@@ -100,32 +43,41 @@ func TestExecutePreparedCached_ParamCountMismatch(t *testing.T) {
 // disabled or lookup miss got past the gate" defense.
 func TestExecutePreparedCached_RejectsNilCached(t *testing.T) {
 	conn := newFakeConn()
-	_, err := ExecutePreparedCached(conn, nil, []any{int64(1)}, closureFromInt(3))
+	_, err := ExecutePreparedCached(conn, nil, []any{int64(1)}, closureFromInt(3), "GOJTPK9899", "GOTEST", 37)
 	if err == nil {
 		t.Fatalf("expected error for nil cached statement")
 	}
 }
 
-// TestOpenSelectPreparedCached_WireShape mirrors the EXECUTE test on
-// the Query path. Function code must be 0x180E
-// (OPEN_DESCRIBE_FETCH), CP 0x3806 must carry the cached name, and
-// no 0x1803 (PREPARE_DESCRIBE) bytes can appear.
-func TestOpenSelectPreparedCached_WireShape(t *testing.T) {
-	cached := syntheticCachedSelectInt()
-
-	hdr, payload, err := buildCachedExecuteFrame(ReqDBSQLOpenDescribeFetch, cached,
-		mustPreparedParams(t, cached.ParameterMarkerFormat),
-		[]any{int64(42)},
-	)
+// TestPreparedParamsFromCached exercises the SQLDA -> PreparedParam
+// shape conversion that drives both Exec and Query cache-hit paths.
+// Non-input direction bytes must abort; input-only round-trips the
+// SQL type / length / CCSID / precision / scale.
+func TestPreparedParamsFromCached(t *testing.T) {
+	in := []ParameterMarkerField{
+		{SQLType: 497, FieldLength: 4, ParamType: 0x00},
+		{SQLType: 449, FieldLength: 16, CCSID: 1208, ParamType: 0xF0},
+	}
+	out, err := preparedParamsFromCached(in)
 	if err != nil {
-		t.Fatalf("buildCachedExecuteFrame: %v", err)
+		t.Fatalf("preparedParamsFromCached: %v", err)
 	}
-	if hdr.ReqRepID != ReqDBSQLOpenDescribeFetch {
-		t.Errorf("ReqRepID = 0x%04X, want 0x%04X (OPEN_DESCRIBE_FETCH)", hdr.ReqRepID, ReqDBSQLOpenDescribeFetch)
+	if len(out) != 2 {
+		t.Fatalf("got %d shapes, want 2", len(out))
 	}
-	saw := scanRequestParams(t, payload)
-	if !saw.has(cpDBPrepareStatementName) {
-		t.Errorf("OPEN missing CP 0x%04X (cached name)", cpDBPrepareStatementName)
+	if out[0].SQLType != 497 || out[0].FieldLength != 4 || out[0].ParamType != 0xF0 {
+		t.Errorf("shape[0] mismatch: %+v", out[0])
+	}
+	if out[1].CCSID != 1208 {
+		t.Errorf("shape[1] CCSID = %d, want 1208", out[1].CCSID)
+	}
+
+	// OUT direction must abort.
+	_, err = preparedParamsFromCached([]ParameterMarkerField{
+		{SQLType: 497, FieldLength: 4, ParamType: 0xF1},
+	})
+	if err == nil {
+		t.Fatalf("expected error for OUT direction")
 	}
 }
 
@@ -154,21 +106,8 @@ func syntheticCachedSelectInt() *PackageStatement {
 	}
 }
 
-// mustPreparedParams converts a cached PMF list into the
-// PreparedParam shapes the encoder consumes, failing the test on a
-// rejection (which only happens for non-input direction bytes).
-func mustPreparedParams(t *testing.T, pmf []ParameterMarkerField) []PreparedParam {
-	t.Helper()
-	shapes, err := preparedParamsFromCached(pmf)
-	if err != nil {
-		t.Fatalf("preparedParamsFromCached: %v", err)
-	}
-	return shapes
-}
-
 // scannedParams collects the CPs observed in a request payload's
-// parameter section, with quick lookup helpers for the assertions
-// above.
+// parameter section.
 type scannedParams struct {
 	cps  []uint16
 	data map[uint16][]byte
@@ -183,9 +122,7 @@ func (s *scannedParams) dataFor(cp uint16) []byte {
 }
 
 // scanRequestParams walks the LL/CP records past the 20-byte
-// DBRequestTemplate header and returns every CP + data block. Fails
-// the test on a malformed record so a fixture-induced bug surfaces
-// immediately.
+// DBRequestTemplate header and returns every CP + data block.
 func scanRequestParams(t *testing.T, payload []byte) *scannedParams {
 	t.Helper()
 	if len(payload) < 20 {
@@ -208,20 +145,4 @@ func scanRequestParams(t *testing.T, payload []byte) *scannedParams {
 		off += int(ll)
 	}
 	return out
-}
-
-// closureFromInt and minimal hex helpers are reused across tests.
-
-// fmtCPs is a debug helper for failing assertions; we don't use it
-// in the happy path but keep it around so a future test can print
-// the observed CP list when it diverges.
-func fmtCPs(cps []uint16) string {
-	var b []byte
-	for i, cp := range cps {
-		if i > 0 {
-			b = append(b, ',', ' ')
-		}
-		b = append(b, []byte(fmt.Sprintf("0x%04X", cp))...)
-	}
-	return string(b)
 }

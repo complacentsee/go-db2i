@@ -492,6 +492,56 @@ func TestParsePackageInfo_FixtureMatch(t *testing.T) {
 	}
 }
 
+// TestParsePackageSQLDA_VarcharLengthNormalized constructs a synthetic
+// SQLDA region containing a single VARCHAR(64) field and asserts that
+// the package-SQLDA parser surfaces Length / FieldLength = 66 (the
+// wire-slot width including the 2-byte SL prefix) -- not the raw 64
+// stored in the descriptor bytes.
+//
+// Background: package SQLDA stores VARCHAR length as "declared chars"
+// (64). The super-extended data format the row decoder normally
+// consumes stores it as "wire-slot width" (66). Without
+// normalisation, the cache-hit OPEN reply lands on misaligned column
+// boundaries and surfaces as `varchar declared length 16448 exceeds
+// column max 64` -- the byte at the wrong offset reads back as
+// EBCDIC spaces (0x40 0x40 = 16448).
+func TestParsePackageSQLDA_VarcharLengthNormalized(t *testing.T) {
+	// 16-byte header + one 80-byte field record.
+	raw := make([]byte, sqldaHeaderLen+sqldaFieldRecordLen)
+	be := binary.BigEndian
+	// "SQLDA   " + 4-byte region length + 2 reserved + numFields.
+	copy(raw[0:8], []byte{0xe2, 0xd8, 0xd3, 0xc4, 0xc1, 0x40, 0x40, 0x40})
+	be.PutUint32(raw[8:12], uint32(len(raw)))
+	be.PutUint16(raw[sqldaNumberOfFieldsHigh:sqldaNumberOfFieldsHigh+2], 1)
+	// Per-field record: SQLType=449 (VARCHAR nullable), length=64 raw.
+	base := sqldaHeaderLen
+	be.PutUint16(raw[base+sqldaFieldSQLType:base+sqldaFieldSQLType+2], 449)
+	be.PutUint16(raw[base+sqldaFieldLength:base+sqldaFieldLength+2], 64)
+	be.PutUint16(raw[base+sqldaFieldCCSID:base+sqldaFieldCCSID+2], 37)
+
+	cols, err := parsePackageSQLDADataFormat(raw)
+	if err != nil {
+		t.Fatalf("parsePackageSQLDADataFormat: %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("got %d cols, want 1", len(cols))
+	}
+	if cols[0].Length != 66 {
+		t.Errorf("VARCHAR(64) col.Length = %d, want 66 (64 declared + 2 SL bytes)", cols[0].Length)
+	}
+
+	pmf, err := parsePackageSQLDAParameterMarkerFormat(raw)
+	if err != nil {
+		t.Fatalf("parsePackageSQLDAParameterMarkerFormat: %v", err)
+	}
+	if len(pmf) != 1 {
+		t.Fatalf("got %d markers, want 1", len(pmf))
+	}
+	if pmf[0].FieldLength != 66 {
+		t.Errorf("VARCHAR(64) pmf.FieldLength = %d, want 66", pmf[0].FieldLength)
+	}
+}
+
 // TestParsePackageInfo_EmptyPackage covers the brand-new *PGM case:
 // the package header is intact but statement_count = 0. JT400 ships
 // a CP 0x380B with just the 42-byte header in that case, and we

@@ -225,13 +225,19 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 
-	// Cache-hit fast path is wired but DISABLED for v0.7.1:
-	// hostserver.ExecutePreparedCached emits a single EXECUTE frame
-	// with RPBHandle=0 + cached statement-name override, which the
-	// IBM Cloud V7R6M0 server rejected during live testing
-	// (2026-05-11) -- the no-RPB shape needs the same CREATE_RPB
-	// precursor JT400 uses but with a captured server-side rename.
-	// Stays as scaffolding for v0.7.2 to wire properly.
+	// Cache-hit fast path: when the SQL byte-equals a cached entry
+	// and there's no sql.Out destination, skip PREPARE_DESCRIBE.
+	// Saves one wire round-trip per call by relying on the server-
+	// side plan filed in the *PGM under the cached statement name.
+	if cached := s.conn.packageLookup(s.query); cached != nil && len(outDests) == 0 && s.conn.pkg != nil {
+		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
+		s.logExecCached(logger, len(args), start, res, cached.Name, err)
+		if err != nil {
+			return nil, s.conn.classifyConnErr(err)
+		}
+		return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
+	}
+
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
@@ -328,14 +334,19 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return nil, err
 	}
 
-	// Stmt.Query cache-hit fast path is deferred. Live testing
-	// against IBM Cloud V7R6M0 showed our OPEN_DESCRIBE_FETCH
-	// frame with RPBHandle=0 + statement-name override is rejected
-	// by the server (SQL-202 errorClass=7). The wire shape needs
-	// a CREATE_RPB precursor that we have yet to reverse-engineer.
-	// Until then the Query path always uses the full prepare-and-
-	// open flow; the v0.7.1 win is the M10 wire fix that actually
-	// populates the *PGM, so cross-driver share now works.
+	// Cache-hit fast path: same gate as Stmt.Exec, but cached
+	// statement must have a result-set descriptor (i.e. an actual
+	// SELECT). The returned Cursor owns the RPB and supports
+	// continuation FETCH normally because we still issue CREATE_RPB.
+	if cached := s.conn.packageLookup(s.query); cached != nil && len(cached.DataFormat) > 0 && s.conn.pkg != nil {
+		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
+		s.logQueryCached(len(args), start, cached.Name, err)
+		if err != nil {
+			return nil, s.conn.classifyConnErr(err)
+		}
+		return &Rows{cursor: cursor, conn: s.conn}, nil
+	}
+
 	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
 	s.logQuery("OPEN_SELECT_PREPARED", len(args), start, err)
 	if err != nil {

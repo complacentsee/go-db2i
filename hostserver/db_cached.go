@@ -3,27 +3,28 @@ package hostserver
 import (
 	"fmt"
 	"io"
+
+	"github.com/complacentsee/go-db2i/ebcdic"
 )
 
-// Client-side cache-hit fast path. When a Conn's PackageManager has
-// downloaded a CP 0x380B reply at connect (package-cache=true) and a
-// caller's SQL byte-equals a cached PackageStatement, the driver can
-// skip the CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR
-// preamble and ship one EXECUTE frame carrying:
+// Client-side cache-hit fast path for v0.7.1. When a Conn's
+// PackageManager has downloaded a CP 0x380B reply at connect
+// (package-cache=true) and a caller's SQL byte-equals a cached
+// PackageStatement, the driver short-circuits one wire round-trip
+// by skipping PREPARE_DESCRIBE:
 //
-//   - cpDBPrepareStatementName (0x3806) -- the cached 18-byte
-//     server-assigned name, sent verbatim from PackageStatement.NameBytes
-//     so the server-side byte equality holds.
-//   - cpDBExtendedDataFormat (0x381E) -- the parameter-marker shape
-//     descriptor, rebuilt from PackageStatement.ParameterMarkerFormat.
-//   - cpDBExtendedData (0x381F) -- the bound parameter values,
-//     encoded per the cached marker types.
+//	miss:  CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE/OPEN
+//	hit:   CREATE_RPB +                  + CHANGE_DESCRIPTOR + EXECUTE/OPEN
+//	                                                         (with name override)
 //
-// JT400's AS400JDBCStatement.commonExecute does the equivalent via
-// its nameOverride_ field (see JDPackageManager.getCachedStatementName
-// -> setPrepareStatementName on the EXECUTE request). v0.7.1 mirrors
-// the per-frame wire shape; we don't yet share JT400's per-Statement
-// persistent RPB optimisation.
+// This is the same shape JT400 emits in AS400JDBCStatement.commonExecute
+// when nameOverride_ is set (see AS400JDBCStatement.java:880-885):
+// CREATE_RPB stays so the server has a cursor / handle scope for the
+// frames that follow; CHANGE_DESCRIPTOR uploads the cached parameter
+// shape so the bind side matches; EXECUTE/OPEN carries the cached
+// 18-char server statement name in CP 0x3806 (cpDBPrepareStatementName)
+// telling the server "use the prepared plan filed in the package
+// under this name, not the RPB's auto-allocated STMT0001".
 //
 // Cache-hit eligibility is enforced by the driver layer
 // (driver.packageLookup) and by ExecutePreparedCached itself: any
@@ -33,20 +34,13 @@ import (
 // sql.Out destination.
 
 // ExecutePreparedCached runs an INSERT / UPDATE / DELETE against
-// conn using only the cached PackageStatement metadata -- no
-// CREATE_RPB, no PREPARE_DESCRIBE, no CHANGE_DESCRIPTOR. The caller
-// must guarantee that:
+// conn using the cached PackageStatement metadata. Skips PREPARE_
+// DESCRIBE; still does CREATE_RPB + CHANGE_DESCRIPTOR + EXECUTE +
+// DELETE_RPB to keep the server's handle state happy.
 //
-//   - cached.NameBytes is the verbatim 18-byte EBCDIC server name.
-//   - cached.ParameterMarkerFormat has the right length for
-//     paramValues (the driver's packageLookup confirms this against
-//     the cached SQL text byte-equality).
-//   - paramValues are Go values compatible with the cached
-//     parameter shapes; encoding is delegated to
-//     EncodeDBExtendedData via the synthetic PreparedParam list.
-//
-// nextCorr is the connection's correlation-ID source.
-func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32) (*ExecResult, error) {
+// nextCorr is the connection's per-call correlation-ID closure --
+// each frame consumes one ID.
+func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16) (*ExecResult, error) {
 	if cached == nil {
 		return nil, fmt.Errorf("hostserver: ExecutePreparedCached: cached statement nil")
 	}
@@ -62,51 +56,104 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 		return nil, err
 	}
 
-	hdr, payload, err := buildCachedExecuteFrame(ReqDBSQLExecute, cached, shapes, paramValues)
-	if err != nil {
+	// --- 1) CREATE_RPB. Same shape as ExecutePreparedSQL: a fresh
+	// RPB in slot 1 with STMT0001/CRSR0001 names + package library.
+	if err := sendCachedCreateRPB(conn, packageLibrary, nextCorr()); err != nil {
 		return nil, err
 	}
-	corr := nextCorr()
-	hdr.CorrelationID = corr
+
+	// --- 2) CHANGE_DESCRIPTOR. Upload the cached parameter shape
+	// to the RPB so the EXECUTE that follows binds correctly.
+	if err := sendCachedChangeDescriptor(conn, shapes, nextCorr()); err != nil {
+		return nil, err
+	}
+
+	// --- 3) EXECUTE with cached statement-name override + bound values.
+	dataPayload, err := EncodeDBExtendedData(shapes, paramValues)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode cached input parameter data: %w", err)
+	}
+	execCorr := nextCorr()
+	tpl := DBRequestTemplate{
+		ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 1,
+	}
+	stmtType := int16(cached.StatementType)
+	if stmtType == 0 {
+		stmtType = 1 // TYPE_OTHER if the package stored 0
+	}
+	params := []DBParam{
+		DBParamVarString(cpDBPrepareStatementName, 273, cached.NameBytes),
+		DBParamShort(cpDBStatementType, stmtType),
+		{CodePoint: cpDBExtendedData, Data: dataPayload},
+		DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+	}
+	if packageName != "" {
+		pkgParam, err := buildPackageMarkerParam(packageName, packageCCSID)
+		if err != nil {
+			_ = deleteRPB(conn, nextCorr())
+			return nil, fmt.Errorf("hostserver: encode cached EXECUTE package marker: %w", err)
+		}
+		params = append(params, pkgParam)
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
+	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, fmt.Errorf("hostserver: build cached EXECUTE: %w", err)
+	}
+	hdr.CorrelationID = execCorr
 	if err := WriteFrame(conn, hdr, payload); err != nil {
 		return nil, fmt.Errorf("hostserver: send cached EXECUTE: %w", err)
 	}
-	repHdr, repPayload, err := ReadDBReplyMatching(conn, corr, 8)
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
 	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: read cached EXECUTE reply: %w", err)
 	}
 	if repHdr.ReqRepID != RepDBReply {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: cached EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(repPayload)
 	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: parse cached EXECUTE reply: %w", err)
 	}
+
 	rc := int32(rep.ReturnCode)
+	cleanup := func() error { return deleteRPB(conn, nextCorr()) }
 	if rc == 100 {
-		// SQL +100 = "no rows matched" -- not an error; rows-affected = 0.
+		// SQL +100 = "no rows matched" -- success with 0 rows.
+		if err := cleanup(); err != nil {
+			return nil, fmt.Errorf("hostserver: cleanup RPB after cached EXECUTE+100: %w", err)
+		}
 		return &ExecResult{}, nil
 	}
 	if dbErr := makeDb2Error(rep, "EXECUTE_CACHED"); dbErr != nil {
+		_ = cleanup()
 		return nil, dbErr
+	}
+	if err := cleanup(); err != nil {
+		return nil, fmt.Errorf("hostserver: cleanup RPB after cached EXECUTE: %w", err)
 	}
 	return &ExecResult{}, nil
 }
 
 // OpenSelectPreparedCached is the Query-path companion to
-// ExecutePreparedCached. It builds an OPEN_DESCRIBE_FETCH (0x180E)
-// against the cached statement name + parameter shape, returning a
-// streaming *Cursor whose first batch is the rows in the reply.
+// ExecutePreparedCached. CREATE_RPB + CHANGE_DESCRIPTOR + OPEN_DESCRIBE_FETCH
+// (with statement-name override) -- no PREPARE_DESCRIBE round-trip.
+// The returned *Cursor owns the RPB and supports continuation FETCH
+// the same way the non-cached path does, so multi-block result sets
+// just work.
 //
-// LIMITATION (v0.7.1): the cached fast path ships RPBHandle=0 on
-// the OPEN frame so continuation FETCH is not available -- the
-// returned Cursor is pre-marked exhausted=true / rpbActive=false.
-// Callers reading more than the OPEN's first batch will see
-// truncated results. Result sets that fit in one 32 KB buffer
-// (the typical case for packaged statements -- a few rows of a
-// small SELECT) are unaffected. v0.7.2 will swap in a RPB-backed
-// path so multi-block FETCH continuation works.
-func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error) {
+// packageLibrary is the on-wire EBCDIC library name; it's attached
+// to CREATE_RPB so the server can resolve the package-named
+// statement on the RPB's bind side.
+func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16) (*Cursor, error) {
 	if cached == nil {
 		return nil, fmt.Errorf("hostserver: OpenSelectPreparedCached: cached statement nil")
 	}
@@ -125,115 +172,153 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 		return nil, err
 	}
 
-	hdr, payload, err := buildCachedExecuteFrame(ReqDBSQLOpenDescribeFetch, cached, shapes, paramValues)
-	if err != nil {
+	// --- 1) CREATE_RPB.
+	if err := sendCachedCreateRPB(conn, packageLibrary, nextCorr()); err != nil {
 		return nil, err
 	}
-	corr := nextCorr()
-	hdr.CorrelationID = corr
+
+	// --- 2) CHANGE_DESCRIPTOR (only if we have params).
+	if len(shapes) > 0 {
+		if err := sendCachedChangeDescriptor(conn, shapes, nextCorr()); err != nil {
+			_ = deleteRPB(conn, nextCorr())
+			return nil, err
+		}
+	}
+
+	// --- 3) OPEN_DESCRIBE_FETCH with name override.
+	dataPayload, err := EncodeDBExtendedData(shapes, paramValues)
+	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, fmt.Errorf("hostserver: encode cached input parameter data: %w", err)
+	}
+	stmtType := int16(cached.StatementType)
+	if stmtType == 0 {
+		stmtType = 2 // TYPE_SELECT
+	}
+	openCorr := nextCorr()
+	tpl := DBRequestTemplate{
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression | ORSCursorAttributes,
+		ReturnORSHandle:           1,
+		FillORSHandle:             1,
+		BasedOnORSHandle:          0,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 1,
+	}
+	params := []DBParam{
+		DBParamByte(cpDBOpenAttributes, 0x80),
+	}
+	if packageName != "" {
+		pkgParam, err := buildPackageMarkerParam(packageName, packageCCSID)
+		if err != nil {
+			_ = deleteRPB(conn, nextCorr())
+			return nil, fmt.Errorf("hostserver: encode cached OPEN package marker: %w", err)
+		}
+		params = append(params, pkgParam)
+	}
+	params = append(params,
+		DBParamVarString(cpDBPrepareStatementName, 273, cached.NameBytes),
+		DBParamByte(cpDBVariableFieldCompr, 0xE8),
+		DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
+		DBParamShort(cpDBScrollableCursorFlag, 0x0000),
+		DBParamByte(cpDBResultSetHoldability, 0xE8),
+		DBParamShort(cpDBStatementType, stmtType),
+		DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
+		DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+	)
+	hdr, payload, err := BuildDBRequest(ReqDBSQLOpenDescribeFetch, tpl, params)
+	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
+		return nil, fmt.Errorf("hostserver: build cached OPEN_DESCRIBE_FETCH: %w", err)
+	}
+	hdr.CorrelationID = openCorr
 	if err := WriteFrame(conn, hdr, payload); err != nil {
 		return nil, fmt.Errorf("hostserver: send cached OPEN_DESCRIBE_FETCH: %w", err)
 	}
-	repHdr, repPayload, err := ReadDBReplyMatching(conn, corr, 8)
+	repHdr, repPayload, err := ReadDBReplyMatching(conn, openCorr, 8)
 	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: read cached OPEN reply: %w", err)
 	}
 	if repHdr.ReqRepID != RepDBReply {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: cached OPEN reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(repPayload)
 	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: parse cached OPEN reply: %w", err)
 	}
 	if dbErr := makeDb2Error(rep, "OPEN_DESCRIBE_FETCH_CACHED"); dbErr != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, dbErr
 	}
+
 	cols := make([]SelectColumn, len(cached.DataFormat))
 	copy(cols, cached.DataFormat)
 	rows, err := rep.findExtendedResultData(cols)
 	if err != nil {
+		_ = deleteRPB(conn, nextCorr())
 		return nil, fmt.Errorf("hostserver: parse cached OPEN row data: %w", err)
 	}
-	// Pre-marked exhausted + no RPB. Close() is a no-op on this
-	// shape; Next() drains the buffered rows then returns io.EOF.
-	return newBufferedCursor(cols, rows), nil
+	outcome := interpretFetchReply(rep)
+	return newCursor(conn, cols, rows, outcome, nextCorr, outcome.numberOfResults), nil
 }
 
-// newBufferedCursor returns a *Cursor that owns the given row batch
-// and refuses continuation FETCH. Used by the cache-hit fast path
-// (and potentially other future buffered paths) where the server
-// state we'd need for continuation isn't available.
-func newBufferedCursor(cols []SelectColumn, rows []SelectRow) *Cursor {
-	return &Cursor{
-		cols:         cols,
-		pending:      rows,
-		exhausted:    true,
-		serverClosed: true,
-		rpbActive:    false,
-	}
-}
-
-// buildCachedExecuteFrame assembles the wire frame for both the
-// EXECUTE (0x1805) and OPEN_DESCRIBE_FETCH (0x180E) cache-hit paths.
-// The two function codes share the same parameter list shape:
-// statement-name override + parameter-format descriptor + bound
-// values. ORS bitmap and template handles differ slightly between
-// the two, and are filled in by the caller's resolvedFrameKnobs.
-func buildCachedExecuteFrame(functionID uint16, cached *PackageStatement, shapes []PreparedParam, paramValues []any) (Header, []byte, error) {
-	dataPayload, err := EncodeDBExtendedData(shapes, paramValues)
+// sendCachedCreateRPB issues a CREATE_RPB matching the JT400 wire
+// shape: STMT0001 + CRSR0001 + package library. Fire-and-forget
+// (ORS=DataCompression only).
+func sendCachedCreateRPB(conn io.ReadWriter, packageLibrary string, corr uint32) error {
+	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
 	if err != nil {
-		return Header{}, nil, fmt.Errorf("hostserver: encode cached input parameter data: %w", err)
+		return fmt.Errorf("hostserver: encode cached RPB stmt name: %w", err)
 	}
-	descriptor := EncodeDBExtendedDataFormat(shapes)
-
-	// Statement-type code for the EXECUTE template. We rely on the
-	// type the package stored (2=SELECT, 3=INSERT, 4=UPDATE,
-	// 5=DELETE in our wire usage). Falling back to 0
-	// (TYPE_UNDETERMINED) keeps us strictly correct if the server
-	// ever ships a statement type we haven't enumerated.
-	stmtType := int16(cached.StatementType)
-
-	var ors uint32
-	var rpbHandle uint16
-	switch functionID {
-	case ReqDBSQLExecute:
-		// EXECUTE: SQLCA + ReturnData + RLE compression. We don't
-		// expect a result-data block; OUT/INOUT params are excluded
-		// from the package by the driver-side criteria filter.
-		ors = ORSReturnData | ORSSQLCA | ORSDataCompression
-		rpbHandle = 0
-	case ReqDBSQLOpenDescribeFetch:
-		// OPEN_DESCRIBE_FETCH: result data + SQLCA. We deliberately
-		// don't ask for DataFormat back (CP 0x3812); the cached
-		// PackageStatement.DataFormat is authoritative.
-		ors = ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression
-		rpbHandle = 0
-	default:
-		return Header{}, nil, fmt.Errorf("hostserver: buildCachedExecuteFrame: unsupported function 0x%04X", functionID)
+	cursorNameBytes, err := ebcdic.CCSID37.Encode("CRSR0001")
+	if err != nil {
+		return fmt.Errorf("hostserver: encode cached RPB cursor name: %w", err)
 	}
-
 	tpl := DBRequestTemplate{
-		ORSBitmap:                 ors,
+		ORSBitmap:                 ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
-		RPBHandle:                 rpbHandle,
-		ParameterMarkerDescriptor: 1,
+		RPBHandle:                 1,
+		ParameterMarkerDescriptor: 0,
 	}
 	params := []DBParam{
-		// CP 0x3806 sent as a CCSID-tagged var-string. CCSID 273 is
-		// what the existing CREATE_RPB path uses for statement
-		// names; the cached bytes round-trip correctly because the
-		// IBM i character set for server-assigned names (A-Z + 0-9)
-		// has the same EBCDIC byte values across CCSID 37 / 273 /
-		// 277 / 280 / 285 (see project_db2i_m10_jt400_interop.md).
-		DBParamVarString(cpDBPrepareStatementName, 273, cached.NameBytes),
-		DBParamShort(cpDBStatementType, stmtType),
-		{CodePoint: cpDBExtendedDataFormat, Data: descriptor},
-		{CodePoint: cpDBExtendedData, Data: dataPayload},
-		DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+		DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
 	}
-	return BuildDBRequest(functionID, tpl, params)
+	if packageLibrary != "" {
+		libParam, err := buildPackageLibraryParam(packageLibrary)
+		if err != nil {
+			return fmt.Errorf("hostserver: encode cached RPB library: %w", err)
+		}
+		params = append(params, libParam)
+	}
+	hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, params)
+	if err != nil {
+		return fmt.Errorf("hostserver: build cached CREATE_RPB: %w", err)
+	}
+	hdr.CorrelationID = corr
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return fmt.Errorf("hostserver: send cached CREATE_RPB: %w", err)
+	}
+	return nil
+}
+
+// sendCachedChangeDescriptor uploads the cached parameter shape to
+// the RPB allocated by the previous CREATE_RPB. Fire-and-forget --
+// JT400's wire shape sends ORS=DataCompression only here too.
+func sendCachedChangeDescriptor(conn io.ReadWriter, shapes []PreparedParam, corr uint32) error {
+	hdr, payload, err := ChangeDescriptorRequest(shapes)
+	if err != nil {
+		return fmt.Errorf("hostserver: build cached CHANGE_DESCRIPTOR: %w", err)
+	}
+	hdr.CorrelationID = corr
+	if err := WriteFrame(conn, hdr, payload); err != nil {
+		return fmt.Errorf("hostserver: send cached CHANGE_DESCRIPTOR: %w", err)
+	}
+	return nil
 }
 
 // preparedParamsFromCached converts the SQLDA-derived

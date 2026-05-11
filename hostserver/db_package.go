@@ -663,6 +663,14 @@ func decodePackageText(raw []byte, ccsid uint16) (string, error) {
 // package data-format region into SelectColumn descriptors. Mirrors
 // JT400's DBSQLDADataFormat field-by-field. Returns nil/nil when
 // the SQLDA holds zero fields.
+//
+// The Length value in package SQLDA is the JT400 raw-descriptor
+// "declared-chars" form: for VARCHAR(64) it is 64. The row decoder
+// elsewhere (decodeRow / decodeColumn) expects the super-extended
+// convention where col.Length is the full wire-slot width including
+// the 2-byte SL prefix (66 for VARCHAR(64)). normalizeSQLDALength
+// applies the +2 for VAR-family types so the row decoder lands on the
+// right column boundaries when replaying cached metadata.
 func parsePackageSQLDADataFormat(raw []byte) ([]SelectColumn, error) {
 	numFields, err := validateSQLDAHeader(raw)
 	if err != nil {
@@ -682,7 +690,7 @@ func parsePackageSQLDADataFormat(raw []byte) ([]SelectColumn, error) {
 		ccsid := be.Uint16(raw[base+sqldaFieldCCSID : base+sqldaFieldCCSID+2])
 		col := SelectColumn{
 			SQLType:   sqlType,
-			Length:    length,
+			Length:    normalizeSQLDALength(sqlType, length),
 			Scale:     scale,
 			Precision: precision,
 			CCSID:     ccsid,
@@ -703,6 +711,12 @@ func parsePackageSQLDADataFormat(raw []byte) ([]SelectColumn, error) {
 // JT400's DBSQLDADataFormat returns -1 for LOBLocator/LOBMaxSize on
 // SQLDA, matching the package-storage rule that LOBs trigger a
 // re-prepare; we leave both zero.
+//
+// FieldLength is normalized to include the 2-byte SL prefix for
+// VAR-family types so EncodeDBExtendedData (which advances by
+// FieldLength per slot and computes maxBytes = FieldLength-2 for
+// VARCHAR) can consume the cached shape directly. See
+// parsePackageSQLDADataFormat for the matching SelectColumn fix.
 func parsePackageSQLDAParameterMarkerFormat(raw []byte) ([]ParameterMarkerField, error) {
 	numFields, err := validateSQLDAHeader(raw)
 	if err != nil {
@@ -715,9 +729,11 @@ func parsePackageSQLDAParameterMarkerFormat(raw []byte) ([]ParameterMarkerField,
 	out := make([]ParameterMarkerField, 0, numFields)
 	for i := 0; i < numFields; i++ {
 		base := sqldaHeaderLen + i*sqldaFieldRecordLen
+		sqlType := be.Uint16(raw[base+sqldaFieldSQLType : base+sqldaFieldSQLType+2])
+		rawLen := uint32(be.Uint16(raw[base+sqldaFieldLength : base+sqldaFieldLength+2]))
 		f := ParameterMarkerField{
-			SQLType:     be.Uint16(raw[base+sqldaFieldSQLType : base+sqldaFieldSQLType+2]),
-			FieldLength: uint32(be.Uint16(raw[base+sqldaFieldLength : base+sqldaFieldLength+2])),
+			SQLType:     sqlType,
+			FieldLength: normalizeSQLDALength(sqlType, rawLen),
 			Precision:   uint16(raw[base+sqldaFieldPrecision]),
 			Scale:       uint16(raw[base+sqldaFieldScale]),
 			CCSID:       be.Uint16(raw[base+sqldaFieldCCSID : base+sqldaFieldCCSID+2]),
@@ -729,6 +745,20 @@ func parsePackageSQLDAParameterMarkerFormat(raw []byte) ([]ParameterMarkerField,
 		out = append(out, f)
 	}
 	return out, nil
+}
+
+// normalizeSQLDALength converts a package-SQLDA "declared chars"
+// length into the wire-slot width the rest of the package expects.
+// VAR-family types carry a 2-byte SL prefix on the wire that JT400's
+// DBSQLDADataFormat does NOT count in its length field but the
+// super-extended format DOES; we adopt the super-extended convention
+// so SelectColumn.Length and PreparedParam.FieldLength are
+// interchangeable between cache-hit and miss paths.
+func normalizeSQLDALength(sqlType uint16, rawLen uint32) uint32 {
+	if isVarLengthSQLType(sqlType) {
+		return rawLen + 2
+	}
+	return rawLen
 }
 
 // validateSQLDAHeader checks the 16-byte SQLDA header and returns

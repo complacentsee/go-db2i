@@ -12,6 +12,21 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Fixed
 
+- **Package SQLDA VARCHAR length convention**: the CP 0x380B per-
+  statement decoder (`parsePackageSQLDADataFormat` and
+  `parsePackageSQLDAParameterMarkerFormat`) was producing
+  `Length=64` for a `VARCHAR(64)` column where the row decoder
+  expected the super-extended convention `Length=66` (64 declared
+  chars + 2-byte SL prefix). Live testing against IBM Cloud V7R6M0
+  surfaced this as
+  `varchar declared length 16448 exceeds column max 64` -- the
+  off-by-two-per-VARCHAR slide read EBCDIC space pairs (`0x40 0x40`
+  = 16448) at the next column's SL prefix offset. Fixed by adding
+  a `normalizeSQLDALength` helper that returns `rawLen + 2` for
+  VAR-family types so SelectColumn.Length and PreparedParam.FieldLength
+  are interchangeable between cache-hit and cache-miss paths.
+  Regression caught by `TestParsePackageSQLDA_VarcharLengthNormalized`.
+
 - **M10 wire-shape bug**: v0.7.0's extended-dynamic + package-cache
   did NOT actually file prepared statements into the *PGM. The
   PREPARE_DESCRIBE wire emitted an EMPTY CP 0x3804 marker + prepare-
@@ -40,44 +55,41 @@ across IBM i versions; expect the public API surface to settle at
 
 ### Added
 
-- **v0.7.1-Query**: OpenSelectPreparedCached added to the
-  hostserver layer (cache-hit fast path for SELECT). Builds a
-  single OPEN_DESCRIBE_FETCH against the cached statement name,
-  returns a pre-buffered Cursor with no continuation (small
-  result sets only). Driver-side Stmt.Query dispatch deferred to
-  v0.7.2 -- live testing showed our no-RPB OPEN frame is rejected
-  with SQL-202 errorClass=7, and the wire fix needs JT400's
-  rename-tracking that we haven't ported yet.
+- **v0.7.1-Query**: `OpenSelectPreparedCached` -- cache-hit fast
+  path for SELECT. CREATE_RPB + CHANGE_DESCRIPTOR + OPEN_DESCRIBE_
+  FETCH with the cached server-assigned 18-byte statement name in
+  CP 0x3806; PREPARE_DESCRIBE is skipped. Returns a `*Cursor` that
+  supports continuation FETCH the same way the cache-miss path
+  does, so multi-block result sets work without changes to the
+  cursor surface. Live-validated against IBM Cloud V7R6M0 with
+  `SELECT CURRENT_USER, CAST(? AS VARCHAR(64)) FROM SYSIBM.SYSDUMMY1`
+  -- three back-to-back cached queries dispatch cleanly in ~100ms
+  each after the initial warm-up.
 
-- **v0.7.1-C**: driver Stmt cache-hit dispatch. `Stmt.Exec` now
-  calls `Conn.packageLookup(sql)` after the bind step; on a
-  byte-equal hit (and no `sql.Out` arg) it dispatches to
-  `hostserver.ExecutePreparedCached` instead of
-  `ExecutePreparedSQL`, skipping the CREATE_RPB / PREPARE_DESCRIBE
-  / CHANGE_DESCRIPTOR preamble for that call. New slog DEBUG line
-  `db2i: exec cache-hit` (op=`EXECUTE_PREPARED_CACHED`,
+- **v0.7.1-C**: driver Stmt cache-hit dispatch (both Exec and
+  Query). `Stmt.Exec` and `Stmt.Query` call
+  `Conn.packageLookup(sql)` after the bind step; on a byte-equal
+  hit (and no `sql.Out` arg) Exec dispatches to
+  `hostserver.ExecutePreparedCached` and Query dispatches to
+  `hostserver.OpenSelectPreparedCached`, skipping the
+  PREPARE_DESCRIBE round-trip for that call. New slog DEBUG lines
+  `db2i: exec cache-hit` and `db2i: query cache-hit`
+  (op=`EXECUTE_PREPARED_CACHED` / `OPEN_SELECT_PREPARED_CACHED`,
   `cached_name`=server-assigned 18-char name) so operators can see
-  fast-path activity and cross-reference QSYS2.SYSPACKAGE entries.
-  v0.7.1 dispatch (both Exec and Query) stays in the normal prepare-
-  and-open flow -- live testing surfaced wire-shape limitations in
-  the no-RPB cache-hit path that v0.7.2 will resolve. The decoder,
-  packageLookup helper, ExecutePreparedCached entry point, and
-  OpenSelectPreparedCached entry point all stay in tree as
-  scaffolding so v0.7.2 wires through cleanly.
+  fast-path activity and cross-reference `QSYS2.SYSPACKAGE` entries.
 
 - **v0.7.1-B**: client-side cache-hit fast path -- `hostserver`
   layer. `ExecutePreparedCached` and `OpenSelectPreparedCached`
-  build a single EXECUTE (0x1805) / OPEN_DESCRIBE_FETCH (0x180E)
-  frame from a `*PackageStatement`, skipping CREATE_RPB,
-  PREPARE_DESCRIBE, and CHANGE_DESCRIPTOR entirely. The cached
-  18-byte server-assigned name is sent verbatim in CP 0x3806
-  (statement-name override), the cached parameter-marker shapes
-  populate CP 0x381E (extended data format), and bound values go
-  in CP 0x381F (extended data). OUT/INOUT shapes are rejected up
-  front so callable statements can't accidentally lose their
-  destinations through the fast path. Mirrors JT400's
-  AS400JDBCStatement.commonExecute nameOverride_ behaviour; live
-  wiring follows in v0.7.1-C/D.
+  reuse the cached `*PackageStatement` shape:
+  `CREATE_RPB + CHANGE_DESCRIPTOR + EXECUTE/OPEN_DESCRIBE_FETCH`
+  where the EXECUTE / OPEN frame carries the cached 18-byte
+  server-assigned name in CP 0x3806 (statement-name override) and
+  the cached parameter shape feeds CP 0x381E. Skips
+  PREPARE_DESCRIBE -- one round-trip eliminated per cache hit.
+  OUT/INOUT shapes are rejected up front so callable statements
+  can't accidentally lose their destinations through the fast
+  path. Mirrors JT400's `AS400JDBCStatement.commonExecute`
+  `nameOverride_` behaviour.
 
 - **v0.7.1-A**: CP 0x380B (package info) per-statement decoder.
   `hostserver.ParsePackageInfo` walks JT400's 42-byte header + N x
