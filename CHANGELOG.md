@@ -10,6 +10,15 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-11
+
+Fourth tagged release. Closes out v0.7.0's deferred client-side
+cache-hit fast path AND repairs the v0.7.0 wire-shape bug that
+prevented the package from actually being populated. Both
+PREPARE_DESCRIBE-side filing and EXECUTE/OPEN-side cache lookup
+are now live-validated against IBM Cloud V7R6M0 (8471 plaintext);
+full conformance suite green (~162s).
+
 ### Fixed
 
 - **Package SQLDA VARCHAR length convention**: the CP 0x380B per-
