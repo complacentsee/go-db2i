@@ -785,10 +785,10 @@ func parseDSN(dsn string) (*Config, error) {
 	if v := q.Get("block-size"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
-			return nil, fmt.Errorf("invalid block-size %q (want integer KiB in 1..512): %w", v, err)
+			return nil, fmt.Errorf("invalid block-size %q (want integer KiB in 8..512): %w", v, err)
 		}
-		if n < 1 || n > 512 {
-			return nil, fmt.Errorf("invalid block-size %d (want integer KiB in 1..512)", n)
+		if n < 8 || n > 512 {
+			return nil, fmt.Errorf("invalid block-size %d (want integer KiB in 8..512; JT400-canonical values are 8/16/32/64/128/256/512)", n)
 		}
 		cfg.BlockSizeKiB = n
 	}

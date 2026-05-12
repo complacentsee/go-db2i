@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -20,8 +21,8 @@ func TestWithContextDeadlineForwardsDeadline(t *testing.T) {
 	cleanup := withContextDeadline(ctx, conn)
 	defer cleanup()
 
-	if !conn.lastDeadline.Equal(deadline) {
-		t.Errorf("conn.lastDeadline = %v, want %v", conn.lastDeadline, deadline)
+	if got := conn.lastDeadline(); !got.Equal(deadline) {
+		t.Errorf("conn.lastDeadline = %v, want %v", got, deadline)
 	}
 }
 
@@ -43,12 +44,13 @@ func TestWithContextDeadlineCancelUnblocks(t *testing.T) {
 	// drain a single AfterFunc.
 	deadline := time.Now().Add(100 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if !conn.lastDeadline.IsZero() && conn.lastDeadline.Before(time.Now()) {
+		last := conn.lastDeadline()
+		if !last.IsZero() && last.Before(time.Now()) {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Errorf("ctx cancel did not call SetDeadline with a past time; last=%v", conn.lastDeadline)
+	t.Errorf("ctx cancel did not call SetDeadline with a past time; last=%v", conn.lastDeadline())
 }
 
 // TestResolveCtxErrSubstitutesContextErr confirms that when ctx is
@@ -84,17 +86,29 @@ func TestResolveCtxErrSubstitutesContextErr(t *testing.T) {
 
 // deadlineRecorder is a stub net.Conn that just records SetDeadline
 // calls, so the context-plumbing tests can assert on what the
-// driver did without needing a real socket.
+// driver did without needing a real socket. SetDeadline is called
+// from both the main test goroutine (via withContextDeadline's
+// initial SetDeadline) AND from the context.AfterFunc-spawned
+// cancellation goroutine, so lastDeadline reads/writes go through
+// a mutex.
 type deadlineRecorder struct {
 	net.Conn // unused; embedded so we satisfy the interface
-	lastDeadline time.Time
+	mu       sync.Mutex
+	last     time.Time
 }
 
 func newDeadlineRecorder() *deadlineRecorder { return &deadlineRecorder{} }
 
 func (d *deadlineRecorder) SetDeadline(t time.Time) error {
-	d.lastDeadline = t
+	d.mu.Lock()
+	d.last = t
+	d.mu.Unlock()
 	return nil
+}
+func (d *deadlineRecorder) lastDeadline() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.last
 }
 func (d *deadlineRecorder) SetReadDeadline(t time.Time) error  { return nil }
 func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error { return nil }

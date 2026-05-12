@@ -46,13 +46,16 @@ func TestWithBlockSizeRange(t *testing.T) {
 	// the SelectOption boundary doesn't panic; the driver/Config
 	// layer rejects bad DSN values upstream).
 	cases := []struct {
-		input  int
-		want   int // expected o.blockSizeKiB
+		input int
+		want  int // expected o.blockSizeKiB
 	}{
-		{1, 1},
+		{8, 8},
 		{32, 32},
 		{512, 512},
+		// Out-of-range (sub-8 or over-512) silently fall back to zero.
 		{0, 0},
+		{1, 0},
+		{7, 0},
 		{-1, 0},
 		{513, 0},
 		{99999, 0},

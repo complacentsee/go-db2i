@@ -121,14 +121,16 @@ func parseDSNFuzzSeeds() []string {
 		"db2i://u:p@h/?package-cache=true",
 		"db2i://u:p@h/?extended-dynamic=true",
 		"db2i://u:p@h/?package-add=false",
-		// M12 block-size corpus.
-		"db2i://u:p@h/?block-size=1",
+		// M12 block-size corpus (tightened in v0.7.13 to 8..512 to
+		// match JT400 canonical values).
+		"db2i://u:p@h/?block-size=8",
 		"db2i://u:p@h/?block-size=32",
 		"db2i://u:p@h/?block-size=64",
 		"db2i://u:p@h/?block-size=512",
-		"db2i://u:p@h/?block-size=0",       // reject
-		"db2i://u:p@h/?block-size=513",     // reject
-		"db2i://u:p@h/?block-size=-1",      // reject
-		"db2i://u:p@h/?block-size=notnum",  // reject
+		"db2i://u:p@h/?block-size=0",      // reject
+		"db2i://u:p@h/?block-size=4",      // reject (sub-8)
+		"db2i://u:p@h/?block-size=513",    // reject
+		"db2i://u:p@h/?block-size=-1",     // reject
+		"db2i://u:p@h/?block-size=notnum", // reject
 	}
 }

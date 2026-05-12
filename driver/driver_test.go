@@ -119,6 +119,8 @@ func TestParseDSNRejectsBadInputs(t *testing.T) {
 		"signon-port zero":  "db2i://u:p@h/?signon-port=0",
 		"bad lob mode":      "db2i://u:p@h/?lob=bogus",
 		"block-size zero":   "db2i://u:p@h/?block-size=0",
+		"block-size 4":      "db2i://u:p@h/?block-size=4",
+		"block-size 7":      "db2i://u:p@h/?block-size=7",
 		"block-size 513":    "db2i://u:p@h/?block-size=513",
 		"block-size abc":    "db2i://u:p@h/?block-size=abc",
 		"block-size neg":    "db2i://u:p@h/?block-size=-1",
@@ -140,7 +142,7 @@ func TestParseDSNBlockSize(t *testing.T) {
 		want int
 	}{
 		{"unset = zero (default 32 KiB downstream)", "db2i://u:p@h/", 0},
-		{"min 1", "db2i://u:p@h/?block-size=1", 1},
+		{"min 8", "db2i://u:p@h/?block-size=8", 8},
 		{"default 32", "db2i://u:p@h/?block-size=32", 32},
 		{"common 64", "db2i://u:p@h/?block-size=64", 64},
 		{"max 512", "db2i://u:p@h/?block-size=512", 512},

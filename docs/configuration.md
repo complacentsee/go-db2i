@@ -40,7 +40,7 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `package-ccsid`              | `13488`      | CCSID for package-stored SQL text. Accepts `13488` (UCS-2 BE), `1200` (UTF-16 LE), or `0` (job default). |
 | `package-add`                | (ignored)    | JT400-compatibility key. Accepted but no-op; the driver always adds. |
 | `package-clear`              | (warn)       | JT400-compatibility key. Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. |
-| `block-size`                 | `32`         | v0.7.12. KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 1-512. Default (or unset) is byte-identical to pre-v0.7.12. Mirrors JT400's `block size` JDBC URL property. |
+| `block-size`                 | `32`         | v0.7.12 (range tightened in v0.7.13). KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 8-512 (matches JT400-canonical values 8/16/32/64/128/256/512). Default (or unset) is byte-identical to pre-v0.7.12. Mirrors JT400's `block size` JDBC URL property. |
 
 ## Driver-typed methods (`sql.Conn.Raw`)
 

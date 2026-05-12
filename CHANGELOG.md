@@ -10,6 +10,62 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-05-12
+
+### Fixed: fetchMoreRows dropped rows on cursor-exhausts-mid-batch (bug #1)
+
+Continuation FETCH (`hostserver.fetchMoreRows`) used to early-return
+on `outcome.exhausted` without parsing the row payload, dropping any
+rows the server delivered in the same reply. The server can — and
+does — emit rows AND an end-of-data signal (EC=2 RC=700/701, SQL
++100) together when:
+
+- `FETCH FIRST N ROWS ONLY` queries hit the row-cap mid-batch
+- Any cursor exhausts naturally inside a batch with rows pending
+- The single-batch "fetch/close" path (JT400's `@pda perf2`)
+
+The fix mirrors `fetchCallRows`'s existing row-then-outcome
+ordering (CALL cursors had the same fix applied earlier for their
+proc results). New regression test `TestFetchFirstNExact` pins the
+contract: `SELECT … FETCH FIRST 100 ROWS ONLY` returns exactly 100
+rows across all valid block-sizes (8/16/32/64/128/512).
+
+### Changed: `?block-size=N` range tightened to 8..512
+
+DSN `?block-size=N` now requires `N` in `8..512` (was `1..512` in
+v0.7.12). Matches JT400's canonical `BLOCK_SIZE` values
+(8/16/32/64/128/256/512). Values below 8 KiB trigger server-side
+row-truncation under `FETCH FIRST N` on V7R6M0 even with the bug
+#1 fix in place; rejecting them at the boundary is safer than
+silently returning short results.
+
+### Fixed: data race in deadlineRecorder test stub (bug #3)
+
+`go test -race ./driver/` reported a data race in
+`TestWithContextDeadlineCancelUnblocks` -- the test's stub
+`deadlineRecorder` recorded `SetDeadline` calls without locking,
+so the main test goroutine could read `lastDeadline` while the
+`context.AfterFunc`-spawned cancellation goroutine wrote it. The
+race was confined to test code (production `withContextDeadline`
+in `driver/context.go` is correct), but the suite now passes
+under `-race`. Wrapping `lastDeadline` in a `sync.Mutex` + an
+accessor method.
+
+### Known issue: streaming SELECT truncates large fresh user tables
+
+Captured as `TestUserTableLargeScan_KnownIssue` (env-gated; set
+`DB2I_TEST_BUG_LARGE_SCAN=1` to run). On V7R6M0 a streaming
+`SELECT * FROM <user-table>` over a freshly-inserted 10k-row table
+returns only ~8625 rows -- the server emits EC=2 RC=700
+("fetch/close, all delivered") prematurely. `SELECT COUNT(*)
+WHERE …` over the same table correctly reports 10000, and
+`TestRowsLazyMemoryBounded`'s 49688-row `QSYS2.SYSCOLUMNS` scan
+runs cleanly on the same connection -- so the issue is specific
+to user-table scans, not the streaming-cursor path generically.
+Deferred for protocol-level investigation; the bug #1 fix
+recovers the closing-batch rows that were previously also being
+dropped (raising the per-scan ceiling from ~6900 to ~8625).
+
 ## [0.7.12] - 2026-05-12
 
 ### Added: Savepoint driver-typed methods (M12-1)

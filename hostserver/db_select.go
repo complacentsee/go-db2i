@@ -180,9 +180,17 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 		return nil, fetchOutcome{}, fmt.Errorf("hostserver: parse FETCH reply: %w", err)
 	}
 	outcome = interpretFetchReply(rep)
-	if outcome.exhausted {
-		return nil, outcome, nil
-	}
+	// Parse rows BEFORE honouring outcome.exhausted: the server can
+	// deliver rows AND an end-of-data signal (EC=2 RC=700/701, SQL
+	// +100) in the same reply -- canonical cases are `FETCH FIRST N
+	// ROWS ONLY` queries where the row-cap is reached mid-batch,
+	// and the single-batch "fetch/close" path JT400 calls @pda
+	// perf2. The previous early-return on exhausted dropped those
+	// rows silently, causing partial result sets for any cursor
+	// that exhausted naturally inside a batch with rows pending.
+	// Matches the row-then-outcome ordering fetchCallRows uses for
+	// CALL cursors (their proc results similarly carry rows + EOD
+	// together).
 	if dbErr := makeDb2Error(rep, "FETCH"); dbErr != nil {
 		return nil, fetchOutcome{}, dbErr
 	}
@@ -638,17 +646,22 @@ func WithPackageLibrary(lib string) SelectOption {
 
 // WithBlockSize sets the continuation-FETCH buffer size in KiB.
 // Default (zero or omit) is 32 KiB, byte-identical to the pre-M12
-// hardcoded 0x00008000. Accepted range 1..512 KiB; out-of-range
-// values silently fall back to 32 KiB (validation lives at the
-// driver/Config boundary so callers passing through SelectOption
-// directly aren't penalised by panic-on-zero behaviour).
+// hardcoded 0x00008000. Accepted range 8..512 KiB to match JT400's
+// canonical BLOCK_SIZE values (8/16/32/64/128/256/512); buffers
+// below 8 KiB trigger server-side row-truncation under `FETCH
+// FIRST N` on some V7R6 paths even after the v0.7.13 fetchMoreRows
+// fix, so they're rejected at the boundary. Out-of-range values
+// silently fall back to 32 KiB on the SelectOption path (validation
+// lives at the driver/Config boundary so callers passing through
+// SelectOption directly aren't penalised by panic-on-zero
+// behaviour).
 //
 // Maps to CP 0x3834 (BufferSize) on PREPARE_DESCRIBE OPEN /
 // continuation FETCH frames. Mirrors JT400's BLOCK_SIZE connection
 // property.
 func WithBlockSize(kib int) SelectOption {
 	return func(o *selectOpts) {
-		if kib < 1 || kib > 512 {
+		if kib < 8 || kib > 512 {
 			return
 		}
 		o.blockSizeKiB = kib
@@ -902,8 +915,8 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			params = append(params, pkgParam)
 		}
 		params = append(params,
-			DBParamByte(cpDBVariableFieldCompr, 0xE8),                                  // VLF compression on
-			bufferSizeParam(opts.blockSizeKiB), // 0x3834: kib*1024 (default 32 KiB)
+			DBParamByte(cpDBVariableFieldCompr, 0xE8), // VLF compression on
+			bufferSizeParam(opts.blockSizeKiB),        // 0x3834: kib*1024 (default 32 KiB)
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
 		)

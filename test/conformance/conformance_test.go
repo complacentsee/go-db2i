@@ -2568,3 +2568,134 @@ func TestBlockSize(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchFirstNExact pins the row-count contract for
+// `FETCH FIRST N ROWS ONLY` SELECTs across different block-sizes:
+// the cursor MUST return exactly N rows regardless of how many
+// FETCH continuations the wire buffer forces. Regression test for
+// the pre-v0.7.13 bug where fetchMoreRows early-returned on the
+// exhausted signal without parsing the rows the server delivered
+// in the same reply -- queries that exhausted naturally inside a
+// batch silently truncated.
+//
+// The cap is 100 rows; with the wide SYSCOLUMNS rows even a 4 KiB
+// buffer fits ~40 rows per batch, so 100 rows spans 3 batches and
+// the LAST batch carries rows + EOD signal together (the bug's
+// trigger). Block-size=512 KiB is the control: all 100 rows fit
+// in one batch, so the bug doesn't manifest there.
+func TestFetchFirstNExact(t *testing.T) {
+	base := dsn(t)
+	sep := "&"
+	if !strings.Contains(base, "?") {
+		sep = "?"
+	}
+	const want = 100
+	query := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+		FROM QSYS2.SYSCOLUMNS
+		WHERE TABLE_SCHEMA = 'QSYS2'
+		ORDER BY TABLE_NAME, ORDINAL_POSITION
+		FETCH FIRST %d ROWS ONLY`, want)
+
+	count := func(t *testing.T, db *sql.DB) int {
+		t.Helper()
+		rows, err := db.Query(query)
+		if err != nil {
+			t.Fatalf("SELECT: %v", err)
+		}
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			var a, b, c string
+			if err := rows.Scan(&a, &b, &c); err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			n++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		return n
+	}
+
+	for _, size := range []int{8, 16, 32, 64, 128, 512} {
+		size := size
+		t.Run(fmt.Sprintf("block-size=%d", size), func(t *testing.T) {
+			dsnX := base + sep + fmt.Sprintf("block-size=%d", size)
+			db, err := sql.Open("db2i", dsnX)
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			got := count(t, db)
+			if got != want {
+				t.Errorf("block-size=%d: got %d rows, want %d (FETCH FIRST N must return exact)", size, got, want)
+			}
+		})
+	}
+}
+// TestUserTableLargeScan_KnownIssue captures the known bug where
+// a fresh user-table streaming SELECT can stop delivering rows
+// before exhaustion -- the server emits EC=2 RC=700 ("fetch/close,
+// all delivered") after N batches where N×batch-size totals less
+// than the actual row count.
+//
+// Reproducible on V7R6M0 with n=10000 of INTEGER+VARCHAR rows
+// inserted via plain Stmt.Exec; scan-forcing COUNT(*) WHERE ID >= 0
+// reports the true 10000 but streaming SELECT delivers only 8625.
+// Not reproducible on catalog reads (TestRowsLazyMemoryBounded
+// streams 49688 rows from QSYS2.SYSCOLUMNS cleanly with the same
+// driver path).
+//
+// Skipped by default; set DB2I_TEST_BUG_LARGE_SCAN=1 to run.
+// Tracked for protocol-level investigation -- likely needs a CP
+// we're not sending on OPEN_DESCRIBE_FETCH that JT400 sends to
+// disable the "fetch/close" optimisation.
+func TestUserTableLargeScan_KnownIssue(t *testing.T) {
+	if os.Getenv("DB2I_TEST_BUG_LARGE_SCAN") == "" {
+		t.Skip("set DB2I_TEST_BUG_LARGE_SCAN=1 to run this regression probe")
+	}
+	db := openDB(t)
+	defer db.Close()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+	tbl := schema() + "." + tablePrefix + "BUG2_" + suffix
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL, V VARCHAR(40))"); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+
+	const n = 10000
+	ins, err := db.Prepare("INSERT INTO " + tbl + " VALUES (?, ?)")
+	if err != nil {
+		t.Fatalf("prepare INSERT: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := ins.Exec(i, fmt.Sprintf("row-%05d", i)); err != nil {
+			t.Fatalf("INSERT %d: %v", i, err)
+		}
+	}
+	ins.Close()
+
+	var c int
+	if err := db.QueryRow("SELECT COUNT(*) FROM "+tbl).Scan(&c); err != nil {
+		t.Fatalf("COUNT: %v", err)
+	}
+
+	rows, err := db.Query("SELECT ID, V FROM " + tbl)
+	if err != nil {
+		t.Fatalf("SELECT: %v", err)
+	}
+	streamed := 0
+	for rows.Next() {
+		var id int
+		var v string
+		rows.Scan(&id, &v)
+		streamed++
+	}
+	rows.Close()
+	t.Logf("inserted=%d  COUNT(*)=%d  streamed=%d", n, c, streamed)
+	if streamed != n {
+		t.Errorf("BUG: streamed=%d, expected %d (COUNT reported %d)", streamed, n, c)
+	}
+}
