@@ -593,6 +593,12 @@ func TestPackageEligibleFor_DefaultCriteria(t *testing.T) {
 		{"INSERT INTO T (A) SELECT 1 FROM SYSIBM.SYSDUMMY1", false, true},
 		{"SELECT * FROM T FOR UPDATE", false, true},
 		{"DECLARE C CURSOR FOR SELECT 1", false, true},
+		// DECLARE PROCEDURE: JT400 files it under default
+		// (isDeclare_ matches both CURSOR and PROCEDURE forms).
+		// v0.7.7 routing fix at stmt.go pairs with this gate so
+		// no-args DECLAREs reach ExecutePreparedSQL instead of
+		// ExecuteImmediate's single-frame path.
+		{"DECLARE PROCEDURE FOO LANGUAGE SQL BEGIN END", false, true},
 		// CURRENT OF wins over everything else.
 		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
 	}

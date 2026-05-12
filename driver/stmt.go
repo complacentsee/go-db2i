@@ -211,7 +211,18 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// procs invoked through it, which would break M9-3's multi-
 	// result-set count when the caller routes a multi-set CALL
 	// through Exec by mistake.
-	useImmediate := len(args) == 0 && !isCall(s.query)
+	//
+	// Package-eligible no-args statements (DECLARE PROCEDURE,
+	// DECLARE CURSOR, INSERT-subselect, SELECT-FOR-UPDATE) likewise
+	// require the prepared path: ExecuteImmediate's single frame
+	// omits the CP 0x3808 package marker, so the server never files
+	// the statement into the *PGM and the package hash diverges
+	// from JT400's. packageEligibleFor returns false for vanilla
+	// connections (no c.pkg), so this gate is a no-op when
+	// packaging is off.
+	useImmediate := len(args) == 0 &&
+		!isCall(s.query) &&
+		!s.conn.packageEligibleFor(s.query, false)
 	if useImmediate {
 		res, err := hostserver.ExecuteImmediate(s.conn.conn, s.query, s.conn.nextCorr())
 		s.logExec(logger, "EXECUTE_IMMEDIATE", 0, start, res, err)
