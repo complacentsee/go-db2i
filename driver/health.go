@@ -137,12 +137,34 @@ func (c *Conn) IsValid() bool {
 // here makes the pool discard the conn and create a fresh one,
 // without the caller having to retry.
 //
-// We currently don't reset any session-level state on this hook
-// (no temporary tables, no SET-options that survive across requests
-// in the labelverification-gw use case). If that changes, this is
-// the place to send the cleanup frames.
+// Discards on two conditions:
+//
+//   - c.closed: the conn died on a prior op (classifyConnErr set
+//     the flag). Discard so the pool dials a fresh one.
+//   - c.sessionDirty: a stateful mutator (SetSchema, AddLibraries,
+//     RemoveLibraries) was called. v0.7.19 adopts the "discard and
+//     re-dial" path so multi-tenant services calling
+//     SetSchema(tenantID) per request don't leak the schema to the
+//     next pool checkout. A future release may switch to "active
+//     restore" -- re-issue SetSchema(cfg.Library), restore
+//     libraries -- once we've measured the re-dial cost in real
+//     workloads. For now the conservative path is the one with
+//     obvious correctness.
+//
+// BeginTx is NOT marked dirty: Tx.Commit / Tx.Rollback already
+// fire AutocommitOn before the conn returns to the pool, and a
+// failed Commit/Rollback runs through classifyConnErr which marks
+// the conn closed (caught by the c.closed branch above).
 func (c *Conn) ResetSession(ctx context.Context) error {
 	if c == nil || c.closed {
+		return driver.ErrBadConn
+	}
+	if c.sessionDirty {
+		if c.log != nil {
+			c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: ResetSession discarded dirty conn",
+				slog.String("reason", "session state was mutated (SetSchema / AddLibraries / RemoveLibraries) since last checkout"),
+			)
+		}
 		return driver.ErrBadConn
 	}
 	return nil

@@ -125,3 +125,31 @@ func TestConnIsValidAndResetSession(t *testing.T) {
 		t.Errorf("dead Conn.ResetSession = %v, want driver.ErrBadConn", err)
 	}
 }
+
+// TestConnResetSession_DirtySessionDiscards pins the v0.7.19
+// stateful-mutation safety net: after SetSchema / AddLibraries /
+// RemoveLibraries, ResetSession returns driver.ErrBadConn so the
+// pool dials a fresh conn for the next checkout instead of letting
+// the prior caller's schema / library list leak.
+//
+// The mutator entry points themselves set sessionDirty after the
+// wire op succeeds; this test pokes the flag directly so the unit
+// test stays offline and doesn't have to dial.
+func TestConnResetSession_DirtySessionDiscards(t *testing.T) {
+	c := &Conn{cfg: &Config{}, log: silentLogger}
+	if err := c.ResetSession(context.Background()); err != nil {
+		t.Fatalf("clean conn should pass ResetSession; got %v", err)
+	}
+
+	c.sessionDirty = true
+	if c.IsValid() {
+		// IsValid stays true -- the dirty bit doesn't make the
+		// conn unusable, it just signals "don't share me with the
+		// next pool borrower." A dirty conn can still be used by
+		// its current owner.
+	}
+	err := c.ResetSession(context.Background())
+	if !errors.Is(err, driver.ErrBadConn) {
+		t.Errorf("dirty Conn.ResetSession = %v, want driver.ErrBadConn", err)
+	}
+}

@@ -1,15 +1,15 @@
 # go-db2i
 
-> **Current: v0.7.18 (2026-05-12)** — `sql.Named()` parameter
-> binding for stored-procedure CALLs. `db.Exec("CALL mylib.p(?,
-> ?)", sql.Named("P_QTY", &qty), sql.Named("P_CODE", "WIDGET"))`
-> now works regardless of declaration order; the driver does a
-> one-shot `QSYS2.SYSPARMS` lookup to map names to ordinals and
-> reorders args. Mirrors JT400's
-> `CallableStatement.setObject(name, val)`. Lookup result caches
-> on the `*Stmt`. Builds on v0.7.17 (query-optimize-goal),
-> v0.7.16 (timeouts), v0.7.15 (BatchExec LOB / BeginTx
-> isolation), and v0.7.14 (large user-table streaming).
+> **Current: v0.7.19 (2026-05-12)** — session state can no
+> longer leak across pool checkouts. `SetSchema`,
+> `AddLibraries`, and `RemoveLibraries` now mark the conn dirty;
+> `ResetSession` discards dirty conns via `driver.ErrBadConn` so
+> the pool dials fresh on the next checkout. Multi-tenant
+> services calling `SetSchema(tenantID)` per request no longer
+> leak the schema into the next request's connection. Builds on
+> v0.7.18 (`sql.Named` for CALLs), v0.7.17 (query-optimize-goal),
+> v0.7.16 (timeouts), and v0.7.15 (BatchExec LOB / BeginTx
+> isolation).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java

@@ -340,6 +340,25 @@ type Conn struct {
 	//    10-char wire name (and RETURN_PACKAGE if cfg.PackageCache
 	//    is true).
 	pkg *hostserver.PackageManager
+
+	// sessionDirty marks the conn as carrying session state that
+	// won't survive a pool checkout cycle safely. Set when the
+	// caller mutates schema (SetSchema) or library list
+	// (AddLibraries / RemoveLibraries). database/sql's pool calls
+	// ResetSession before handing the conn to a new owner; v0.7.19
+	// makes that hook return driver.ErrBadConn when sessionDirty so
+	// the pool discards the conn and dials a fresh one with the
+	// configured DSN baseline. The cost is one re-dial after each
+	// stateful mutation -- a deliberate tradeoff to keep tenant
+	// schemas from leaking across requests in multi-tenant services.
+	//
+	// BeginTx is NOT tracked here -- Tx.Commit and Tx.Rollback
+	// already fire AutocommitOn before the conn returns to the
+	// pool, and a failed Commit/Rollback path runs through
+	// classifyConnErr which marks the conn dead (closed=true).
+	// Both happy and unhappy Tx paths land in a state ResetSession
+	// can read accurately from closed alone.
+	sessionDirty bool
 }
 
 // Logger returns the per-connection slog.Logger. Always non-nil --

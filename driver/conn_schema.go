@@ -46,8 +46,15 @@ func (c *Conn) SetSchema(ctx context.Context, name string) error {
 		return fmt.Errorf("db2i: SetSchema: invalid schema name %q: %w", name, err)
 	}
 	stmt := &Stmt{conn: c, query: "SET SCHEMA " + canon}
-	_, err := stmt.ExecContext(ctx, nil)
-	return err
+	if _, err := stmt.ExecContext(ctx, nil); err != nil {
+		return err
+	}
+	// Mark the conn as dirty so the pool's ResetSession hook
+	// discards it on return -- a future checkout dials a fresh conn
+	// with the DSN-configured default schema instead of inheriting
+	// `canon` from the last user.
+	c.sessionDirty = true
+	return nil
 }
 
 // AddLibraries appends `libs` to the connection's library list
@@ -89,6 +96,8 @@ func (c *Conn) AddLibraries(ctx context.Context, libs []string) error {
 	if err := hostserver.NDBAddLibraryListMulti(c.conn, canon, c.nextCorr()); err != nil {
 		return c.classifyConnErr(fmt.Errorf("db2i: AddLibraries: %w", resolveCtxErr(ctx, err)))
 	}
+	// See SetSchema for the dirty-bit rationale.
+	c.sessionDirty = true
 	return nil
 }
 
@@ -138,6 +147,11 @@ func (c *Conn) RemoveLibraries(ctx context.Context, libs []string) error {
 			}
 			return fmt.Errorf("db2i: RemoveLibraries: %s: %w", canon, err)
 		}
+		// Mark dirty per-iteration so a partial RemoveLibraries
+		// (e.g. lib 1 succeeded, lib 2 failed) still marks the
+		// conn for pool discard. Conservative; the user paid for
+		// at least one server-side mutation.
+		c.sessionDirty = true
 	}
 	return nil
 }

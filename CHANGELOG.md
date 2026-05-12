@@ -10,6 +10,52 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-05-12
+
+### Fixed: session state can no longer leak across pool checkouts
+
+`Conn.SetSchema`, `Conn.AddLibraries`, and `Conn.RemoveLibraries`
+now mark the connection as `sessionDirty`. The existing
+`Conn.ResetSession` hook (which `database/sql`'s pool calls
+on every release-back-to-pool) discards a dirty conn via
+`driver.ErrBadConn`, forcing the pool to dial a fresh conn on
+the next checkout. Pre-v0.7.19, a multi-tenant service calling
+`SetSchema(tenantID)` per request could see the schema leak into
+the next request's connection from the same pool.
+
+`Conn.IsValid` and `Conn.ResetSession` were both already
+implemented (gating on `c.closed` for dead-conn detection);
+v0.7.19 just teaches `ResetSession` about the new dirty-bit so
+stateful mutators get the same discard treatment as TCP-dead
+conns.
+
+BeginTx is NOT tracked as dirty: `Tx.Commit` / `Tx.Rollback`
+already fire `AutocommitOn` before yielding the conn back to the
+pool, and a failed Commit/Rollback runs through
+`classifyConnErr` which marks the conn closed (caught by the
+existing `c.closed` branch in `ResetSession`).
+
+Tradeoff: each `SetSchema` / `AddLibraries` / `RemoveLibraries`
+call now costs one extra re-dial (~50ms over LAN) when the conn
+returns to the pool. The alternative is "active restore" (re-
+issue `SetSchema(cfg.Library)`, replay `cfg.Libraries`) which
+trades pool reuse for added complexity. The conservative path
+ships in v0.7.19; an active-restore variant lands in a later
+release if the re-dial overhead surfaces in real workloads.
+
+New tests:
+
+- Offline: `TestConnResetSession_DirtySessionDiscards` pokes
+  `sessionDirty=true` directly and asserts `ResetSession` returns
+  `driver.ErrBadConn`. Documents the discard contract without
+  requiring an LPAR.
+- Live: `TestSessionResetterDiscardsAfterSetSchema` walks the
+  full pool cycle on V7R6M0 with `MaxOpenConns=1`: warm a conn,
+  capture default `CURRENT_SCHEMA`, `SetSchema(other)`, release,
+  re-checkout, confirm `CURRENT_SCHEMA` is back to the default.
+  Without the dirty discard, the post-release schema would still
+  be `other`.
+
 ## [0.7.18] - 2026-05-12
 
 ### Added: `sql.Named()` parameter binding for stored-procedure CALLs

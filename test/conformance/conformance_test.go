@@ -3097,3 +3097,92 @@ func TestQueryOptimizeGoal(t *testing.T) {
 		}
 	})
 }
+
+// TestSessionResetterDiscardsAfterSetSchema pins the v0.7.19
+// SessionResetter dirty-discard contract end-to-end via an
+// observable side-effect: CURRENT_SCHEMA on a fresh conn returns
+// the DSN-configured default (`?library=`), but on a conn that
+// just SetSchema'd to something else it returns that something.
+// Walking the test through the pool with MaxOpenConns=1 forces a
+// reuse-or-discard decision at ResetSession time:
+//
+//  1. Warm a single conn; capture default CURRENT_SCHEMA via a
+//     query (this is what every fresh checkout SHOULD see).
+//  2. Check out a sql.Conn, call SetSchema(other), then check
+//     CURRENT_SCHEMA inside the same checkout -- confirms the
+//     mutator actually took effect (=`other`).
+//  3. Release the conn back to the pool. ResetSession fires; our
+//     dirty-bit hook returns ErrBadConn so the pool discards the
+//     conn and dials a fresh one on the next op.
+//  4. Re-checkout, query CURRENT_SCHEMA -- if it's back to the
+//     default, the pool dialed fresh. If it's still `other`, the
+//     dirty-bit fired too late and a stale conn leaked.
+//
+// Pre-v0.7.19, step 4 would return `other` (the prior caller's
+// schema leaked into the next request). Post-v0.7.19, step 4
+// returns the default.
+func TestSessionResetterDiscardsAfterSetSchema(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	ctx := context.Background()
+	// 1. Default schema from a fresh conn.
+	var defaultSchema string
+	if err := db.QueryRowContext(ctx,
+		"SELECT TRIM(CURRENT_SCHEMA) FROM SYSIBM.SYSDUMMY1").Scan(&defaultSchema); err != nil {
+		t.Fatalf("default CURRENT_SCHEMA query: %v", err)
+	}
+	t.Logf("default schema: %q", defaultSchema)
+
+	// 2. Mutate session state to a different schema (uppercase
+	// `QSYS2` works on every IBM i and is guaranteed to differ
+	// from the user's home library).
+	other := "QSYS2"
+	if strings.EqualFold(defaultSchema, other) {
+		other = "QSYS"
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	if err := conn.Raw(func(driverConn any) error {
+		return driverConn.(*db2i.Conn).SetSchema(ctx, other)
+	}); err != nil {
+		conn.Close()
+		t.Fatalf("SetSchema(%s): %v", other, err)
+	}
+	// 2b. Confirm the mutator took effect on THIS checkout.
+	var midSchema string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT TRIM(CURRENT_SCHEMA) FROM SYSIBM.SYSDUMMY1").Scan(&midSchema); err != nil {
+		conn.Close()
+		t.Fatalf("CURRENT_SCHEMA after SetSchema(%s): %v", other, err)
+	}
+	if !strings.EqualFold(midSchema, other) {
+		conn.Close()
+		t.Fatalf("after SetSchema(%s): CURRENT_SCHEMA = %q, want %s", other, midSchema, other)
+	}
+
+	// 3. Release the conn. ResetSession runs on the way back to
+	// the pool and (per v0.7.19) returns ErrBadConn → pool
+	// discards the conn.
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close: %v", err)
+	}
+
+	// 4. Re-issue a query through the pool. If v0.7.19's
+	// dirty-discard works, the pool dialed a fresh conn and the
+	// schema is back to the default. If it doesn't, the stale
+	// conn is reused and we still see `other`.
+	var afterSchema string
+	if err := db.QueryRowContext(ctx,
+		"SELECT TRIM(CURRENT_SCHEMA) FROM SYSIBM.SYSDUMMY1").Scan(&afterSchema); err != nil {
+		t.Fatalf("post-release CURRENT_SCHEMA query: %v", err)
+	}
+	if !strings.EqualFold(afterSchema, defaultSchema) {
+		t.Errorf("post-release CURRENT_SCHEMA = %q, want %q (dirty conn leaked SetSchema(%s) to the next pool checkout)",
+			afterSchema, defaultSchema, other)
+	}
+}
