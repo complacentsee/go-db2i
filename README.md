@@ -1,13 +1,14 @@
 # go-db2i
 
-> **Current: v0.7.17 (2026-05-12)** —
-> `?query-optimize-goal=firstio|allio` pins the server-side
-> optimizer objective on CP 0x3833 in SET_SQL_ATTRIBUTES. Use
-> `firstio` to minimise time-to-first-row (OLTP, streaming
-> reads); `allio` to maximise total throughput (reports, bulk
-> extracts). Default omits the CP entirely (server uses its
-> job default). Builds on v0.7.16 (production-reliability
-> timeouts), v0.7.15 (BatchExec LOB fallback + BeginTx
+> **Current: v0.7.18 (2026-05-12)** — `sql.Named()` parameter
+> binding for stored-procedure CALLs. `db.Exec("CALL mylib.p(?,
+> ?)", sql.Named("P_QTY", &qty), sql.Named("P_CODE", "WIDGET"))`
+> now works regardless of declaration order; the driver does a
+> one-shot `QSYS2.SYSPARMS` lookup to map names to ordinals and
+> reorders args. Mirrors JT400's
+> `CallableStatement.setObject(name, val)`. Lookup result caches
+> on the `*Stmt`. Builds on v0.7.17 (query-optimize-goal),
+> v0.7.16 (timeouts), v0.7.15 (BatchExec LOB / BeginTx
 > isolation), and v0.7.14 (large user-table streaming).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
@@ -48,10 +49,6 @@ JT400-byte-equal session options for the
 A handful of items would benefit a future release but don't block
 production use:
 
-- **`sql.Named("p", ...)` for stored-procedure CALLs** — today,
-  positional only (`CALL proc(?, ?, ?)` with three positional
-  args). The JT400-equivalent `CallableStatement.setObject("p",
-  val)` named-parameter path is on the roadmap.
 - **Password levels 0/1 (DES)** — implemented but spec-validated
   only (every reachable LPAR ships `QPWDLVL ≥ 3`).
 - **Multi-factor auth, Kerberos / GSSAPI signon** — not plumbed;

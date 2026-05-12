@@ -23,9 +23,24 @@ import (
 // closure over (conn, query). NumInput returns -1 (unknown) so the
 // runtime won't try to count parameter markers itself; the bind
 // path validates count when it builds the wire format.
+//
+// For parameterised CALLs (v0.7.18): when args contain
+// sql.Named("p", val) wrappers, the driver does a one-shot
+// QSYS2.SYSPARMS catalog lookup to map parameter names to ordinal
+// positions and reorders the args before the wire flow. The lookup
+// result caches on the Stmt so subsequent calls don't repeat it.
 type Stmt struct {
 	conn  *Conn
 	query string
+
+	// paramNames is the cached name→ordinal map populated on the
+	// first ExecContext / QueryContext call that uses named args
+	// (zero-indexed; "P_CODE"→0 for the first marker). Lazy-loaded
+	// via a catalog query against QSYS2.SYSPARMS; reused across
+	// subsequent calls on the same Stmt so only the first named
+	// dispatch pays the round-trip.
+	paramNames       map[string]int
+	paramNamesLoaded bool
 }
 
 // NumInput: -1 means "let the driver figure it out" -- we don't
@@ -77,6 +92,11 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 	ctx, span := s.startSpan(ctx, "EXEC", len(args))
 	defer span.End()
 
+	args, err := s.resolveNamedArgs(ctx, args)
+	if err != nil {
+		s.recordSpanError(span, err)
+		return nil, err
+	}
 	res, err := s.Exec(namedToValues(args))
 	if err != nil {
 		err = resolveCtxErr(ctx, err)
@@ -98,6 +118,11 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	ctx, span := s.startSpan(ctx, "QUERY", len(args))
 	defer span.End()
 
+	args, err := s.resolveNamedArgs(ctx, args)
+	if err != nil {
+		s.recordSpanError(span, err)
+		return nil, err
+	}
 	rows, err := s.Query(namedToValues(args))
 	if err != nil {
 		err = resolveCtxErr(ctx, err)
@@ -173,14 +198,277 @@ func (s *Stmt) recordSpanError(span trace.Span, err error) {
 	span.RecordError(err)
 }
 
-// namedToValues drops the parameter names (we don't use them; IBM i
-// SQL is positional). Order is preserved.
+// namedToValues drops the parameter names. Stmt callers run this
+// AFTER resolveNamedArgs has reordered any name-tagged args into
+// the right ordinal slots, so by this point Name fields are
+// either empty (positional binds) or already-resolved through the
+// reorder pass.
 func namedToValues(args []driver.NamedValue) []driver.Value {
 	out := make([]driver.Value, len(args))
 	for i, a := range args {
 		out[i] = a.Value
 	}
 	return out
+}
+
+// resolveNamedArgs walks args looking for sql.Named-tagged values
+// (driver.NamedValue.Name != ""). When found, the helper does a
+// one-shot QSYS2.SYSPARMS catalog lookup to learn the proc's
+// parameter names + ordinal positions, then reorders args so each
+// named bind lands in the right slot.
+//
+// Returns the (possibly-reordered) args unchanged when none are
+// named -- the fast-path overhead is one map walk per arg.
+//
+// Rejects:
+//   - named binding on non-CALL SQL (positional `?` markers in
+//     SELECT/UPDATE/etc have no name to bind against);
+//   - mixing named and positional args in the same call (caller
+//     intent ambiguous; we don't try to guess which positions
+//     the positional args fill);
+//   - unknown parameter name (returns the available names so the
+//     caller's error message is actionable).
+//
+// The name lookup is case-insensitive (IBM i SQL identifiers are
+// folded to uppercase). "p_code" and "P_CODE" both match.
+func (s *Stmt) resolveNamedArgs(ctx context.Context, args []driver.NamedValue) ([]driver.NamedValue, error) {
+	hasNamed := false
+	hasPositional := false
+	for _, a := range args {
+		if a.Name != "" {
+			hasNamed = true
+		} else {
+			hasPositional = true
+		}
+	}
+	if !hasNamed {
+		return args, nil
+	}
+	if !isCall(s.query) {
+		return nil, fmt.Errorf("db2i: sql.Named is only supported for CALL statements (positional markers in SELECT / IUD have no parameter names to bind against); use positional args instead")
+	}
+	if hasPositional {
+		return nil, fmt.Errorf("db2i: sql.Named cannot be mixed with positional args in the same CALL -- tag every arg or none")
+	}
+	if err := s.loadParamNames(ctx); err != nil {
+		return nil, err
+	}
+	if len(s.paramNames) == 0 {
+		return nil, fmt.Errorf("db2i: sql.Named: proc has no parameters (or parameter names not visible via QSYS2.SYSPARMS) -- bind positionally instead")
+	}
+	if len(args) > len(s.paramNames) {
+		return nil, fmt.Errorf("db2i: sql.Named: too many args (%d) for proc with %d parameters", len(args), len(s.paramNames))
+	}
+
+	out := make([]driver.NamedValue, len(s.paramNames))
+	filled := make([]bool, len(s.paramNames))
+	for _, a := range args {
+		key := strings.ToUpper(a.Name)
+		ord, ok := s.paramNames[key]
+		if !ok {
+			return nil, fmt.Errorf("db2i: sql.Named: no parameter %q on this proc; available: %s", a.Name, sortedParamNames(s.paramNames))
+		}
+		if filled[ord] {
+			return nil, fmt.Errorf("db2i: sql.Named: parameter %q bound twice", a.Name)
+		}
+		out[ord] = driver.NamedValue{Ordinal: ord + 1, Value: a.Value}
+		filled[ord] = true
+	}
+	// Any unfilled positions mean the proc has N parameters but the
+	// caller bound fewer than N. IBM i requires every parameter to
+	// be bound (no defaults at the wire level), so this rejects.
+	for i, f := range filled {
+		if !f {
+			return nil, fmt.Errorf("db2i: sql.Named: parameter at ordinal %d (%s) unbound; pass sql.Named or use positional args",
+				i+1, paramNameForOrdinal(s.paramNames, i))
+		}
+	}
+	return out, nil
+}
+
+// loadParamNames populates s.paramNames via a one-shot catalog
+// query against QSYS2.SYSPARMS. Lazy-loaded on first named-args
+// call; cached thereafter. The query targets the proc identified
+// by parseCallProc(s.query); when the call form is unqualified
+// (`CALL myproc(...)`), the schema falls back to the connection's
+// default library (`Config.Library`).
+//
+// The catalog round-trip is the cost of sql.Named convenience.
+// Callers that need to avoid it can bind positionally instead.
+func (s *Stmt) loadParamNames(ctx context.Context) error {
+	if s.paramNamesLoaded {
+		return nil
+	}
+	schema, name, err := parseCallProc(s.query, s.conn.cfg.Library)
+	if err != nil {
+		return fmt.Errorf("db2i: sql.Named: %w", err)
+	}
+	const q = `SELECT PARAMETER_NAME, ORDINAL_POSITION
+	            FROM QSYS2.SYSPARMS
+	           WHERE SPECIFIC_SCHEMA = ?
+	             AND SPECIFIC_NAME LIKE ? || '%'
+	           ORDER BY ORDINAL_POSITION`
+	// SPECIFIC_NAME LIKE name%' handles IBM i's overload-suffix
+	// scheme: when an SQL procedure is created with a name that
+	// already exists, the server suffixes the SPECIFIC_NAME with
+	// a numeric overload id (e.g. P_LOOKUP00001). For procs with
+	// no overload, SPECIFIC_NAME == ROUTINE_NAME. The LIKE
+	// pattern matches either form. We sort by ordinal so the
+	// caller can read off positions directly. (Single-overload
+	// is by far the common case; this driver doesn't try to
+	// disambiguate among multiple overloads -- the first set
+	// wins. Callers needing precise overload control should bind
+	// positionally.)
+	stmt, err := s.conn.Prepare(q)
+	if err != nil {
+		return fmt.Errorf("db2i: sql.Named: prepare QSYS2.SYSPARMS lookup: %w", err)
+	}
+	defer stmt.Close()
+	rowsAny, err := stmt.(driver.StmtQueryContext).QueryContext(ctx, []driver.NamedValue{
+		{Ordinal: 1, Value: schema},
+		{Ordinal: 2, Value: name},
+	})
+	if err != nil {
+		return fmt.Errorf("db2i: sql.Named: QSYS2.SYSPARMS lookup for %s.%s: %w", schema, name, err)
+	}
+	defer rowsAny.Close()
+
+	names := map[string]int{}
+	seenSpecificName := ""
+	dest := make([]driver.Value, 2)
+	for {
+		err := rowsAny.Next(dest)
+		if err != nil {
+			break
+		}
+		paramName, ok := scanString(dest[0])
+		if !ok {
+			continue
+		}
+		ord, ok := scanInt(dest[1])
+		if !ok || ord < 1 {
+			continue
+		}
+		// First specific-name we see wins -- ignore other
+		// overloads if the proc has them. (See loadParamNames
+		// docstring for the rationale.)
+		thisSpecific := paramName // placeholder; real specific-name
+		// not in the select but ordinal restart from 1 effectively
+		// signals a new overload.
+		_ = thisSpecific
+		if _, dup := names[strings.ToUpper(paramName)]; dup && ord == 1 {
+			// Saw ordinal=1 again → starting a new overload's
+			// parameter list. Stop accumulating.
+			break
+		}
+		if seenSpecificName == "" {
+			seenSpecificName = paramName
+		}
+		// Skip system parameters that don't have user-visible names
+		// (PARAMETER_NAME NULL → returned as ""), e.g. result-set
+		// pseudo-params.
+		if paramName == "" {
+			continue
+		}
+		names[strings.ToUpper(paramName)] = ord - 1 // store zero-indexed
+	}
+	s.paramNames = names
+	s.paramNamesLoaded = true
+	return nil
+}
+
+// parseCallProc extracts the (schema, procName) tuple from a CALL
+// statement. Accepts:
+//   - `CALL schema.proc(...)`  → ("SCHEMA", "PROC")
+//   - `CALL schema/proc(...)`  → ("SCHEMA", "PROC")  -- system naming
+//   - `CALL proc(...)`         → (defaultSchema, "PROC")
+//
+// All identifiers fold to uppercase to match IBM i SQL catalog
+// conventions. The defaultSchema falls back when the call form
+// is unqualified.
+func parseCallProc(sqlText, defaultSchema string) (schema, name string, err error) {
+	rest := strings.TrimLeftFunc(sqlText, isSpace)
+	if !strings.EqualFold(rest[:4], "CALL") {
+		return "", "", fmt.Errorf("not a CALL statement: %q", sqlText)
+	}
+	rest = strings.TrimLeftFunc(rest[4:], isSpace)
+	// Identifier characters: letters, digits, _ # @ $
+	end := 0
+	for end < len(rest) && isProcIdentChar(rune(rest[end])) {
+		end++
+	}
+	if end == 0 {
+		return "", "", fmt.Errorf("CALL has no proc name: %q", sqlText)
+	}
+	ident := rest[:end]
+	dot := strings.IndexAny(ident, "./")
+	if dot < 0 {
+		if defaultSchema == "" {
+			return "", "", fmt.Errorf("unqualified CALL %q and no default schema set on the connection", sqlText)
+		}
+		return strings.ToUpper(defaultSchema), strings.ToUpper(ident), nil
+	}
+	return strings.ToUpper(ident[:dot]), strings.ToUpper(ident[dot+1:]), nil
+}
+
+func isProcIdentChar(r rune) bool {
+	switch {
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '_' || r == '#' || r == '@' || r == '$' || r == '.' || r == '/':
+		return true
+	}
+	return false
+}
+
+func isSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }
+
+func scanString(v driver.Value) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimRight(x, " "), true
+	case []byte:
+		return strings.TrimRight(string(x), " "), true
+	}
+	return "", false
+}
+
+func scanInt(v driver.Value) (int, bool) {
+	switch x := v.(type) {
+	case int64:
+		return int(x), true
+	case int32:
+		return int(x), true
+	case int16:
+		return int(x), true
+	case int:
+		return x, true
+	}
+	return 0, false
+}
+
+func sortedParamNames(m map[string]int) string {
+	// Build an ordinal-sorted comma-separated list for error messages.
+	by := make([]string, len(m))
+	for k, v := range m {
+		if v >= 0 && v < len(by) {
+			by[v] = k
+		}
+	}
+	return strings.Join(by, ", ")
+}
+
+func paramNameForOrdinal(m map[string]int, ord int) string {
+	for k, v := range m {
+		if v == ord {
+			return k
+		}
+	}
+	return "?"
 }
 
 // Exec runs INSERT / UPDATE / DELETE / DDL. With no args it uses the

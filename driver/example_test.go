@@ -701,6 +701,35 @@ func Example_libraries_runtime() {
 	})
 }
 
+// Example_callWithNamedParameters demonstrates the v0.7.18
+// `sql.Named()` binding for stored-procedure CALLs. The driver
+// looks up parameter names in QSYS2.SYSPARMS on first use and
+// reorders args so each named bind lands in the right slot --
+// declaration order in the source code doesn't have to match the
+// proc's declaration order. Cached on the *Stmt for repeat calls.
+//
+// Mirrors JT400's CallableStatement.setObject(name, val).
+func Example_callWithNamedParameters() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	// Proc: CREATE PROCEDURE mylib.p_lookup
+	//   (IN P_CODE VARCHAR(10), OUT P_NAME VARCHAR(64), OUT P_QTY INTEGER)
+	var name string
+	var qty int
+	_, err := db.Exec("CALL mylib.p_lookup(?, ?, ?)",
+		// Bind order in the Go source is intentionally shuffled --
+		// the catalog lookup maps each name to the correct slot.
+		sql.Named("P_QTY", sql.Out{Dest: &qty}),
+		sql.Named("P_CODE", "WIDGET"),
+		sql.Named("P_NAME", sql.Out{Dest: &name}),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%s has %d in stock\n", strings.TrimSpace(name), qty)
+}
+
 // Example_scanAll iterates a result set via the v0.7.12 db2iiter
 // adapter and Go 1.23's range-over-func. The yield function
 // receives (T, error) per row; break to stop early. Compared to

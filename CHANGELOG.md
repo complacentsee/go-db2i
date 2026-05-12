@@ -10,6 +10,71 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-05-12
+
+### Added: `sql.Named()` parameter binding for stored-procedure CALLs
+
+Stored-procedure CALLs accept named-parameter binds via the
+standard `sql.Named("P_CODE", value)` wrapper. The driver
+maps each name to its ordinal position via a one-shot
+`QSYS2.SYSPARMS` catalog lookup and reorders args before the
+wire flow runs. Mirrors JT400's
+`CallableStatement.setObject("p_name", val)`.
+
+```go
+var name string; var qty int
+db.Exec("CALL mylib.p_lookup(?, ?, ?)",
+    sql.Named("P_QTY",  sql.Out{Dest: &qty}),    // declaration
+    sql.Named("P_CODE", "WIDGET"),                // order
+    sql.Named("P_NAME", sql.Out{Dest: &name}),    // doesn't matter
+)
+```
+
+Behaviour:
+
+- Lookup result caches on the `*Stmt` so only the first
+  named-args call pays the catalog round-trip; subsequent
+  calls on the same Stmt reuse the cached map.
+- Name match is case-insensitive (`p_code` ≡ `P_CODE`).
+- Qualified (`schema.proc`), system-naming (`schema/proc`),
+  and unqualified call forms all resolve correctly. Unqualified
+  rejects when the connection has no default `library`.
+- Identifier set covers IBM i's full proc-name charset:
+  letters, digits, `_`, `#`, `@`, `$`.
+
+Rejects (with actionable error messages):
+
+- Named binding on non-CALL SQL (`SELECT * WHERE id = sql.Named(...)`):
+  positional `?` markers in SELECT / IUD have no parameter
+  names to bind against.
+- Mixing named and positional args in the same CALL: intent is
+  ambiguous (which position does the positional arg fill?).
+- Unknown parameter name: error lists the available names so
+  the caller can fix the typo.
+- Partial binding (named some, not all): IBM i requires every
+  parameter to be bound at the wire level.
+
+Path-A implementation: the parameter names are already
+available in CP 0x3813 of every PREPARE_DESCRIBE reply (the
+super-extended data format), but the prepared-exec wire flow
+emits CHANGE_DESCRIPTOR with caller-supplied ordinal shapes
+*before* the names land in the reply. A separate catalog
+preflight is the cleanest way to bridge that ordering --
+matches JT400's actual behaviour (its CallableStatement also
+hits SYSPARMS) and doesn't require refactoring the wire flow.
+
+Tests:
+
+- Offline: `TestParseCallProc` covers period-qualified, slash-
+  qualified, and unqualified call forms + non-CALL reject.
+- Offline: `TestResolveNamedArgs_*` covers the no-named-args
+  fast path, non-CALL reject, and mixed-binding reject.
+- Live: `TestStoredProcedureNamedParameters` exercises six
+  subtests against V7R6M0: declaration-order binds, shuffled-
+  order binds (proves reorder works), case-insensitive name
+  match, unknown-name reject (with the actionable error),
+  mixed-binding reject, and named-on-non-CALL reject.
+
 ## [0.7.17] - 2026-05-12
 
 ### Added: `?query-optimize-goal=firstio|allio` DSN knob

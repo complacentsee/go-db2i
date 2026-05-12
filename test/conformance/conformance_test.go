@@ -1919,6 +1919,125 @@ func TestStoredProcedureOUT(t *testing.T) {
 	}
 }
 
+// TestStoredProcedureNamedParameters exercises the v0.7.18
+// sql.Named() name-resolution path. P_LOOKUP has IN P_CODE / OUT
+// P_NAME / OUT P_QTY (see Cases.java SetUpStoredProcs). Calling
+// it via sql.Named lets the caller bind args by name regardless
+// of declaration order; the driver does a one-shot QSYS2.SYSPARMS
+// catalog lookup to map name→ordinal and reorders args. Match the
+// expected wire shape only after reorder; result content should
+// match TestStoredProcedureOUT exactly.
+//
+// Subtests:
+//   - All-named in declaration order: should match positional.
+//   - All-named in shuffled order: order shouldn't matter; reorder
+//     puts P_CODE first regardless.
+//   - Case-insensitive name match (lowercase / mixed).
+//   - Mixed named + positional rejects with a clear error.
+//   - Unknown name rejects with an actionable error.
+//   - Non-CALL SQL with named binds rejects up-front.
+func TestStoredProcedureNamedParameters(t *testing.T) {
+	db := openDB(t)
+	setUpStoredProcs(t, db)
+
+	t.Run("declaration order", func(t *testing.T) {
+		var name string
+		var qty int
+		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+			sql.Named("P_CODE", "WIDGET"),
+			sql.Named("P_NAME", sql.Out{Dest: &name}),
+			sql.Named("P_QTY", sql.Out{Dest: &qty}),
+		); err != nil {
+			t.Fatalf("CALL P_LOOKUP (named, decl order): %v", err)
+		}
+		if strings.TrimRight(name, " ") != "Acme Widget" {
+			t.Errorf("OUT name = %q, want %q", name, "Acme Widget")
+		}
+		if qty != 100 {
+			t.Errorf("OUT qty = %d, want 100", qty)
+		}
+	})
+
+	t.Run("shuffled order matches by name", func(t *testing.T) {
+		var name string
+		var qty int
+		// Args supplied in P_QTY, P_CODE, P_NAME order on purpose.
+		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+			sql.Named("P_QTY", sql.Out{Dest: &qty}),
+			sql.Named("P_CODE", "GADGET"),
+			sql.Named("P_NAME", sql.Out{Dest: &name}),
+		); err != nil {
+			t.Fatalf("CALL P_LOOKUP (named, shuffled): %v", err)
+		}
+		if strings.TrimRight(name, " ") != "Acme Gadget" {
+			t.Errorf("OUT name = %q, want %q", name, "Acme Gadget")
+		}
+		if qty != 5 {
+			t.Errorf("OUT qty = %d, want 5", qty)
+		}
+	})
+
+	t.Run("case-insensitive name match", func(t *testing.T) {
+		var name string
+		var qty int
+		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+			sql.Named("p_code", "WIDGET"),
+			sql.Named("p_NAME", sql.Out{Dest: &name}),
+			sql.Named("P_qty", sql.Out{Dest: &qty}),
+		); err != nil {
+			t.Fatalf("CALL P_LOOKUP (case-insensitive names): %v", err)
+		}
+		if strings.TrimRight(name, " ") != "Acme Widget" {
+			t.Errorf("OUT name = %q, want %q", name, "Acme Widget")
+		}
+	})
+
+	t.Run("unknown name rejects", func(t *testing.T) {
+		var qty int
+		_, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+			sql.Named("P_CODE", "WIDGET"),
+			sql.Named("BOGUS", "x"),
+			sql.Named("P_QTY", sql.Out{Dest: &qty}),
+		)
+		if err == nil {
+			t.Fatal("expected error for unknown parameter name")
+		}
+		if !strings.Contains(err.Error(), "BOGUS") &&
+			!strings.Contains(err.Error(), "available") {
+			t.Errorf("error should mention unknown name + available list: %v", err)
+		}
+	})
+
+	t.Run("mixed named + positional rejects", func(t *testing.T) {
+		var name string
+		var qty int
+		_, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+			"WIDGET",
+			sql.Named("P_NAME", sql.Out{Dest: &name}),
+			sql.Named("P_QTY", sql.Out{Dest: &qty}),
+		)
+		if err == nil {
+			t.Fatal("expected reject for mixed named + positional")
+		}
+		if !strings.Contains(err.Error(), "mixed") &&
+			!strings.Contains(err.Error(), "tag every arg or none") {
+			t.Errorf("error %q should mention mixed-binding rule", err)
+		}
+	})
+
+	t.Run("named on non-CALL rejects", func(t *testing.T) {
+		var c int
+		err := db.QueryRow("SELECT COUNT(*) FROM SYSIBM.SYSDUMMY1 WHERE 1 = ?",
+			sql.Named("x", 1)).Scan(&c)
+		if err == nil {
+			t.Fatal("expected reject for named binding on SELECT")
+		}
+		if !strings.Contains(err.Error(), "CALL") {
+			t.Errorf("error should mention CALL-only restriction: %v", err)
+		}
+	})
+}
+
 // TestStoredProcedureMultiResultSet is M9-3's primary live test: a
 // stored procedure that declares DYNAMIC RESULT SETS 2 returns two
 // result sets through Rows + Rows.NextResultSet. P_INVENTORY opens

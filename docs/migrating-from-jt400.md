@@ -189,10 +189,10 @@ mirror `Connection.setSavepoint` etc.); `SetSchema` /
 `iter.Seq2[T, error]` over `*sql.Rows` for `for v, err := range
 db2iiter.ScanAll(rows, scanFn)` loops.
 
-⏭️ **Deferred** (would benefit a future release):
-`CallableStatement.setObject("name", ...)` named-parameter binding
-for stored-procedure CALLs (positional `CALL proc(?, ?, ?)` works
-today).
+⏭️ **Deferred** (would benefit a future release): nothing currently
+on the v0.7.x roadmap. Multi-factor auth and password levels 0/1
+(DES) are documented gaps in the auth chapter; everything else
+that callers exercise through `database/sql` is covered.
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`
