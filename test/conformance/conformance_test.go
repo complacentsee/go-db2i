@@ -1993,6 +1993,186 @@ func sliceEqualEntries(a, b []struct {
 	return true
 }
 
+// TestMultiLibrary is M11-2's primary live test: open a connection
+// with `?libraries=<schema>,GOSPROCS` and confirm that an
+// unqualified `CALL P_INS(?, ?)` resolves to GOSPROCS.P_INS through
+// the job's library list. The "wrong" qualifier path (default DSN
+// with just `?library=<schema>`) returns SQL-204 for the same call
+// -- proving the resolution actually used the new list, not a
+// leftover *LIBL from a previous run.
+//
+// Bootstraps GOSPROCS first (via setUpStoredProcs against the
+// default DSN) so the proc actually exists before the libraries-
+// scoped connection looks for it.
+func TestMultiLibrary(t *testing.T) {
+	// Bootstrap GOSPROCS on the default-DSN connection.
+	bootstrap := openDB(t)
+	setUpStoredProcs(t, bootstrap)
+	bootstrap.Close()
+
+	// Reopen with libraries= appended. The DSN already has
+	// `?library=<schema>` from the harness; the merge rule prepends
+	// it (indicator 'C') and GOSPROCS goes after (indicator 'L').
+	base := dsn(t)
+	sep := "&"
+	if !strings.Contains(base, "?") {
+		sep = "?"
+	}
+	libsDSN := base + sep + "libraries=" + schema() + "," + procLibrary
+	db, err := sql.Open("db2i", libsDSN)
+	if err != nil {
+		t.Fatalf("sql.Open(libs): %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(2)
+
+	// Sanity-baseline: same call against the default-DSN connection
+	// (no libraries=, so GOSPROCS is NOT on *LIBL by default) must
+	// fail with SQL-204. If this baseline passes, the test isn't
+	// proving anything -- e.g. a leftover library list on the job.
+	t.Run("baseline_unqualified_resolves_to_204_without_libraries", func(t *testing.T) {
+		base := openDB(t)
+		defer base.Close()
+		_, err := base.Exec("CALL P_INS(?, ?)", "M11_BASELINE", 1)
+		if err == nil {
+			t.Skip("baseline CALL resolved without libraries= -- job library list may already include GOSPROCS; cannot validate M11-2 conclusively in this environment")
+		}
+		if !strings.Contains(err.Error(), "204") {
+			t.Logf("baseline error (informational; want SQL-204): %v", err)
+		}
+	})
+
+	// The real test: unqualified CALL resolves via libraries=.
+	// CODE is VARCHAR(10) in INS_AUDIT, so keep this <= 10 chars.
+	const code = "M11_MULTI"
+	const qty = 17
+	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+		t.Fatalf("clear INS_AUDIT: %v", err)
+	}
+	if _, err := db.Exec("CALL P_INS(?, ?)", code, qty); err != nil {
+		t.Fatalf("CALL P_INS (unqualified, libraries=...,GOSPROCS): %v", err)
+	}
+	var got int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM "+procLibrary+".INS_AUDIT WHERE CODE = ? AND QTY = ?",
+		code, qty).Scan(&got); err != nil {
+		t.Fatalf("SELECT COUNT(*): %v", err)
+	}
+	if got != 1 {
+		t.Errorf("INS_AUDIT row count for %q/%d = %d, want 1 (proc resolved via libraries=)", code, qty, got)
+	}
+	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+		t.Logf("cleanup: %v", err)
+	}
+}
+
+// TestSystemNaming is M11-3's primary live test: opening with
+// `?naming=system` lets the server resolve `MYLIB/TABLE` (slash
+// qualifier, the JT400 default) and conversely rejects the SQL-
+// naming `MYLIB.TABLE` form. The default `naming=sql` is exercised
+// implicitly by every other test in this file, so this test only
+// has to flip the knob and confirm the wire byte (CP 0x380C value
+// 1) is honoured end-to-end.
+//
+// Strategy: create + drop a one-row table under the harness schema
+// (using SQL naming so the bootstrap doesn't depend on the knob
+// being live), then re-open with `?naming=system` and confirm a
+// `SELECT * FROM <schema>/<table>` query works.
+func TestSystemNaming(t *testing.T) {
+	// Bootstrap a known table via the default-naming connection.
+	bootstrap := openDB(t)
+	defer bootstrap.Close()
+	const tbl = tablePrefix + "M11_NAMING"
+	fqn := schema() + "." + tbl
+	dropSQL := "DROP TABLE " + fqn
+	bootstrap.Exec(dropSQL)
+	if _, err := bootstrap.Exec("CREATE TABLE " + fqn + " (ID INTEGER NOT NULL PRIMARY KEY, V VARCHAR(16))"); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	t.Cleanup(func() { bootstrap.Exec(dropSQL) })
+	if _, err := bootstrap.Exec("INSERT INTO " + fqn + " VALUES (1, 'hello')"); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+
+	// Reopen with system naming. Slash-qualified queries now work;
+	// period-qualified queries get parsed differently (the dot is
+	// treated as schema-separator vs slash-separator).
+	base := dsn(t)
+	sep := "&"
+	if !strings.Contains(base, "?") {
+		sep = "?"
+	}
+	sysDB, err := sql.Open("db2i", base+sep+"naming=system")
+	if err != nil {
+		t.Fatalf("sql.Open(naming=system): %v", err)
+	}
+	defer sysDB.Close()
+
+	// Slash-qualified resolves under system naming.
+	slashFQN := schema() + "/" + tbl
+	var id int
+	var v string
+	if err := sysDB.QueryRow("SELECT ID, V FROM " + slashFQN + " WHERE ID = 1").Scan(&id, &v); err != nil {
+		t.Fatalf("SELECT %s under naming=system: %v", slashFQN, err)
+	}
+	if id != 1 || strings.TrimRight(v, " ") != "hello" {
+		t.Errorf("row = (%d, %q), want (1, %q)", id, v, "hello")
+	}
+}
+
+// TestTimeFormatUSA is M11-4's primary live test: opening with
+// `?time-format=usa` flips CP 0x3809 to index 1 and the server
+// formats subsequent TIME values in 12-hour clock with AM/PM.
+// Default (no knob) returns ISO 24-hour "HH.MM.SS" on V7R6M0.
+//
+// The query CASTs the TIME literal to VARCHAR explicitly so we read
+// the server's chosen rendering as a plain string. (The driver's
+// TIME -> time.Time auto-promotion expects ISO; teaching it to
+// parse JT400's other server-side time-format renderings is a
+// separate work item, larger than M11's scope.)
+func TestTimeFormatUSA(t *testing.T) {
+	// Baseline: default time-format returns the server's HH.MM.SS.
+	baseDB := openDB(t)
+	var baseline string
+	if err := baseDB.QueryRow("VALUES CAST(CAST('13:45:00' AS TIME) AS VARCHAR(11))").Scan(&baseline); err != nil {
+		t.Fatalf("baseline VALUES TIME: %v", err)
+	}
+	baseDB.Close()
+	baseline = strings.TrimSpace(baseline)
+	if baseline == "" {
+		t.Fatalf("baseline TIME formatted to empty string")
+	}
+
+	// USA: re-open with the knob; same query should now return
+	// AM/PM form. The exact wire string depends on the server's
+	// locale, so just assert "AM" or "PM" appears and the value
+	// differs from the baseline.
+	base := dsn(t)
+	sep := "&"
+	if !strings.Contains(base, "?") {
+		sep = "?"
+	}
+	usaDB, err := sql.Open("db2i", base+sep+"time-format=usa")
+	if err != nil {
+		t.Fatalf("sql.Open(time-format=usa): %v", err)
+	}
+	defer usaDB.Close()
+
+	var usa string
+	if err := usaDB.QueryRow("VALUES CAST(CAST('13:45:00' AS TIME) AS VARCHAR(11))").Scan(&usa); err != nil {
+		t.Fatalf("VALUES TIME under time-format=usa: %v", err)
+	}
+	usa = strings.TrimSpace(usa)
+	t.Logf("baseline=%q usa=%q", baseline, usa)
+	upper := strings.ToUpper(usa)
+	if !strings.Contains(upper, "AM") && !strings.Contains(upper, "PM") {
+		t.Errorf("time-format=usa output %q does not contain AM or PM", usa)
+	}
+	if usa == baseline {
+		t.Errorf("time-format=usa output equals baseline %q -- knob had no effect", baseline)
+	}
+}
+
 // TestStoredProcedureINOUT covers the INOUT direction byte (0xF2)
 // via GOSPROCS.P_ROUNDTRIP, which simply increments its single
 // INOUT INTEGER. Seed value 5 -> proc returns 6. Exercises the IN-

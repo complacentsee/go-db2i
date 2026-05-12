@@ -225,6 +225,141 @@ func TestSetSQLAttributesRequestRoutesDateFormatToCP3807(t *testing.T) {
 	}
 }
 
+// TestSetSQLAttributesRequestRoutesNamingToCP380C pins the wire
+// shape for CP 0x380C (NamingConventionParserOption): 0 = sql
+// (default), 1 = system. Mirrors JT400's
+// setNamingConventionParserOption(JDProperties.NAMING). Critical
+// because the CP is always present in the SET_SQL_ATTRIBUTES
+// payload -- a wrong value silently corrupts every unqualified
+// identifier parse on the server.
+func TestSetSQLAttributesRequestRoutesNamingToCP380C(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		naming     int16
+		wantCP380C int16
+	}{
+		{"default sql", 0, 0},
+		{"system", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := DefaultDBAttributesOptions()
+			opts.Naming = tc.naming
+			_, payload, err := SetSQLAttributesRequest(opts)
+			if err != nil {
+				t.Fatalf("SetSQLAttributesRequest: %v", err)
+			}
+			got, ok := findShortCP(payload, 0x380C, 2)
+			if !ok {
+				t.Fatalf("CP 0x380C (NamingConventionParserOption) missing from payload")
+			}
+			if int16(got) != tc.wantCP380C {
+				t.Errorf("CP 0x380C = %d, want %d", int16(got), tc.wantCP380C)
+			}
+		})
+	}
+}
+
+// TestSetSQLAttributesRequestTimeAndSeparatorCPs pins the wire shape
+// for the four passthrough CPs: 0x3809 (TimeFormat), 0x3808
+// (DateSeparator override), 0x380A (TimeSeparator), 0x380B
+// (DecimalSeparator). Default values (-1) omit the CP; explicit
+// non-negative values land on the wire at the matching index.
+func TestSetSQLAttributesRequestTimeAndSeparatorCPs(t *testing.T) {
+	t.Run("all defaults omit CPs", func(t *testing.T) {
+		opts := DefaultDBAttributesOptions()
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		for _, cp := range []uint16{0x3809, 0x380A, 0x380B} {
+			if _, present := findShortCP(payload, cp, 2); present {
+				t.Errorf("CP 0x%04X present, want absent under defaults", cp)
+			}
+		}
+	})
+	t.Run("explicit time-format usa", func(t *testing.T) {
+		opts := DefaultDBAttributesOptions()
+		opts.TimeFormat = 1 // usa per JT400 TIME_FORMAT index
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		got, ok := findShortCP(payload, 0x3809, 2)
+		if !ok {
+			t.Fatalf("CP 0x3809 (TimeFormat) missing")
+		}
+		if got != 1 {
+			t.Errorf("CP 0x3809 = %d, want 1 (usa)", got)
+		}
+	})
+	t.Run("explicit time-separator colon", func(t *testing.T) {
+		opts := DefaultDBAttributesOptions()
+		opts.TimeSeparator = 0 // colon
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		got, ok := findShortCP(payload, 0x380A, 2)
+		if !ok {
+			t.Fatalf("CP 0x380A (TimeSeparator) missing")
+		}
+		if got != 0 {
+			t.Errorf("CP 0x380A = %d, want 0 (colon)", got)
+		}
+	})
+	t.Run("explicit decimal-separator comma", func(t *testing.T) {
+		opts := DefaultDBAttributesOptions()
+		opts.DecimalSeparator = 1 // comma
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		got, ok := findShortCP(payload, 0x380B, 2)
+		if !ok {
+			t.Fatalf("CP 0x380B (DecimalSeparator) missing")
+		}
+		if got != 1 {
+			t.Errorf("CP 0x380B = %d, want 1 (comma)", got)
+		}
+	})
+	t.Run("explicit date-separator overrides date-format inference", func(t *testing.T) {
+		// DateFormatISO normally implies CP 0x3808 = 1 (dash).
+		// An explicit DateSeparator must override that inference.
+		opts := DefaultDBAttributesOptions()
+		opts.DateFormat = DateFormatISO
+		opts.DateSeparator = 2 // period
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		got, ok := findShortCP(payload, 0x3808, 2)
+		if !ok {
+			t.Fatalf("CP 0x3808 missing")
+		}
+		if got != 2 {
+			t.Errorf("CP 0x3808 = %d, want 2 (period override)", got)
+		}
+	})
+	t.Run("date-format alone still emits its inferred separator", func(t *testing.T) {
+		// Regression net for the override path: when DateSeparator
+		// is -1 (default), the date-format-inferred value still
+		// reaches the wire so old fixtures stay byte-equal.
+		opts := DefaultDBAttributesOptions()
+		opts.DateFormat = DateFormatISO
+		_, payload, err := SetSQLAttributesRequest(opts)
+		if err != nil {
+			t.Fatalf("SetSQLAttributesRequest: %v", err)
+		}
+		got, ok := findShortCP(payload, 0x3808, 2)
+		if !ok {
+			t.Fatalf("CP 0x3808 missing")
+		}
+		if got != 1 {
+			t.Errorf("CP 0x3808 = %d, want 1 (dash, inferred from ISO)", got)
+		}
+	})
+}
+
 // findShortCP scans an SET_SQL_ATTRIBUTES payload looking for a
 // CP/LL/data triple at the given codepoint and returns the integer
 // value of the data bytes (1- or 2-byte). The payload starts with a

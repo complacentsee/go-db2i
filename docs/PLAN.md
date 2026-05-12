@@ -831,7 +831,69 @@ and the corresponding client-side cache-hit fast path
 (`Stmt.Prepare` lookup + `ExecutePreparedCached` bypass). The wire
 shape that ENABLES it is in place (extended-dynamic populates the
 server *PGM, RETURN_PACKAGE downloads its contents); the missing
-piece is the per-entry decode.
+piece is the per-entry decode. **Update (v0.7.1):** the per-
+statement decoder and cache-hit fast path landed in v0.7.1, with
+v0.7.2 / v0.7.4 / v0.7.7 / v0.7.8 each extending coverage to
+more statement kinds (SELECT, IUD, CALL under criteria=extended,
+OUT/INOUT). v0.7.9 / v0.7.10 then added batched IUD + MERGE via
+CP `0x381F`. The "deferred" item is closed.
+
+### M11 — JT400 parity cleanup (complete 2026-05-12)
+
+Closes the four "⏭️ Deferred" DSN gaps in
+`docs/migrating-from-jt400.md` plus the long-tracked bug #15.
+Each sub-item is a small, bounded passthrough; cumulative effect
+is that every documented JT400 JDBC URL property is now either
+supported, accepted with documented limits, or explicitly out of
+scope. All sub-items shipped + live-validated on IBM Cloud
+V7R6M0 (2026-05-12).
+
+- **M11-1** ✅ — Bug #15 (CCSID-273 byte-mode codec asymmetry)
+  was already closed in commit `d84cb3e` (2026-05-10). The
+  investigation hypothesis (codec asymmetry) was disproven; the
+  failure was a test-setup bug. M11-1 verified the offline
+  `TestCCSID273ByteRoundTripIsBijective` proves all 256 wire
+  bytes round-trip cleanly.
+- **M11-2** ✅ — `?libraries=A,B,C` multi-library DSN.
+  `hostserver.NDBAddLibraryListMulti` emits the CP `0x3813`
+  multi-entry list-of-libraries parameter with EBCDIC indicators
+  `'C'` (first) and `'L'` (rest). `Config.Libraries []string`
+  composes with `Config.Library` via JT400's prepend-default-
+  schema rule. Live `TestMultiLibrary` confirms an unqualified
+  `CALL P_INS(?, ?)` resolves to `GOSPROCS.P_INS` under
+  `?libraries=GOTEST,GOSPROCS`. Pre-existing single-library wire
+  shape is byte-identical (`TestSentBytesMatchNDBAddLibraryListFixture`).
+- **M11-3** ✅ — `?naming=system` DSN value. `Config.Naming`
+  (default `sql`) routes to CP `0x380C`
+  (NamingConventionParserOption). Also fed into the package-suffix
+  derivation so cross-driver byte-equality on the wire `*PGM`
+  name is preserved. Live `TestSystemNaming` confirms a slash-
+  qualified `SELECT ID, V FROM GOTEST/GOSQL_M11_NAMING WHERE
+  ID = 1` resolves under `?naming=system`.
+- **M11-4** ✅ — `?time-format` + 3 separator passthroughs.
+  Four new DSN keys (`time-format`, `date-separator`,
+  `time-separator`, `decimal-separator`) map to CPs `0x3809` /
+  `0x3808` / `0x380A` / `0x380B`. `DBAttributesOptions` uses
+  int8 fields with `-1` = omit the CP. An explicit
+  `DateSeparator` overrides the date-format-inferred CP `0x3808`.
+  Default values keep the v0.7.10 wire shape byte-equal (asserted
+  by every `TestSentBytesMatch*` fixture). Live
+  `TestTimeFormatUSA` confirms a TIME literal renders as
+  `13:45:00` default vs `01:45 PM` under `?time-format=usa`.
+- **M11-5** ✅ — Documentation refresh. Moved the four ⏭️ rows in
+  `docs/migrating-from-jt400.md` to ✅ (DSN-key count 21 → 27).
+  Added entries to `docs/configuration.md`. CHANGELOG entry per
+  sub-item under `[0.7.11]`. README banner bumped to v0.7.11.
+
+**M11 complete 2026-05-12.** All five items shipped + live-
+validated. Public API additions (`Config.Libraries`,
+`Config.Naming`, `Config.TimeFormat`, `Config.DateSeparator`,
+`Config.TimeSeparator`, `Config.DecimalSeparator`) are purely
+additive; no breaking changes vs v0.7.10. **Caveat:** the
+driver's TIME → `time.Time` auto-promotion still only handles
+ISO format; non-ISO `?time-format=` callers must `Scan` into a
+`string`. Widening the promotion is a separate, larger work
+item (touches the row-decode path).
 
 ## Working rhythm
 

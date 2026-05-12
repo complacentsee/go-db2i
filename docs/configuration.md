@@ -17,8 +17,14 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | Key                          | Default      | Notes                                                                 |
 |------------------------------|--------------|-----------------------------------------------------------------------|
 | `library`                    | (none)       | Default schema. Sent via `SET_SQL_ATTRIBUTES` CP `0x380F`. Upper-cased.|
+| `libraries`                  | (none)       | v0.7.11. Comma- or space-separated list of libraries to add to the job's library list at connect. First entry tagged indicator `'C'`, the rest `'L'`. Composes with `library=` via the JT400 prepend-default-schema rule. Each entry must be 1-10 chars from `[A-Z 0-9 _ # @ $]`. |
+| `naming`                     | `sql`        | v0.7.11. One of `sql` (period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`; the JT400 default). Maps to CP `0x380C` (NamingConventionParserOption). |
 | `signon-port`                | 8476 / 9476  | Override the as-signon port.                                          |
 | `date`                       | `job`        | One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`.        |
+| `time-format`                | `job`        | v0.7.11. One of `job`, `hms`, `usa`, `iso`, `eur`, `jis`. Maps to CP `0x3809` (TimeFormatParserOption). `usa` renders TIME values as 12-hour clock with AM/PM. *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string`. |
+| `date-separator`             | (job)        | v0.7.11. One of `job`, `/`, `-`, `.`, `,`, `space` (or named aliases `slash`/`dash`/`period`/`comma`/`space`). Maps to CP `0x3808` (DateSeparatorParserOption); overrides the date-format-inferred default. |
+| `time-separator`             | (job)        | v0.7.11. One of `job`, `:`, `.`, `,`, `space` (or `colon`/`period`/`comma`/`space`). Maps to CP `0x380A`. |
+| `decimal-separator`          | (job)        | v0.7.11. One of `job`, `.`, `,` (or `period`/`comma`). Maps to CP `0x380B`. |
 | `isolation`                  | `none`       | One of `none`, `cs`, `all`, `rs`, `rr`. `db.Begin()` flips to `cs`.   |
 | `lob`                        | `materialise`| Or `stream` to get `*db2i.LOBReader`.                             |
 | `ccsid`                      | `0` (auto)   | Override the connection-level application-data CCSID.                 |

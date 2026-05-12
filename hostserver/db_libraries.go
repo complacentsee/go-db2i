@@ -25,34 +25,68 @@ const (
 )
 
 // NDBAddLibraryList sends one NDB-service ADD_LIBRARY_LIST frame to
-// conn. library is one EBCDIC library name (10 chars max,
-// space-padded by JTOpen but the NDB protocol just takes the
-// declared length).
-//
-// JTOpen hardcodes the indicator byte to ASCII 'C' (0x43),
-// converted to EBCDIC 0xC3, with no public name for the meaning.
-// We pass the same byte; if any future caller needs a different
-// indicator (e.g. 'F' for front-of-list, 'B' for back),
-// generalise this helper then.
+// conn for a single library. Thin wrapper around
+// NDBAddLibraryListMulti preserved for callers that only need one
+// library; equivalent to NDBAddLibraryListMulti(conn, []string{library},
+// correlationID).
 func NDBAddLibraryList(conn io.ReadWriter, library string, correlationID uint32) error {
-	libBytes, err := ebcdic.CCSID37.Encode(library)
-	if err != nil {
-		return fmt.Errorf("hostserver: encode library name: %w", err)
+	return NDBAddLibraryListMulti(conn, []string{library}, correlationID)
+}
+
+// NDBAddLibraryListMulti sends one NDB-service ADD_LIBRARY_LIST frame
+// carrying N libraries. The first library is tagged with indicator
+// 'C' (EBCDIC 0xC3, "current SQL schema") and the rest with 'L'
+// (EBCDIC 0xD3, "append to back of *LIBL"). This matches JT400's
+// JDLibraryList behaviour when the user supplies a comma-separated
+// libraries= list without an explicit *LIBL token and the default
+// schema is the first item -- the common migration shape.
+//
+// The CP 0x3813 layout mirrors JT400's
+// DBBaseRequestDS.addParameter(int, ConvTable, char[], String[]):
+//
+//	CCSID(2) + numLibraries(2) +
+//	per library: indicator(1) + length(2) + name bytes
+//
+// JTOpen tolerates errorClass=5 returnCode=1301 ("library not added;
+// already in *LIBL or doesn't exist") and treats it as a warning.
+// We do the same -- the goal is to flip the SQL service's session
+// state, not to actually mutate *LIBL.
+func NDBAddLibraryListMulti(conn io.ReadWriter, libraries []string, correlationID uint32) error {
+	if len(libraries) == 0 {
+		return fmt.Errorf("hostserver: NDBAddLibraryListMulti called with zero libraries")
 	}
-	if len(libBytes) == 0 || len(libBytes) > 0xFFFF {
-		return fmt.Errorf("hostserver: library name length %d out of range", len(libBytes))
+	if len(libraries) > 0xFFFF {
+		return fmt.Errorf("hostserver: too many libraries %d (max 65535)", len(libraries))
 	}
 
-	// Library-list param layout (mirrors DBBaseRequestDS
-	// addParameter(int, ConvTable, char[], String[])):
-	//   CCSID(2) + numLibraries(2) +
-	//   per library: indicator(1) + length(2) + name bytes
-	libParam := make([]byte, 4+1+2+len(libBytes))
-	binary.BigEndian.PutUint16(libParam[0:2], 273) // CCSID
-	binary.BigEndian.PutUint16(libParam[2:4], 1)   // numLibraries = 1
-	libParam[4] = 0xC3                             // EBCDIC 'C' indicator
-	binary.BigEndian.PutUint16(libParam[5:7], uint16(len(libBytes)))
-	copy(libParam[7:], libBytes)
+	encoded := make([][]byte, len(libraries))
+	total := 4 // CCSID(2) + numLibraries(2)
+	for i, lib := range libraries {
+		libBytes, err := ebcdic.CCSID37.Encode(lib)
+		if err != nil {
+			return fmt.Errorf("hostserver: encode library name %q: %w", lib, err)
+		}
+		if len(libBytes) == 0 || len(libBytes) > 0xFFFF {
+			return fmt.Errorf("hostserver: library name %q length %d out of range", lib, len(libBytes))
+		}
+		encoded[i] = libBytes
+		total += 3 + len(libBytes) // indicator(1) + length(2) + name
+	}
+
+	libParam := make([]byte, total)
+	binary.BigEndian.PutUint16(libParam[0:2], 273)                       // CCSID
+	binary.BigEndian.PutUint16(libParam[2:4], uint16(len(libraries)))    // numLibraries
+	off := 4
+	for i, libBytes := range encoded {
+		if i == 0 {
+			libParam[off] = 0xC3 // EBCDIC 'C' -- current SQL schema
+		} else {
+			libParam[off] = 0xD3 // EBCDIC 'L' -- append to back of *LIBL
+		}
+		binary.BigEndian.PutUint16(libParam[off+1:off+3], uint16(len(libBytes)))
+		copy(libParam[off+3:], libBytes)
+		off += 3 + len(libBytes)
+	}
 
 	tpl := DBRequestTemplate{
 		ORSBitmap: ORSReturnData | ORSDataCompression, // return data + RLE
@@ -81,10 +115,6 @@ func NDBAddLibraryList(conn io.ReadWriter, library string, correlationID uint32)
 	if err != nil {
 		return fmt.Errorf("hostserver: parse NDB reply: %w", err)
 	}
-	// JTOpen tolerates errorClass=5 returnCode=1301 ("library not
-	// added; already in *LIBL or doesn't exist") and treats it as
-	// a warning. We do the same -- the goal is to flip the SQL
-	// service's session state, not to actually mutate *LIBL.
 	if rep.ErrorClass != 0 && !(rep.ErrorClass == 5 && rep.ReturnCode == 1301) {
 		return fmt.Errorf("hostserver: NDB ADD_LIBRARY_LIST errorClass=%d returnCode=%d", rep.ErrorClass, rep.ReturnCode)
 	}

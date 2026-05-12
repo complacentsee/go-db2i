@@ -347,6 +347,35 @@ func Example_dsnKnobs() {
 	_ = db.Ping()
 }
 
+// Example_libraries pins the `libraries=A,B,C` knob, the multi-
+// library counterpart to `library=`. Mirrors JT400's
+// `libraries=APPLIB,DATALIB,QGPL` JDBC URL property: every entry is
+// added to the job's library list at connect time so unqualified
+// SQL names resolve without explicit `MYLIB.TABLE` qualification.
+//
+// Semantics:
+//   - The first entry is tagged with EBCDIC indicator 'C' (current
+//     SQL schema); the rest with 'L' (append to back of *LIBL).
+//   - `?library=X` is the default SQL schema. When both knobs are
+//     set and X is not already in the list, X is prepended (the
+//     JT400 JDLibraryList prepend rule).
+//   - Accepted separators: comma + space (the URL "+" decodes to
+//     space, so `?libraries=A+B+C` works).
+//
+// Useful for RPG/CL migrations where the job profile already
+// exposes multiple libraries on *LIBL and the same SQL text must
+// resolve names from any of them.
+func Example_libraries() {
+	dsn := "db2i://USER:PASSWORD@host.example.com/" +
+		"?libraries=APPLIB,DATALIB,QGPL"
+	db, err := sql.Open("db2i", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+	_ = db.Ping()
+}
+
 // Example_contextTimeout shows that QueryContext / ExecContext
 // honor ctx cancellation. A canceled ctx unblocks the in-flight
 // host-server read via net.Conn.SetDeadline; the call returns

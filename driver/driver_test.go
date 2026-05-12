@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -138,6 +139,245 @@ func TestParseDSNUppercasesLibrary(t *testing.T) {
 	if cfg.Library != "MYLIB" {
 		t.Errorf("Library = %q, want MYLIB (uppercased)", cfg.Library)
 	}
+}
+
+// TestParseDSNLibraries pins parsing of the multi-library DSN
+// knob, including the JT400-style separator set (`,` ` ` `:` `;`),
+// canonicalisation to uppercase, and the prepend-default-schema
+// merge rule when both `library=` and `libraries=` are present.
+func TestParseDSNLibraries(t *testing.T) {
+	t.Run("comma-separated", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?libraries=liba,libb,libc")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		want := []string{"LIBA", "LIBB", "LIBC"}
+		if !reflect.DeepEqual(cfg.Libraries, want) {
+			t.Errorf("Libraries = %v, want %v", cfg.Libraries, want)
+		}
+		// Default schema falls back to Libraries[0] when no
+		// explicit library= is set.
+		if cfg.Library != "LIBA" {
+			t.Errorf("Library (derived) = %q, want LIBA", cfg.Library)
+		}
+	})
+	t.Run("space-separated via URL '+'", func(t *testing.T) {
+		// JT400 accepts " ,:;" as delimiters; comma + space are the
+		// two that pass cleanly through URL query parsing without
+		// being reserved characters. URL "+" decodes to space, so
+		// migrators with `libraries=A B C` JDBC URLs can paste in.
+		cfg, err := parseDSN("db2i://u:p@h/?libraries=liba+libb+libc")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		want := []string{"LIBA", "LIBB", "LIBC"}
+		if !reflect.DeepEqual(cfg.Libraries, want) {
+			t.Errorf("Libraries = %v, want %v", cfg.Libraries, want)
+		}
+	})
+	t.Run("library prepends to libraries when distinct", func(t *testing.T) {
+		// When both knobs are set and `library=` is not already in
+		// the list, JT400 prepends it; we mirror.
+		cfg, err := parseDSN("db2i://u:p@h/?library=appdb&libraries=lib1,lib2")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		want := []string{"APPDB", "LIB1", "LIB2"}
+		if !reflect.DeepEqual(cfg.Libraries, want) {
+			t.Errorf("Libraries = %v, want %v", cfg.Libraries, want)
+		}
+		if cfg.Library != "APPDB" {
+			t.Errorf("Library = %q, want APPDB", cfg.Library)
+		}
+	})
+	t.Run("library duplicate in libraries kept as-is", func(t *testing.T) {
+		// When `library=` is already present in `libraries=`, the
+		// existing order wins (no double-prepend).
+		cfg, err := parseDSN("db2i://u:p@h/?library=lib2&libraries=lib1,lib2,lib3")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		want := []string{"LIB1", "LIB2", "LIB3"}
+		if !reflect.DeepEqual(cfg.Libraries, want) {
+			t.Errorf("Libraries = %v, want %v", cfg.Libraries, want)
+		}
+	})
+	t.Run("single library no list", func(t *testing.T) {
+		// Pre-v0.7.11 callers used `library=X` alone and expected
+		// Libraries empty -- the connect path then sends a single-
+		// entry list, byte-identical to the historical wire shape.
+		cfg, err := parseDSN("db2i://u:p@h/?library=ONLYDB")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if len(cfg.Libraries) != 0 {
+			t.Errorf("Libraries = %v, want empty for library-only DSN", cfg.Libraries)
+		}
+		if cfg.Library != "ONLYDB" {
+			t.Errorf("Library = %q, want ONLYDB", cfg.Library)
+		}
+	})
+	t.Run("invalid char rejected", func(t *testing.T) {
+		_, err := parseDSN("db2i://u:p@h/?libraries=lib-a,lib*b")
+		if err == nil {
+			t.Fatal("expected error for invalid library char")
+		}
+		if !strings.Contains(err.Error(), "lib-a") {
+			t.Errorf("error %q does not name the offending value", err)
+		}
+	})
+	t.Run("too long rejected", func(t *testing.T) {
+		// Library identifiers max 10 chars on IBM i.
+		_, err := parseDSN("db2i://u:p@h/?libraries=verylonglib1")
+		if err == nil {
+			t.Fatal("expected error for >10-char library")
+		}
+	})
+	t.Run("empty after split rejected", func(t *testing.T) {
+		// All-separators yields zero entries -- treated as a config
+		// error so a typo doesn't silently no-op.
+		_, err := parseDSN("db2i://u:p@h/?libraries=,,,")
+		if err == nil {
+			t.Fatal("expected error for empty libraries list")
+		}
+	})
+}
+
+// TestParseDSNNaming pins parsing of the SQL-naming-vs-system-naming
+// knob. JT400 default is "system"; go-db2i default is "sql" for
+// historical reasons (the driver shipped pre-v0.7.11 with naming
+// hardcoded to sql). Both values map to a single CP 0x380C wire byte.
+func TestParseDSNNaming(t *testing.T) {
+	t.Run("default sql", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?library=mylib")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.Naming != "sql" {
+			t.Errorf("Naming = %q, want sql (default)", cfg.Naming)
+		}
+	})
+	t.Run("explicit system", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?library=mylib&naming=system")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.Naming != "system" {
+			t.Errorf("Naming = %q, want system", cfg.Naming)
+		}
+	})
+	t.Run("case insensitive", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?naming=SYSTEM")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.Naming != "system" {
+			t.Errorf("Naming = %q, want system (lowercased)", cfg.Naming)
+		}
+	})
+	t.Run("invalid rejected", func(t *testing.T) {
+		_, err := parseDSN("db2i://u:p@h/?naming=foo")
+		if err == nil {
+			t.Fatal("expected error for bogus naming value")
+		}
+		if !strings.Contains(err.Error(), "foo") {
+			t.Errorf("error %q does not name the offending value", err)
+		}
+	})
+}
+
+// TestParseDSNTimeAndSeparators pins parsing of the four new
+// passthrough knobs (`time-format`, `date-separator`, `time-separator`,
+// `decimal-separator`). Each maps to a single CP in
+// SET_SQL_ATTRIBUTES; an empty / "job" value leaves the CP omitted
+// so the server falls back to the job default.
+func TestParseDSNTimeAndSeparators(t *testing.T) {
+	t.Run("defaults are empty", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?library=mylib")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.TimeFormat != "" || cfg.DateSeparator != "" || cfg.TimeSeparator != "" || cfg.DecimalSeparator != "" {
+			t.Errorf("defaults: TimeFormat=%q DateSep=%q TimeSep=%q DecSep=%q (want all empty)",
+				cfg.TimeFormat, cfg.DateSeparator, cfg.TimeSeparator, cfg.DecimalSeparator)
+		}
+	})
+	t.Run("time-format usa", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?time-format=usa")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.TimeFormat != "usa" {
+			t.Errorf("TimeFormat = %q, want usa", cfg.TimeFormat)
+		}
+	})
+	t.Run("time-format job clears", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?time-format=job")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.TimeFormat != "" {
+			t.Errorf("TimeFormat = %q, want empty for `job`", cfg.TimeFormat)
+		}
+	})
+	t.Run("date-separator literal", func(t *testing.T) {
+		// "/" is URL-safe inside a query value.
+		cfg, err := parseDSN("db2i://u:p@h/?date-separator=/")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.DateSeparator != "/" {
+			t.Errorf("DateSeparator = %q, want /", cfg.DateSeparator)
+		}
+	})
+	t.Run("date-separator named alias", func(t *testing.T) {
+		// "dash" folds to "-" so the DSN survives any URL encoder.
+		cfg, err := parseDSN("db2i://u:p@h/?date-separator=dash")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.DateSeparator != "-" {
+			t.Errorf("DateSeparator = %q, want -", cfg.DateSeparator)
+		}
+	})
+	t.Run("time-separator colon", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?time-separator=colon")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.TimeSeparator != ":" {
+			t.Errorf("TimeSeparator = %q, want :", cfg.TimeSeparator)
+		}
+	})
+	t.Run("decimal-separator comma", func(t *testing.T) {
+		cfg, err := parseDSN("db2i://u:p@h/?decimal-separator=comma")
+		if err != nil {
+			t.Fatalf("parseDSN: %v", err)
+		}
+		if cfg.DecimalSeparator != "," {
+			t.Errorf("DecimalSeparator = %q, want ,", cfg.DecimalSeparator)
+		}
+	})
+	t.Run("invalid time-format rejected", func(t *testing.T) {
+		_, err := parseDSN("db2i://u:p@h/?time-format=fortnight")
+		if err == nil {
+			t.Fatal("expected error for bogus time-format")
+		}
+	})
+	t.Run("invalid date-separator rejected", func(t *testing.T) {
+		_, err := parseDSN("db2i://u:p@h/?date-separator=tab")
+		if err == nil {
+			t.Fatal("expected error for bogus date-separator")
+		}
+	})
+	t.Run("invalid decimal-separator rejected", func(t *testing.T) {
+		// Space isn't a legal decimal separator on IBM i; reject so a
+		// typo doesn't silently no-op.
+		_, err := parseDSN("db2i://u:p@h/?decimal-separator=space")
+		if err == nil {
+			t.Fatal("expected error for bogus decimal-separator")
+		}
+	})
 }
 
 func TestParseDSNErrorWrapped(t *testing.T) {

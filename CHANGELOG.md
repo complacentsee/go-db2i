@@ -10,6 +10,95 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-05-12
+
+### Added: `?libraries=A,B,C` multi-library DSN (M11-2)
+
+`hostserver.NDBAddLibraryListMulti` emits the CP `0x3813` multi-
+entry list-of-libraries parameter, with EBCDIC indicator `'C'`
+(0xC3) for the first library and `'L'` (0xD3) for the rest --
+matching JT400's
+[`JDLibraryList`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDLibraryList.java)
+behaviour for a comma-separated list without an explicit `*LIBL`
+token. Driver-side `Config.Libraries []string` plus
+`?libraries=A,B,C` (comma or space delimited) plumb through to
+the new helper. `?library=X&libraries=A,B,C` composes the two
+knobs via JT400's prepend-default-schema rule.
+
+The single-library wire shape is byte-identical to v0.7.10 --
+`NDBAddLibraryList(conn, name, id)` is now a thin wrapper around
+`NDBAddLibraryListMulti(conn, []string{name}, id)`, and the
+existing `TestSentBytesMatchNDBAddLibraryListFixture` against
+`select_dummy.trace` still passes.
+
+Live evidence (`TestMultiLibrary`, V7R6M0, 2026-05-12): unqualified
+`CALL P_INS(?, ?)` resolves to `GOSPROCS.P_INS` under
+`?libraries=GOTEST,GOSPROCS`; the same call against a connection
+without the knob fails (baseline subtest), proving the wire path
+is the load-bearing piece.
+
+### Added: `?naming=system` DSN value (M11-3)
+
+`Config.Naming` (default `sql`, accepts `sql` | `system`) routes
+to CP `0x380C` (NamingConventionParserOption) in
+SET_SQL_ATTRIBUTES -- the single byte JT400 sends via
+[`setNamingConventionParserOption`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/DBSQLAttributesDS.java).
+The historical go-db2i default was hardcoded `sql`; the new
+`system` value lets RPG/CL shops migrating from JT400 keep their
+slash-qualified SQL (`MYLIB/TABLE`) working without rewriting
+every statement. The flag also feeds the package-suffix
+derivation (idx3 in
+[`JDPackageManager.buildSuffix`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDPackageManager.java))
+so cross-driver byte-equality on the wire `*PGM` name is preserved.
+
+Live evidence (`TestSystemNaming`, V7R6M0): `SELECT ID, V FROM
+GOTEST/GOSQL_M11_NAMING WHERE ID = 1` resolves under
+`?naming=system`. Offline
+`TestSetSQLAttributesRequestRoutesNamingToCP380C` pins both wire
+bytes (0=sql, 1=system).
+
+### Added: `?time-format` + 3 separator DSN passthroughs (M11-4)
+
+Four new DSN keys map directly to SET_SQL_ATTRIBUTES CPs the
+driver previously hardcoded as job-default. Each is independent
+and composable:
+
+| DSN key | CP | Values |
+|---|---|---|
+| `time-format`    | `0x3809` | `job` (default), `hms`, `usa`, `iso`, `eur`, `jis` |
+| `date-separator` | `0x3808` | `job`, `/`, `-`, `.`, `,`, `space` (or `slash`/`dash`/`period`/`comma`/`space`) |
+| `time-separator` | `0x380A` | `job`, `:`, `.`, `,`, `space` (or `colon`/`period`/`comma`/`space`) |
+| `decimal-separator` | `0x380B` | `job`, `.`, `,` (or `period`/`comma`) |
+
+`DBAttributesOptions` exposes these as int8 fields with `-1` =
+omit the CP. An explicit `DateSeparator` overrides the
+date-format-inferred CP `0x3808` value; setting nothing keeps
+the v0.7.10 wire shape byte-equal (asserted by every existing
+`TestSentBytesMatch*` fixture test).
+
+Live evidence (`TestTimeFormatUSA`, V7R6M0): a TIME literal
+renders as `13:45:00` under the default and `01:45 PM` under
+`?time-format=usa` -- unambiguous proof the CP is honoured
+end-to-end. *Note:* the driver's TIME-column `time.Time`
+auto-promotion only understands ISO formats; callers using
+non-ISO `time-format` should `Scan` into a string (or cast the
+column to `VARCHAR` in the SQL). Widening the promotion is a
+separate, larger work item.
+
+### Closed: bug #15 (already shipped in v0.5.x)
+
+Investigation that opened in the M7 residual plan ("CCSID-273
+byte-mode codec asymmetry") was resolved in commit
+[`d84cb3e`](https://github.com/complacentsee/go-db2i/commit/d84cb3e)
+on 2026-05-10 -- the failure was a test-setup bug (CLOB column
+inherited job CCSID 37 on the English-locale LPAR while the test
+payload was pre-encoded as CCSID 273), not a codec asymmetry.
+M11-1 verified no work remains: offline
+`TestCCSID273ByteRoundTripIsBijective` confirms all 256 wire
+bytes round-trip cleanly through Decode-then-Encode.
+
+## [0.7.10] - 2026-05-12
+
 ### Added: MERGE batching in `Conn.BatchExec`
 
 `MERGE INTO ... USING (VALUES (?, ?)) ...` batches now go through

@@ -63,11 +63,11 @@ the *Notes* column says why.
 | JT400 | go-db2i | Notes |
 |---|---|---|
 | `date format` | `date` | Values: `job` / `iso` / `usa` / `eur` / `jis` / `mdy` / `dmy` / `ymd`. Default `job`. |
-| `time format` | — | Driver currently emits `*JOB` for time format. Pin via session-init SET TIME FORMAT until wired. |
-| `date separator`, `time separator`, `decimal separator` | — | We send `*BLANK` for separators (server picks based on date/time format). |
-| `naming` | — (always `sql`) | go-db2i always sends `naming=sql` (CP `0x3812 = 0`); JT400 defaults to `system` which uses `MYLIB/TABLE`-style qualification. Cross-job CL that mixes both styles must rewrite to SQL-style (`MYLIB.TABLE`) before being run via this driver. |
+| `time format` | `time-format` | M11. Values: `job` (default) / `hms` / `usa` / `iso` / `eur` / `jis`. Maps to CP `0x3809` (TimeFormatParserOption). *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string` or cast the column to `VARCHAR` in the SQL. |
+| `date separator` / `time separator` / `decimal separator` | `date-separator` / `time-separator` / `decimal-separator` | M11. Each accepts the literal separator character (`/`, `-`, `.`, `,`, `:`, ` `) or a named alias (`slash`, `dash`, `period`, `comma`, `colon`, `space`). `job` (default) leaves the CP off so the server picks. Maps to CP `0x3808` / `0x380A` / `0x380B` respectively. |
+| `naming` | `naming` | M11. `sql` (default; period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`; the JT400 default). Set to `system` when migrating RPG/CL apps whose embedded SQL uses slash qualifiers. Maps to CP `0x380C` (NamingConventionParserOption). |
 | `transaction isolation` / `commitment control` | `isolation` | Values: `none` (default, matches IBM i Db2 autocommit-permissive baseline) / `cs` / `all` / `rr` / `rs`. `db.Begin()` flips to `cs` transparently. |
-| `libraries` | `library` (one only) | JT400 accepts a list (`/LIBA,LIBB,LIBC` or `libraries=LIBA LIBB LIBC`). go-db2i takes one default library; add others via SQL-side `CALL QSYS2.QCMDEXC('ADDLIBLE LIBB')` after connect, or trigger them in the user profile's INLPGM. |
+| `libraries` | `libraries` | M11. Comma- or space-separated list (e.g. `?libraries=APPLIB,DATALIB,QGPL`). The first entry is tagged with EBCDIC indicator `'C'` (current SQL schema); the rest with `'L'` (back of `*LIBL`). When both `library=X` and `libraries=A,B,C` are set and X is not in the list, X is prepended (JT400 prepend-default-schema rule). |
 | `qaqqinilib` | — | Custom optimizer attribute library not plumbed. |
 | `prompt` | — (always off) | We never prompt; missing credentials surface as `parseDSN` errors. |
 
@@ -167,7 +167,9 @@ the *Notes* column says why.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (21 DSN keys): `library`, `signon-port`, `date`, `isolation`, `lob`,
+✅ **Supported** (27 DSN keys): `library`, `libraries`, `naming`,
+`signon-port`, `date`, `time-format`, `date-separator`,
+`time-separator`, `decimal-separator`, `isolation`, `lob`,
 `lob-threshold`, `ccsid`, `extended-metadata`, `tls`,
 `tls-insecure-skip-verify`, `tls-server-name`, `extended-dynamic`,
 `package`, `package-library`, `package-cache`, `package-error`,
@@ -175,9 +177,9 @@ the *Notes* column says why.
 `package-clear` (accept-warn-log), plus programmatic
 `Config.Logger` / `Config.LogSQL` / `Config.Tracer`.
 
-⏭️ **Deferred** (would benefit a future release): `libraries` (multi-
-library default list), `time format`, separators, `query optimize goal`,
-`socket timeout` (per-op default).
+⏭️ **Deferred** (would benefit a future release): `query optimize goal`,
+`socket timeout` (per-op default), `login timeout` (per-op
+override; today the dial timeout is the only knob).
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`

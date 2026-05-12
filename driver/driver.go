@@ -230,6 +230,74 @@ type Config struct {
 	DBPort     int    // as-database service (default 8471)
 	SignonPort int    // as-signon service  (default 8476)
 	Library    string // default SQL schema; empty = no override
+
+	// Libraries is the full ordered list of libraries to add to the
+	// job's library list at connect time, mirroring JT400's
+	// `libraries=A,B,C` JDBC URL knob. The first library is tagged on
+	// the wire with EBCDIC indicator 'C' (current SQL schema); the
+	// rest with 'L' (append to back of *LIBL).
+	//
+	// Composition with Library:
+	//   - Libraries empty + Library set:   wire = [Library]
+	//   - Libraries set + Library empty:   wire = Libraries (Library
+	//                                      becomes Libraries[0] after
+	//                                      parse so db.namespace is set)
+	//   - Both set:                        Library is prepended to
+	//                                      Libraries unless already
+	//                                      present (matches JT400's
+	//                                      JDLibraryList prepend rule)
+	//
+	// DSN value accepts comma / space / colon / semicolon as
+	// separators (JT400-compatible): `?libraries=LIBA,LIBB LIBC`.
+	Libraries []string
+
+	// Naming selects the SQL naming convention the server applies
+	// when parsing unqualified identifiers. "sql" (default) parses
+	// MYLIB.TABLE; "system" parses MYLIB/TABLE. Mirrors JT400's
+	// `naming=sql|system` JDBC URL knob; the go-db2i default is
+	// "sql" (JT400 default is "system"). Set to "system" for
+	// migrations from RPG/CL apps whose SQL embeds slash
+	// qualifiers. Wire mapping: CP 0x380C value 0 vs 1.
+	Naming string
+
+	// TimeFormat overrides the server-side time-output format for
+	// TIME columns and TIME literal parsing. Mirrors JT400's
+	// `time format` JDBC URL knob. Values:
+	//   ""    job-default (CP 0x3809 omitted)
+	//   hms   24-hour HH.MM.SS (the historical IBM i default)
+	//   usa   HH:MM AM|PM
+	//   iso   HH.MM.SS
+	//   eur   HH.MM.SS
+	//   jis   HH:MM:SS
+	TimeFormat string
+
+	// DateSeparator overrides the date-string separator the server
+	// uses when formatting DATE columns and parsing DATE literals.
+	// Mirrors JT400's `date separator` JDBC URL knob. Values:
+	//   ""   default (driven by DateFormat or job)
+	//   /    slash       (DATE_SEPARATOR index 0)
+	//   -    dash        (index 1)
+	//   .    period      (index 2)
+	//   ,    comma       (index 3)
+	//   " "  space       (index 4)
+	DateSeparator string
+
+	// TimeSeparator overrides the time-string separator. Mirrors
+	// JT400's `time separator`. Values:
+	//   ""   default (job)
+	//   :    colon   (TIME_SEPARATOR index 0)
+	//   .    period  (index 1)
+	//   ,    comma   (index 2)
+	//   " "  space   (index 3)
+	TimeSeparator string
+
+	// DecimalSeparator overrides the decimal point character used
+	// in decimal-literal parsing and output. Mirrors JT400's
+	// `decimal separator`. Values:
+	//   ""   default (job)
+	//   .    period  (DECIMAL_SEPARATOR index 0)
+	//   ,    comma   (index 1)
+	DecimalSeparator string
 	DateFormat byte   // hostserver.DateFormat* constant; 0 = JOB
 	Isolation  int16  // hostserver.Isolation* constant; -1 = default (CS)
 
@@ -451,6 +519,7 @@ func DefaultConfig() Config {
 		PackageError:    "warning",
 		PackageCriteria: "default",
 		PackageCCSID:    13488,
+		Naming:          "sql",
 	}
 }
 
@@ -549,6 +618,80 @@ func parseDSN(dsn string) (*Config, error) {
 
 	if v := q.Get("library"); v != "" {
 		cfg.Library = strings.ToUpper(v)
+	}
+	if v := q.Get("naming"); v != "" {
+		switch strings.ToLower(v) {
+		case "sql", "system":
+			cfg.Naming = strings.ToLower(v)
+		default:
+			return nil, fmt.Errorf("invalid naming %q (want sql|system)", v)
+		}
+	}
+	if v := q.Get("time-format"); v != "" {
+		switch strings.ToLower(v) {
+		case "job":
+			cfg.TimeFormat = ""
+		case "hms", "usa", "iso", "eur", "jis":
+			cfg.TimeFormat = strings.ToLower(v)
+		default:
+			return nil, fmt.Errorf("invalid time-format %q (want job|hms|usa|iso|eur|jis)", v)
+		}
+	}
+	if v := q.Get("date-separator"); v != "" {
+		// Accept the literal character or the named alias to make
+		// the DSN survive URL encoding gymnastics for "/" and " ".
+		switch v {
+		case "job", "":
+			cfg.DateSeparator = ""
+		case "/", "slash", "-", "dash", ".", "period", ",", "comma", " ", "space":
+			cfg.DateSeparator = canonSep(v)
+		default:
+			return nil, fmt.Errorf(`invalid date-separator %q (want job|/|-|.|,|space)`, v)
+		}
+	}
+	if v := q.Get("time-separator"); v != "" {
+		switch v {
+		case "job", "":
+			cfg.TimeSeparator = ""
+		case ":", "colon", ".", "period", ",", "comma", " ", "space":
+			cfg.TimeSeparator = canonSep(v)
+		default:
+			return nil, fmt.Errorf(`invalid time-separator %q (want job|:|.|,|space)`, v)
+		}
+	}
+	if v := q.Get("decimal-separator"); v != "" {
+		switch v {
+		case "job", "":
+			cfg.DecimalSeparator = ""
+		case ".", "period", ",", "comma":
+			cfg.DecimalSeparator = canonSep(v)
+		default:
+			return nil, fmt.Errorf(`invalid decimal-separator %q (want job|.|,)`, v)
+		}
+	}
+	if v := q.Get("libraries"); v != "" {
+		// JT400's JDLibraryList tokenises on " ,:;" so a single DSN
+		// value can use whichever separator the migrator finds least
+		// awkward to URL-encode. Empty tokens (consecutive separators)
+		// are silently dropped to match JT400.
+		raw := strings.FieldsFunc(v, func(r rune) bool {
+			return r == ',' || r == ' ' || r == ':' || r == ';'
+		})
+		libs := make([]string, 0, len(raw))
+		for _, tok := range raw {
+			canon := strings.ToUpper(strings.TrimSpace(tok))
+			if canon == "" {
+				continue
+			}
+			if err := validateLibraryName(canon); err != nil {
+				return nil, fmt.Errorf("invalid libraries entry %q: %w", tok, err)
+			}
+			libs = append(libs, canon)
+		}
+		if len(libs) == 0 {
+			return nil, fmt.Errorf("libraries %q parsed to zero non-empty entries", v)
+		}
+		cfg.Libraries = libs
 	}
 	if v := q.Get("signon-port"); v != "" {
 		port, err := strconv.Atoi(v)
@@ -731,7 +874,144 @@ func parseDSN(dsn string) (*Config, error) {
 	if cfg.ExtendedDynamic && cfg.PackageName == "" {
 		return nil, fmt.Errorf("extended-dynamic=true requires package=<name>")
 	}
+	// Normalise the Library / Libraries pair. After this block,
+	// cfg.Libraries (if any) carries the full wire ordering and
+	// cfg.Library is the default SQL schema (Libraries[0] when not
+	// explicitly set), matching JT400's JDLibraryList behaviour.
+	if len(cfg.Libraries) > 0 {
+		if cfg.Library == "" {
+			cfg.Library = cfg.Libraries[0]
+		} else if !libsContain(cfg.Libraries, cfg.Library) {
+			// Library is the default SQL schema; prepend it so the
+			// wire shape lists it first with indicator 'C'.
+			cfg.Libraries = append([]string{cfg.Library}, cfg.Libraries...)
+		}
+	}
 	return &cfg, nil
+}
+
+// canonSep folds a separator alias (e.g. "slash", "space") onto its
+// single-character canonical form. Callers should validate the input
+// against an allow-list before calling -- this helper only translates,
+// it does not check.
+func canonSep(s string) string {
+	switch s {
+	case "slash":
+		return "/"
+	case "dash":
+		return "-"
+	case "period":
+		return "."
+	case "comma":
+		return ","
+	case "space":
+		return " "
+	case "colon":
+		return ":"
+	}
+	return s
+}
+
+// dateSeparatorWireIndex maps a single-character date separator to
+// the CP 0x3808 (DateSeparatorParserOption) integer index. Empty
+// returns (-1, false) so callers can omit the CP. Values follow
+// JT400's DATE_SEPARATOR choice order in JDProperties.java.
+func dateSeparatorWireIndex(s string) (int8, bool) {
+	switch s {
+	case "/":
+		return 0, true
+	case "-":
+		return 1, true
+	case ".":
+		return 2, true
+	case ",":
+		return 3, true
+	case " ":
+		return 4, true
+	}
+	return -1, false
+}
+
+// timeSeparatorWireIndex maps a single-character time separator to
+// the CP 0x380A (TimeSeparatorParserOption) integer index. Values
+// follow JT400's TIME_SEPARATOR choice order.
+func timeSeparatorWireIndex(s string) (int8, bool) {
+	switch s {
+	case ":":
+		return 0, true
+	case ".":
+		return 1, true
+	case ",":
+		return 2, true
+	case " ":
+		return 3, true
+	}
+	return -1, false
+}
+
+// decimalSeparatorWireIndex maps a single-character decimal separator
+// to the CP 0x380B (DecimalSeparatorParserOption) integer index.
+// Values follow JT400's DECIMAL_SEPARATOR choice order.
+func decimalSeparatorWireIndex(s string) (int8, bool) {
+	switch s {
+	case ".":
+		return 0, true
+	case ",":
+		return 1, true
+	}
+	return -1, false
+}
+
+// timeFormatWireIndex maps a time-format name to the CP 0x3809
+// (TimeFormatParserOption) integer index. Values follow JT400's
+// TIME_FORMAT choice order: hms=0, usa=1, iso=2, eur=3, jis=4.
+func timeFormatWireIndex(s string) (int8, bool) {
+	switch strings.ToLower(s) {
+	case "hms":
+		return 0, true
+	case "usa":
+		return 1, true
+	case "iso":
+		return 2, true
+	case "eur":
+		return 3, true
+	case "jis":
+		return 4, true
+	}
+	return -1, false
+}
+
+// libsContain reports whether libs (already uppercase) holds name.
+func libsContain(libs []string, name string) bool {
+	for _, l := range libs {
+		if l == name {
+			return true
+		}
+	}
+	return false
+}
+
+// validateLibraryName enforces the IBM-i object-name rules for a
+// library identifier sent on the NDB ADD_LIBRARY_LIST wire: 1..10
+// characters from [A-Z 0-9 _ # @ $]. Callers should canonicalise to
+// uppercase before invoking.
+func validateLibraryName(s string) error {
+	if s == "" {
+		return fmt.Errorf("empty")
+	}
+	if len(s) > 10 {
+		return fmt.Errorf("length %d > 10", len(s))
+	}
+	for i, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '#' || r == '@' || r == '$':
+		default:
+			return fmt.Errorf("char %q at offset %d not in [A-Z0-9_#@$]", r, i)
+		}
+	}
+	return nil
 }
 
 // canonPackageIdent normalises a package or library identifier to

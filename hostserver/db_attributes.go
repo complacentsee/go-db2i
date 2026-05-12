@@ -93,6 +93,44 @@ type DBAttributesOptions struct {
 	// file PREPAREd statements into the *PGM even with otherwise
 	// byte-identical wire shape.
 	ExtendedDynamic bool
+
+	// Naming selects the SQL naming convention the server applies
+	// when parsing unqualified identifiers. 0 = "sql" (period-
+	// qualified, MYLIB.TABLE; the JT400 NAMING_SQL value and the
+	// go-db2i historical default); 1 = "system" (slash-qualified,
+	// MYLIB/TABLE; the JT400 NAMING_SYSTEM value and JT400's
+	// default for migrating RPG/CL shops). Sent as CP 0x380C
+	// (NamingConventionParserOption) in SET_SQL_ATTRIBUTES; mirrors
+	// JT400's setNamingConventionParserOption per JDProperties.NAMING.
+	Naming int16
+
+	// TimeFormat overrides CP 0x3809 (TimeFormatParserOption).
+	// Values mirror JT400's TIME_FORMAT choice index:
+	//   0=hms 1=usa 2=iso 3=eur 4=jis
+	// -1 (default) = omit the CP so the server falls back to the
+	// job-default time format. JT400 NOTSET behaves identically.
+	TimeFormat int8
+
+	// DateSeparator overrides CP 0x3808 (DateSeparatorParserOption).
+	// Values mirror JT400's DATE_SEPARATOR choice index:
+	//   0='/' 1='-' 2='.' 3=',' 4=' '
+	// -1 (default) = let the date-format-inferred separator (or the
+	// job default) win. Explicit setting takes precedence over the
+	// DateFormat-derived value emitted by the dateSeparatorParserIndex
+	// helper.
+	DateSeparator int8
+
+	// TimeSeparator overrides CP 0x380A (TimeSeparatorParserOption).
+	// Values mirror JT400's TIME_SEPARATOR choice index:
+	//   0=':' 1='.' 2=',' 3=' '
+	// -1 (default) = omit the CP (job default).
+	TimeSeparator int8
+
+	// DecimalSeparator overrides CP 0x380B (DecimalSeparatorParserOption).
+	// Values mirror JT400's DECIMAL_SEPARATOR choice index:
+	//   0='.' 1=','
+	// -1 (default) = omit the CP (job default).
+	DecimalSeparator int8
 }
 
 // DateFormat constants for DBAttributesOptions.DateFormat. The
@@ -236,6 +274,13 @@ func DefaultDBAttributesOptions() DBAttributesOptions {
 		// on this for fixture parity; transaction-using callers
 		// flip to IsolationReadCommitted via WithIsolation.
 		IsolationLevel: IsolationDefault,
+		// TimeFormat / DateSeparator / TimeSeparator /
+		// DecimalSeparator: -1 = omit the CP entirely so the server
+		// falls back to the job default (JT400 NOTSET behaviour).
+		TimeFormat:       -1,
+		DateSeparator:    -1,
+		TimeSeparator:    -1,
+		DecimalSeparator: -1,
 	}
 }
 
@@ -317,22 +362,70 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 	// byte-identical wire shape on the PREPARE_DESCRIBE itself.
 	// Wire order must match JT400's: 0x3807-0x380B come immediately
 	// after 0x380E and before 0x380C/0x3823/0x380F.
+	// CP 0x3807 (date format) + CP 0x3808 (date separator) +
+	// CP 0x3809 (time format) + CP 0x380A (time separator) +
+	// CP 0x380B (decimal separator). Each is emitted independently:
+	//
+	//   - ExtendedDynamic forces all five with JT400's documented
+	//     defaults so the package-suffix derivation has a definite
+	//     value to key on (CP 0x3807/0x3808 land via the existing
+	//     DateFormat path; 0x3809/0x380A/0x380B default to 0).
+	//   - DateFormat (non-JOB) emits 0x3807 + auto-derived 0x3808.
+	//   - An explicit opts.DateSeparator (>= 0) overrides the auto-
+	//     derived 0x3808.
+	//   - opts.TimeFormat / TimeSeparator / DecimalSeparator emit
+	//     0x3809 / 0x380A / 0x380B when non-negative; otherwise the
+	//     CP is omitted so the server uses its job default.
 	if opts.ExtendedDynamic {
 		params = append(params,
 			DBParamShort(0x3807, 0x0001), // DateFormatParserOption: mdy
-			DBParamShort(0x3808, 0x0000), // DateSeparatorParserOption: slash
-			DBParamShort(0x3809, 0x0000), // TimeFormatParserOption: hms
-			DBParamShort(0x380A, 0x0000), // TimeSeparatorParserOption: colon
-			DBParamShort(0x380B, 0x0000), // DecimalSeparatorParserOption: period
 		)
-	} else if idx, ok := dateFormatParserIndex(opts.DateFormat); ok {
-		params = append(params, DBParamShort(0x3807, idx))
-		if sep, ok := dateSeparatorParserIndex(opts.DateFormat); ok {
-			params = append(params, DBParamShort(0x3808, sep))
+		dateSep := int16(0) // slash (JT400's ExtendedDynamic default)
+		if opts.DateSeparator >= 0 {
+			dateSep = int16(opts.DateSeparator)
+		}
+		params = append(params, DBParamShort(0x3808, dateSep))
+		timeFmt := int16(0) // hms
+		if opts.TimeFormat >= 0 {
+			timeFmt = int16(opts.TimeFormat)
+		}
+		params = append(params, DBParamShort(0x3809, timeFmt))
+		timeSep := int16(0) // colon
+		if opts.TimeSeparator >= 0 {
+			timeSep = int16(opts.TimeSeparator)
+		}
+		params = append(params, DBParamShort(0x380A, timeSep))
+		decSep := int16(0) // period
+		if opts.DecimalSeparator >= 0 {
+			decSep = int16(opts.DecimalSeparator)
+		}
+		params = append(params, DBParamShort(0x380B, decSep))
+	} else {
+		if idx, ok := dateFormatParserIndex(opts.DateFormat); ok {
+			params = append(params, DBParamShort(0x3807, idx))
+			// Caller may override the auto-derived separator.
+			if opts.DateSeparator >= 0 {
+				params = append(params, DBParamShort(0x3808, int16(opts.DateSeparator)))
+			} else if sep, ok := dateSeparatorParserIndex(opts.DateFormat); ok {
+				params = append(params, DBParamShort(0x3808, sep))
+			}
+		} else if opts.DateSeparator >= 0 {
+			// Explicit DateSeparator without a DateFormat: emit
+			// 0x3808 alone (JT400 allows separators without format).
+			params = append(params, DBParamShort(0x3808, int16(opts.DateSeparator)))
+		}
+		if opts.TimeFormat >= 0 {
+			params = append(params, DBParamShort(0x3809, int16(opts.TimeFormat)))
+		}
+		if opts.TimeSeparator >= 0 {
+			params = append(params, DBParamShort(0x380A, int16(opts.TimeSeparator)))
+		}
+		if opts.DecimalSeparator >= 0 {
+			params = append(params, DBParamShort(0x380B, int16(opts.DecimalSeparator)))
 		}
 	}
 	params = append(params,
-		DBParamShort(0x380C, 0x0000),
+		DBParamShort(0x380C, opts.Naming), // NamingConventionParserOption: 0=sql, 1=system
 		DBParamShort(0x3823, 0x0000),
 	)
 	// 0x380F default SQL library -- variable-length CCSID-tagged.

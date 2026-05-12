@@ -95,15 +95,46 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		// file PREPAREd statements into the *PGM.
 		opts.ExtendedDynamic = true
 	}
+	// CP 0x380C NamingConventionParserOption: 0 = sql (period-
+	// qualified, MYLIB.TABLE; go-db2i historical default), 1 =
+	// system (slash-qualified, MYLIB/TABLE; JT400 default).
+	if c.cfg.Naming == "system" {
+		opts.Naming = 1
+	}
+	// CP 0x3809 (TimeFormatParserOption) / 0x380A (TimeSeparator) /
+	// 0x3808 (DateSeparator) / 0x380B (DecimalSeparator). Empty
+	// Config strings leave the int8 at -1 so SetSQLAttributesRequest
+	// omits the CP and the server picks the job default. Each
+	// individual knob composes cleanly with the others -- a caller
+	// can override just the time separator without touching dates.
+	if idx, ok := timeFormatWireIndex(c.cfg.TimeFormat); ok {
+		opts.TimeFormat = idx
+	}
+	if idx, ok := dateSeparatorWireIndex(c.cfg.DateSeparator); ok {
+		opts.DateSeparator = idx
+	}
+	if idx, ok := timeSeparatorWireIndex(c.cfg.TimeSeparator); ok {
+		opts.TimeSeparator = idx
+	}
+	if idx, ok := decimalSeparatorWireIndex(c.cfg.DecimalSeparator); ok {
+		opts.DecimalSeparator = idx
+	}
 	if _, err := hostserver.SetSQLAttributes(db, opts); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("db2i: set sql attributes: %w", err)
 	}
-	if c.cfg.Library != "" {
-		// NDB ADD_LIBRARY_LIST is treated as a session-init
-		// handshake by PUB400 V7R5; we send it whenever we have
-		// a library to set so PREPARE doesn't get -401.
-		if err := hostserver.NDBAddLibraryList(db, c.cfg.Library, 2); err != nil {
+	// NDB ADD_LIBRARY_LIST is treated as a session-init handshake by
+	// PUB400 V7R5; we send it whenever we have any library to add so
+	// PREPARE doesn't get -401. When Libraries is set we send the
+	// full ordered list in one frame (indicator 'C' for the first,
+	// 'L' for the rest). When only Library is set we send a single-
+	// entry list -- byte-identical to the pre-v0.7.11 wire shape.
+	libs := c.cfg.Libraries
+	if len(libs) == 0 && c.cfg.Library != "" {
+		libs = []string{c.cfg.Library}
+	}
+	if len(libs) > 0 {
+		if err := hostserver.NDBAddLibraryListMulti(db, libs, 2); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("db2i: add library list: %w", err)
 		}
@@ -211,12 +242,16 @@ func (c *Conn) initPackage(ctx context.Context) error {
 // load-bearing rule lives in
 // project_db2i_m10_jt400_interop.md.
 func (c *Conn) packageOptions() hostserver.PackageOptions {
+	naming := 0 // sql -- the historical go-db2i default
+	if c.cfg.Naming == "system" {
+		naming = 1 // system -- JT400's NAMING_SYSTEM enum value
+	}
 	opts := hostserver.PackageOptions{
-		// Naming defaults to 0 (sql); go-db2i's hostserver layer
-		// uses period-qualified SQL identifiers, which is JT400's
-		// "naming=sql" enum value. There is no separate Config
-		// knob for system naming today.
-		Naming: 0,
+		// Naming participates in the package-name suffix derivation
+		// (idx3 in JT400's JDPackageManager.buildSuffix). Wrong
+		// value here breaks cross-driver byte-equality, so it must
+		// track Config.Naming.
+		Naming: naming,
 	}
 	switch c.cfg.DateFormat {
 	case hostserver.DateFormatJOB:

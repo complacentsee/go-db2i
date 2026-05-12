@@ -1,17 +1,23 @@
 # go-db2i
 
-> **Current: v0.7.10 (2026-05-12)** — extends `Conn.BatchExec` to
-> MERGE (alongside the v0.7.9 INSERT / UPDATE / DELETE support).
-> MERGE batches use the same IBM i "block insert" wire shape
-> (CP `0x381F` multi-row); JT400 enables this on V7R1+ via the
-> same `canBeBatched_` flag IUD uses
-> ([`JDSQLStatement.java:644-648`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java)).
-> Same ~358× speed-up profile as the v0.7.9 IUD path. See
+> **Current: v0.7.11 (2026-05-12)** — JT400 parity cleanup
+> (M11). Five new DSN knobs close out the last documented
+> migration gaps: `?libraries=A,B,C` for multi-library job-list
+> setup (M11-2); `?naming=system` for slash-qualified
+> `MYLIB/TABLE` identifiers (M11-3); `?time-format`,
+> `?date-separator`, `?time-separator`, `?decimal-separator`
+> for the four passthroughs that were previously hardcoded as
+> job-default (M11-4). Bug #15 was confirmed already closed in
+> commit `d84cb3e` (M11-1). All sub-items live-validated on
+> V7R6M0. See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
+> for the full JT400 URL → go-db2i DSN mapping
+> (27 supported keys now).
+>
+> Builds on v0.7.10 (MERGE batching), v0.7.9 (IUD batching via
+> CP `0x381F`), v0.7.8 (OUT-CALL cache-hit dispatch), v0.7.7
+> (`criteria=extended`). See
 > [`docs/performance.md`](./docs/performance.md#bulk-iud--merge-via-connbatchexec-v079-v0710)
-> for the perf numbers. Builds on v0.7.8's OUT-CALL
-> cache-hit dispatch and v0.7.7's `criteria=extended`. See
-> [`docs/performance.md`](./docs/performance.md#bulk-iud-via-connbatchexec-v079)
-> for the perf numbers and
+> for the batched-IUD/MERGE perf numbers and
 > [`docs/configuration.md`](./docs/configuration.md#driver-typed-methods-sqlconnraw)
 > for the access pattern.
 
