@@ -652,6 +652,67 @@ func TestPackageEligibleFor_SelectCriteria(t *testing.T) {
 	}
 }
 
+// TestPackageEligibleFor_ExtendedCriteria covers the v0.7.7
+// criteria=extended rule: same as default, PLUS CALL / VALUES /
+// WITH. JT400's third criterion.
+func TestPackageEligibleFor_ExtendedCriteria(t *testing.T) {
+	conn := &Conn{
+		cfg: &Config{
+			ExtendedDynamic: true,
+			PackageName:     "APP",
+			PackageLibrary:  "QGPL",
+			PackageError:    "warning",
+			PackageCriteria: "extended",
+		},
+		pkg: &fakePackageManager,
+	}
+	cases := []struct {
+		sql       string
+		hasParams bool
+		want      bool
+	}{
+		// Default-criteria inheritances (still eligible).
+		{"SELECT ? FROM SYSIBM.SYSDUMMY1", true, true},
+		{"INSERT INTO T VALUES (?)", true, true},
+		{"INSERT INTO T (A) SELECT 1 FROM SYSIBM.SYSDUMMY1", false, true},
+		{"SELECT * FROM T FOR UPDATE", false, true},
+		{"DECLARE C CURSOR FOR SELECT 1", false, true},
+		// Extended-criteria additions (newly eligible).
+		{"CALL MYLIB.MYPROC(?, ?)", true, true},
+		{"CALL MYLIB.MYPROC()", false, true},
+		{"VALUES 1", false, true},
+		{"WITH C AS (SELECT 1) SELECT * FROM C", false, true},
+		// CURRENT OF still wins over everything.
+		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
+		// Plain unparameterised SELECT is NOT inherited from
+		// "select" -- extended doesn't widen that branch. Matches
+		// JT400 by construction (each criterion is a discrete
+		// switch, not cumulative).
+		{"SELECT 1 FROM SYSIBM.SYSDUMMY1", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			got := conn.packageEligibleFor(tc.sql, tc.hasParams)
+			if got != tc.want {
+				t.Errorf("packageEligibleFor(%q, hasParams=%v) = %v, want %v",
+					tc.sql, tc.hasParams, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseDSN_PackageCriteriaExtended pins the v0.7.7 DSN parser
+// acceptance of the third criterion value.
+func TestParseDSN_PackageCriteriaExtended(t *testing.T) {
+	cfg, err := parseDSN("db2i://u:p@h/?extended-dynamic=true&package=APP&package-criteria=extended")
+	if err != nil {
+		t.Fatalf("parseDSN extended: %v", err)
+	}
+	if cfg.PackageCriteria != "extended" {
+		t.Errorf("PackageCriteria = %q, want %q", cfg.PackageCriteria, "extended")
+	}
+}
+
 // TestHandlePackageError covers the three Config.PackageError modes:
 // "exception" returns the original error (caller fails the connect),
 // "warning" + "none" return nil (caller soft-disables the package).

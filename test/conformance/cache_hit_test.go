@@ -985,6 +985,175 @@ func TestCacheHit_CriteriaSelect(t *testing.T) {
 	})
 }
 
+// TestCacheHit_CriteriaExtended (v0.7.7) verifies the third
+// criterion files VALUES / WITH / CALL on top of default and that
+// the cache-hit fast path picks them up on a second connection.
+// Companion to TestCacheHit_CriteriaSelect.
+//
+// The OUT-CALL refresh-skip behaviour lives in its own test
+// (TestCacheHit_CriteriaExtended_OutCallSkipsRefresh) because it
+// needs a separate slog buffer to count refresh lines, not just
+// dispatch lines.
+func TestCacheHit_CriteriaExtended(t *testing.T) {
+	t.Run("default rejects VALUES", func(t *testing.T) {
+		const q = `VALUES 1`
+		db, _ := openDBWithPackageCache(t, "default")
+		defer db.Close()
+		_ = db.QueryRow(q).Scan(new(int))
+		db2, buf := openDBWithPackageCache(t, "default")
+		defer db2.Close()
+		_ = db2.QueryRow(q).Scan(new(int))
+		expectNoCacheHit(t, buf)
+	})
+
+	t.Run("extended accepts VALUES", func(t *testing.T) {
+		requireFiling(t)
+		const q = `VALUES 1`
+
+		wipeDB := openDB(t)
+		defer wipeDB.Close()
+		wipePackage(t, wipeDB, cachePackageName)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		warm, _ := openDBWithPackageCache(t, "extended")
+		warmConn, err := warm.Conn(ctx)
+		if err != nil {
+			t.Fatalf("warm conn: %v", err)
+		}
+		for i := 0; i < filingPrepareCount; i++ {
+			if err := warmConn.QueryRowContext(ctx, q).Scan(new(int)); err != nil {
+				warmConn.Close()
+				t.Fatalf("warm iter %d: %v", i, err)
+			}
+		}
+		warmConn.Close()
+		warm.Close()
+
+		db, buf := openDBWithPackageCache(t, "extended")
+		defer db.Close()
+		var v int
+		if err := db.QueryRow(q).Scan(&v); err != nil {
+			t.Fatalf("VALUES dispatch: %v", err)
+		}
+		if v != 1 {
+			t.Errorf("VALUES 1 returned %d", v)
+		}
+		expectCacheHit(t, buf, cacheHitQueryMsg)
+	})
+
+	t.Run("extended accepts IN-only CALL", func(t *testing.T) {
+		requireFiling(t)
+		setupDB := openDB(t)
+		setUpStoredProcs(t, setupDB)
+		setupDB.Close()
+
+		wipeDB := openDB(t)
+		defer wipeDB.Close()
+		wipePackage(t, wipeDB, cachePackageName)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		const code = "M10EXTCALL" // P_INS.P_CODE is VARCHAR(10)
+		callSQL := "CALL " + procLibrary + ".P_INS(?, ?)"
+		// File P_INS through threshold under extended; pin one conn
+		// so all PREPAREs land on the same QZDASOINIT job.
+		warm, _ := openDBWithPackageCache(t, "extended")
+		warmConn, err := warm.Conn(ctx)
+		if err != nil {
+			t.Fatalf("warm conn: %v", err)
+		}
+		if _, err := warmConn.ExecContext(ctx,
+			"DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+			t.Fatalf("clear INS_AUDIT: %v", err)
+		}
+		for i := 0; i < filingPrepareCount; i++ {
+			if _, err := warmConn.ExecContext(ctx, callSQL, code, i); err != nil {
+				warmConn.Close()
+				t.Fatalf("warm CALL iter %d: %v", i, err)
+			}
+		}
+		warmConn.Close()
+		warm.Close()
+
+		// Fresh conn: same CALL should cache-hit.
+		db, buf := openDBWithPackageCache(t, "extended")
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, callSQL, code, 99); err != nil {
+			t.Fatalf("cache-hit CALL: %v", err)
+		}
+		expectCacheHit(t, buf, cacheHitExecMsg)
+
+		// Cleanup.
+		_, _ = db.ExecContext(ctx,
+			"DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code)
+	})
+}
+
+// TestCacheHit_CriteriaExtended_OutCallSkipsRefresh (v0.7.7) pins
+// the hasOutDest gate at driver/stmt.go:283: an OUT-param CALL
+// under criteria=extended is package-eligible, but preparedParams
+// FromCached refuses non-IN direction bytes -- so a refreshed cache
+// entry can never dispatch. The driver skips the auto-populate
+// RETURN_PACKAGE refresh for OUT dispatches; the test asserts the
+// "db2i: cache refresh" slog line is absent in the buffer after
+// threshold-crossing iters.
+func TestCacheHit_CriteriaExtended_OutCallSkipsRefresh(t *testing.T) {
+	requireFiling(t)
+	setupDB := openDB(t)
+	setUpStoredProcs(t, setupDB)
+	setupDB.Close()
+
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	db, buf := openDBWithPackageCache(t, "extended")
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	// Loop past the threshold so refresh WOULD fire under the old
+	// (pre-v0.7.7) behaviour. Each call binds OUT destinations.
+	const callSQL = "CALL " + procLibrary + ".P_LOOKUP(?, ?, ?)"
+	for i := 0; i < filingPrepareCount; i++ {
+		var name string
+		var qty int
+		if _, err := conn.ExecContext(ctx, callSQL,
+			"WIDGET",
+			sql.Out{Dest: &name},
+			sql.Out{Dest: &qty},
+		); err != nil {
+			t.Fatalf("CALL P_LOOKUP iter %d: %v", i, err)
+		}
+	}
+	conn.Close()
+
+	// Assert: NO "db2i: cache refresh" lines. The hasOutDest gate
+	// must prevent refreshPackageCache from being called even
+	// though P_LOOKUP is package-eligible under extended.
+	out := buf.String()
+	if strings.Contains(out, "db2i: cache refresh") {
+		t.Errorf("expected no cache-refresh dispatch for OUT-CALL under "+
+			"criteria=extended (hasOutDest gate should suppress refresh); "+
+			"got:\n%s", out)
+	}
+	// Defensive: also confirm cache-hit didn't fire (the cached
+	// path refuses non-IN direction bytes; OUT-CALL dispatch must
+	// take the regular PREPARE_DESCRIBE path).
+	if strings.Contains(out, cacheHitExecMsg) {
+		t.Errorf("OUT-CALL should not cache-hit under any criteria; got:\n%s", out)
+	}
+}
+
 // TestCacheHit_LOBBindFallthrough verifies that INSERTs binding a
 // BLOB column don't emit a cache-hit dispatch line under the
 // 2-iter cold-cache test pattern.

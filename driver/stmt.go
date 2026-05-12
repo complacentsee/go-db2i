@@ -272,8 +272,16 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// after the EXECUTE returns. Only counts when the SQL
 	// passes packageEligibleFor (otherwise the server isn't
 	// going to file no matter how often we prepare).
+	//
+	// hasOutDest gate (v0.7.7): skip the refresh when the dispatch
+	// has any sql.Out destinations. preparedParamsFromCached
+	// rejects non-IN direction bytes, so the cache-hit fast path is
+	// unreachable for an OUT/INOUT CALL even after RETURN_PACKAGE
+	// learns the server-renamed name -- the refresh would burn
+	// round-trips for a cache entry that can never dispatch. An
+	// intentional improvement over JT400, which always refreshes.
 	shouldRefresh := false
-	if s.conn.packageEligibleFor(s.query, len(args) > 0) {
+	if s.conn.packageEligibleFor(s.query, len(args) > 0) && !hasOutDest(outDests) {
 		shouldRefresh = s.conn.noteFilingPrepare(s.query)
 	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)

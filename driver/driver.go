@@ -674,10 +674,10 @@ func parseDSN(dsn string) (*Config, error) {
 	}
 	if v := q.Get("package-criteria"); v != "" {
 		switch strings.ToLower(v) {
-		case "default", "select":
+		case "default", "select", "extended":
 			cfg.PackageCriteria = strings.ToLower(v)
 		default:
-			return nil, fmt.Errorf("invalid package-criteria %q (want default|select)", v)
+			return nil, fmt.Errorf("invalid package-criteria %q (want default|select|extended)", v)
 		}
 	}
 	if v := q.Get("package-ccsid"); v != "" {

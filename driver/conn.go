@@ -407,9 +407,11 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 //	  ((numberOfParameters_ > 0) && !isCurrentOf_)
 //	  || (isInsert_ && isSubSelect_)        // INSERT INTO t SELECT ...
 //	  || (isSelect_ && isForUpdate_)        // SELECT ... FOR UPDATE
-//	  || isDeclare_                         // DECLARE CURSOR ...
+//	  || isDeclare_                         // DECLARE CURSOR / PROCEDURE
 //	"select" (JDSQLStatement.java:81-84):
 //	  default rules || isSelect_            // any classified SELECT
+//	"extended" (v0.7.7 — JT400's third criterion):
+//	  default rules || isCall || isValues || isWith
 //
 // See /home/complacentsee/godb2/JT400-EXTENDED-DYNAMIC-FILING.md
 // for the wire-shape derivation and the gate-history rationale.
@@ -432,6 +434,8 @@ func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
 	isSelect := eqIgnoreCaseDriver(verb, "SELECT")
 	isInsert := eqIgnoreCaseDriver(verb, "INSERT")
 	isDeclare := eqIgnoreCaseDriver(verb, "DECLARE")
+	isValues := eqIgnoreCaseDriver(verb, "VALUES")
+	isWith := eqIgnoreCaseDriver(verb, "WITH")
 	isForUpdate := isSelect && containsCaseInsensitive(sql, "FOR UPDATE")
 	isSubSelect := isInsert && hasEmbeddedSelect(sql)
 
@@ -443,13 +447,24 @@ func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
 		(isSelect && isForUpdate) ||
 		isDeclare
 
-	if c.cfg.PackageCriteria == "select" {
+	switch c.cfg.PackageCriteria {
+	case "select":
 		// criteria=select widens to include every parameterless
 		// SELECT (JT400's `|| isSelect_` arm). Note we do NOT
 		// add VALUES/WITH here -- JT400 treats those as
-		// non-SELECT and excludes them from filing under either
-		// criterion.
+		// non-SELECT under this criterion.
 		packaged = packaged || isSelect
+	case "extended":
+		// JT400's third criterion files CALL / VALUES / WITH on
+		// top of default. CALL filing is best-effort: cache-hit
+		// dispatch refuses non-IN direction bytes in
+		// preparedParamsFromCached, so an OUT/INOUT CALL files
+		// into the *PGM but can never cache-hit. The auto-populate
+		// refresh in Stmt.Exec is gated on !hasOutDest precisely
+		// to avoid burning RETURN_PACKAGE round-trips for those
+		// unreachable cache entries -- an intentional improvement
+		// over JT400's wire behaviour.
+		packaged = packaged || isCall(sql) || isValues || isWith
 	}
 	return packaged
 }

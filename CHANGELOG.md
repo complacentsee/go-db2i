@@ -10,6 +10,48 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Added: `package-criteria=extended` for CALL / VALUES / WITH
+
+JT400's third filing criterion. `?package-criteria=extended` files
+`CALL`, `VALUES`, and `WITH` statements into the `*PGM` on top of
+the `default` matrix. Mirrors JT400's
+[`JDSQLStatement.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java)
+third-criterion behaviour.
+
+Interop caveat: a Go and Java client only hash to the same `*PGM`
+when both pass `package-criteria=extended`. The byte-equality
+guarantee on `default` / `select` does not extend across mismatched
+criteria. Flagged in `docs/package-caching.md`.
+
+### Fixed: DECLARE PROCEDURE files into the `*PGM`
+
+`Stmt.Exec` previously routed no-args statements through
+`ExecuteImmediate` whenever `isCall` was false. DECLARE PROCEDURE
+has no driver-side args, so it took that single-frame path — which
+omits the CP `0x3808` package marker. Result: the server never
+filed the statement and the `*PGM` hash diverged from JT400's for
+any app that uses DECLARE PROCEDURE. The fix extends the
+`useImmediate` gate at `driver/stmt.go` to also exclude any SQL
+that `packageEligibleFor` would file (DECLARE PROCEDURE /
+DECLARE CURSOR / INSERT-subselect / SELECT-FOR-UPDATE under
+`default`; plus the additions widened by `select` / `extended`).
+Vanilla connections without packaging behave unchanged.
+
+### Improved: skip auto-populate refresh on OUT/INOUT dispatches
+
+`Stmt.Exec`'s post-EXECUTE `RETURN_PACKAGE` refresh
+(v0.7.4 auto-populate) now short-circuits when `hasOutDest`
+reports an `sql.Out` destination in the bind set. The cache-hit
+fast path's `preparedParamsFromCached` rejects non-IN direction
+bytes, so a refreshed cache entry for an OUT/INOUT CALL is
+permanently unreachable — burning round-trips to refresh it is
+pure waste. Intentional improvement over JT400, which always
+refreshes regardless of direction. Particularly relevant under the
+new `package-criteria=extended`, where OUT CALLs file but cannot
+cache-hit-dispatch.
+
+## [0.7.5] - 2026-05-11
+
 ### Fixed: DDL cache invalidation (SQL-204 / SQL-805 fallback)
 
 `Stmt.Exec` / `Stmt.Query` cache-hit dispatch now catches SQL-204

@@ -174,30 +174,43 @@ support page:
 |---|---|
 | `default` (default) | Parameterised SELECT / INSERT / UPDATE / DELETE; `INSERT INTO t SELECT ...` (subselect, even without markers); `SELECT ... FOR UPDATE` (positioned cursor); `DECLARE PROCEDURE` / `DECLARE CURSOR`. Excludes `CURRENT OF`, unparameterised plain SELECT, `VALUES`, `WITH`, and `CALL`. |
 | `select` | Same as `default` PLUS unparameterised SELECT statements. (JT400's wider gate; matches `package criteria=select` exactly. Does **not** widen to VALUES / WITH — those remain non-cached under either criterion.) |
+| `extended` (v0.7.7) | Same as `default` PLUS `CALL` / `VALUES` / `WITH`. JT400's third criterion. **Does not** inherit `select`'s unparameterised-SELECT widening — each criterion is a discrete switch, not cumulative. Interop note: a Go and Java client only hash to the same `*PGM` when both pass `package criteria=extended`; the byte-equality guarantee in `default` / `select` does not extend across mismatched criteria. |
 
-Note: `select` previously also accepted VALUES / WITH in go-db2i
+`select` previously also accepted VALUES / WITH in go-db2i
 v0.7.0–v0.7.2; v0.7.3 narrowed it to match JT400's wire-equivalent
 gate so Go and Java clients hash to the same `*PGM` for the same
 session options.
 
+`extended` and OUT/INOUT CALL: a CALL with `sql.Out` destinations
+files into the `*PGM` (matching JT400's wire-side behaviour) but
+the cache-hit fast path refuses it — `preparedParamsFromCached`
+rejects non-IN direction bytes, so the cache entry is permanently
+unreachable for that SQL. go-db2i skips the v0.7.4 auto-populate
+`RETURN_PACKAGE` refresh when any OUT destination is present so we
+don't burn round-trips chasing an unreachable cache entry. This is
+an intentional improvement over JT400, which always refreshes;
+flagged in the v0.7.7 CHANGELOG so a future reviewer doesn't
+mistake it for a parity regression.
+
 Examples:
 
 ```sql
--- Filed under both default and select:
+-- Filed under default, select, and extended:
 SELECT id, name FROM mylib.things WHERE status = ?
 
--- Filed under default and select (positional rules):
+-- Filed under default, select, and extended (positional rules):
 INSERT INTO mylib.archive SELECT * FROM mylib.things WHERE archived = 1
 SELECT * FROM mylib.things WHERE id = 1 FOR UPDATE
 
--- Filed under select only (default rejects: zero markers):
+-- Filed under select only (default rejects: zero markers;
+-- extended does not inherit this branch):
 SELECT CURRENT_TIMESTAMP FROM SYSIBM.SYSDUMMY1
 
--- Never filed (VALUES / WITH not in JT400's gate; CALL excluded
--- because OUT/INOUT bind can't survive a cached plan):
+-- Filed under extended only:
 VALUES 1
 WITH t AS (SELECT 1) SELECT * FROM t
-CALL mylib.p_lookup(?, ?)
+CALL mylib.p_lookup_in_only(?, ?)
+-- (OUT/INOUT CALL also files under extended; cache-hit refuses it.)
 
 -- Never filed (DDL is not cacheable):
 CREATE TABLE mylib.things (id INTEGER, name VARCHAR(64))
