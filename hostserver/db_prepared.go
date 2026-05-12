@@ -128,66 +128,122 @@ func EncodeDBExtendedDataFormat(params []PreparedParam) []byte {
 	return buf
 }
 
-// EncodeDBExtendedData builds the CP 0x381F payload (parameter values
-// for one or more bound rows). For M3 we only emit a single row of
-// values, since database/sql QueryContext binds one tuple per call.
+// EncodeDBExtendedData builds the CP 0x381F payload (parameter
+// values for a single bound row). Thin wrapper around
+// EncodeDBExtendedDataBatch that supplies the one-row slice; kept
+// as a separate symbol so existing single-row callers
+// (ExecutePreparedSQL, OpenSelectPrepared, ExecutePreparedCached,
+// the wire-equivalence tests, etc.) need no changes.
+//
+// For v0.7.9 batched IUD callers, use EncodeDBExtendedDataBatch
+// directly with N rows -- the wire layout is byte-identical at
+// N=1 so this wrapper produces the same bytes the previous
+// single-row implementation did.
+func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) {
+	return EncodeDBExtendedDataBatch(params, [][]any{values})
+}
+
+// EncodeDBExtendedDataBatch builds the CP 0x381F payload for one
+// or more bound rows. JT400 packs N rows of parameter values into
+// a single EXECUTE request via the IBM i "block insert" wire shape
+// (AS400JDBCPreparedStatementImpl.java:944-948); we mirror that
+// here for v0.7.9's BatchExec entry point.
 //
 //	header (20 bytes):
 //	  0..3   consistency token (always 1)
-//	  4..7   row count (always 1 for M3)
+//	  4..7   row count (len(rows); 1 for the legacy single-row path)
 //	  8..9   column count
 //	  10..11 indicator size (always 2)
 //	  12..15 reserved (compression flag in JTOpen; 0 here)
 //	  16..19 row size (sum of FieldLength across columns)
 //	indicator block (rowCount * colCount * indicatorSize bytes):
-//	  one int16 per column-per-row; 0 = not-null, -1 = null
+//	  one int16 per column-per-row, grouped row-major
+//	  (row 0's indicators first, then row 1's, ...);
+//	  0 = not-null, 0xFFFF = null per JT400.
 //	data block (rowCount * rowSize bytes):
-//	  fields packed in declaration order
+//	  fields packed in declaration order, grouped row-major.
 //
-// values must have the same length as params and supply one Go value
-// per parameter slot (currently int32 only).
-func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) {
-	if len(params) != len(values) {
-		return nil, fmt.Errorf("hostserver: param count mismatch: shape has %d, values has %d", len(params), len(values))
+// Each rows[r] must have len == len(params). At least one row is
+// required; a zero-row encoding is rejected up front rather than
+// silently emitting a header-only payload the server might
+// interpret incorrectly.
+//
+// Error messages for malformed values inside the data block carry
+// a "row %d " prefix only when rowCount > 1 so the single-row
+// wrapper preserves the legacy "param %d: ..." error format
+// existing tests assert against.
+func EncodeDBExtendedDataBatch(params []PreparedParam, rows [][]any) ([]byte, error) {
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("hostserver: at least one row required")
+	}
+	for ri, vals := range rows {
+		if len(params) != len(vals) {
+			if len(rows) == 1 {
+				return nil, fmt.Errorf("hostserver: param count mismatch: shape has %d, values has %d", len(params), len(vals))
+			}
+			return nil, fmt.Errorf("hostserver: row %d: param count mismatch: shape has %d, values has %d", ri, len(params), len(vals))
+		}
 	}
 	const (
 		headerLen      = 20
 		indicatorSize  = 2
 		consistencyTok = 1
-		rowCount       = 1
 	)
+	rowCount := uint32(len(rows))
+	cols := len(params)
 	rowSize := uint32(0)
 	for _, p := range params {
 		rowSize += p.FieldLength
 	}
-	indicatorBytes := rowCount * len(params) * indicatorSize
-	dataBytes := int(rowSize)
+	indicatorBytes := int(rowCount) * cols * indicatorSize
+	dataBytes := int(rowCount) * int(rowSize)
 	buf := make([]byte, headerLen+indicatorBytes+dataBytes)
 	be := binary.BigEndian
 
 	be.PutUint32(buf[0:4], consistencyTok)
 	be.PutUint32(buf[4:8], rowCount)
-	be.PutUint16(buf[8:10], uint16(len(params)))
+	be.PutUint16(buf[8:10], uint16(cols))
 	be.PutUint16(buf[10:12], indicatorSize)
 	// 12..15 reserved (compression flag) zero.
 	be.PutUint32(buf[16:20], rowSize)
 
-	// Indicators: 0 = not null, -1 (0xFFFF) = null per JT400.
-	// We pre-fill from the values array so the data-pack loop
-	// only handles non-null encoders.
-	for i := 0; i < len(params); i++ {
-		off := headerLen + i*indicatorSize
-		if values[i] == nil {
-			be.PutUint16(buf[off:off+2], 0xFFFF)
-		} else {
-			be.PutUint16(buf[off:off+2], 0)
+	// Indicators row-major: row 0 cols, row 1 cols, ...
+	// 0 = not null, 0xFFFF = null per JT400.
+	for r := 0; r < int(rowCount); r++ {
+		rowIndOff := headerLen + r*cols*indicatorSize
+		for i := 0; i < cols; i++ {
+			off := rowIndOff + i*indicatorSize
+			if rows[r][i] == nil {
+				be.PutUint16(buf[off:off+2], 0xFFFF)
+			} else {
+				be.PutUint16(buf[off:off+2], 0)
+			}
 		}
 	}
 
-	// Pack values. Walk params in declaration order, writing each
-	// at the running data offset; null params advance the offset
-	// without writing (server reads the indicator first).
-	dataOff := headerLen + indicatorBytes
+	// Data block row-major. Each row gets exactly rowSize bytes;
+	// encodeRowData advances dataOff by sum(FieldLength).
+	dataBlockStart := headerLen + indicatorBytes
+	for r := 0; r < int(rowCount); r++ {
+		rowDataOff := dataBlockStart + r*int(rowSize)
+		rowPrefix := ""
+		if rowCount > 1 {
+			rowPrefix = fmt.Sprintf("row %d ", r)
+		}
+		if err := encodeRowData(buf, rowDataOff, params, rows[r], rowPrefix); err != nil {
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+// encodeRowData writes one row's data values into buf at dataOff,
+// walking params in declaration order. Null slots advance the
+// offset without writing (the indicator block already signalled
+// NULL). rowPrefix is empty for single-row encodings (to preserve
+// legacy error format) and "row N " for batch encodings.
+func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any, rowPrefix string) error {
+	be := binary.BigEndian
 	for i, p := range params {
 		v := values[i]
 		if v == nil {
@@ -198,80 +254,80 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 		case 500, 501: // SMALLINT (NN, nullable)
 			iv, err := toInt32(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			if iv < -1<<15 || iv > 1<<15-1 {
-				return nil, fmt.Errorf("hostserver: param %d: smallint value %d overflows int16", i, iv)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: smallint value %d overflows int16", i, iv)
 			}
 			be.PutUint16(buf[dataOff:dataOff+2], uint16(int16(iv)))
 			dataOff += 2
 		case 496, 497: // INTEGER (NN, nullable)
 			iv, err := toInt32(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			be.PutUint32(buf[dataOff:dataOff+4], uint32(iv))
 			dataOff += 4
 		case 492, 493: // BIGINT (NN, nullable)
 			iv, err := toInt64(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
 			dataOff += 8
 		case 384, 385: // DATE
 			s, err := toString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			wire, err := encodeDateForParam(s, int(p.FieldLength), p.DateFormat)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			ebc, err := ebcdic.CCSID37.Encode(wire)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: encode date: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode date: %w", i, err)
 			}
 			copy(buf[dataOff:dataOff+len(ebc)], ebc)
 			dataOff += int(p.FieldLength)
 		case 388, 389: // TIME
 			s, err := toString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			wire, err := encodeTimeString(s, int(p.FieldLength))
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			ebc, err := ebcdic.CCSID37.Encode(wire)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: encode time: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode time: %w", i, err)
 			}
 			copy(buf[dataOff:dataOff+len(ebc)], ebc)
 			dataOff += int(p.FieldLength)
 		case 392, 393: // TIMESTAMP
 			s, err := toString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			wire, err := encodeTimestampString(s, int(p.FieldLength))
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			ebc, err := ebcdic.CCSID37.Encode(wire)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: encode timestamp: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode timestamp: %w", i, err)
 			}
 			copy(buf[dataOff:dataOff+len(ebc)], ebc)
 			dataOff += int(p.FieldLength)
 		case 996, 997: // DECFLOAT -- decimal64 (FieldLength 8) or decimal128 (16)
 			s, err := toString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			negative, digs, exp, err := parseDecFloatString(s)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			var packed []byte
 			switch p.FieldLength {
@@ -280,24 +336,24 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			case 16:
 				packed, err = encodeDecimal128(negative, digs, exp)
 			default:
-				return nil, fmt.Errorf("hostserver: param %d: decfloat FieldLength %d unsupported (need 8 or 16)", i, p.FieldLength)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: decfloat FieldLength %d unsupported (need 8 or 16)", i, p.FieldLength)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			copy(buf[dataOff:dataOff+len(packed)], packed)
 			dataOff += len(packed)
 		case 488, 489: // NUMERIC(p,s) zoned decimal
 			s, err := toDecimalString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			zoned, err := encodeZonedBCD(s, int(p.Precision), int(p.Scale))
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d (numeric(%d,%d)): %w", i, p.Precision, p.Scale, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): %w", i, p.Precision, p.Scale, err)
 			}
 			if uint32(len(zoned)) != p.FieldLength {
-				return nil, fmt.Errorf("hostserver: param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
 					i, p.Precision, p.Scale, len(zoned), p.FieldLength)
 			}
 			copy(buf[dataOff:dataOff+len(zoned)], zoned)
@@ -305,14 +361,14 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 		case 484, 485: // DECIMAL(p,s) packed BCD
 			s, err := toDecimalString(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			packed, err := encodePackedBCD(s, int(p.Precision), int(p.Scale))
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d (decimal(%d,%d)): %w", i, p.Precision, p.Scale, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): %w", i, p.Precision, p.Scale, err)
 			}
 			if uint32(len(packed)) != p.FieldLength {
-				return nil, fmt.Errorf("hostserver: param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
 					i, p.Precision, p.Scale, len(packed), p.FieldLength)
 			}
 			copy(buf[dataOff:dataOff+len(packed)], packed)
@@ -320,7 +376,7 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 		case 480, 481: // REAL/DOUBLE (NN, nullable) -- length picks the width
 			fv, err := toFloat64(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			switch p.FieldLength {
 			case 4:
@@ -330,7 +386,7 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 				be.PutUint64(buf[dataOff:dataOff+8], math.Float64bits(fv))
 				dataOff += 8
 			default:
-				return nil, fmt.Errorf("hostserver: param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
 			}
 		case 960, 961, 964, 965, 968, 969:
 			// LOB locator bind: BLOB (960/961), CLOB (964/965),
@@ -341,11 +397,11 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			// declared during CHANGE_DESCRIPTOR has FieldLength=4
 			// regardless of the column's max LOB size.
 			if p.FieldLength != 4 {
-				return nil, fmt.Errorf("hostserver: param %d: LOB SQL type %d expects FieldLength=4, got %d", i, p.SQLType, p.FieldLength)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: LOB SQL type %d expects FieldLength=4, got %d", i, p.SQLType, p.FieldLength)
 			}
 			h, err := toUint32Handle(v)
 			if err != nil {
-				return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
 			be.PutUint32(buf[dataOff:dataOff+4], h)
 			dataOff += 4
@@ -361,40 +417,40 @@ func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error) 
 			if p.CCSID == ccsidBinary {
 				bv, err := toBytes(v)
 				if err != nil {
-					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 				}
 				payload = bv
 			} else if p.CCSID == 1208 {
 				sv, err := toString(v)
 				if err != nil {
-					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 				}
 				payload = []byte(sv)
 			} else {
 				sv, err := toString(v)
 				if err != nil {
-					return nil, fmt.Errorf("hostserver: param %d: %w", i, err)
+					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 				}
 				conv := ebcdicForCCSID(p.CCSID)
 				ebc, err := conv.Encode(sv)
 				if err != nil {
-					return nil, fmt.Errorf("hostserver: param %d: encode varchar: %w", i, err)
+					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode varchar: %w", i, err)
 				}
 				payload = ebc
 			}
 			maxBytes := int(p.FieldLength) - 2
 			if len(payload) > maxBytes {
-				return nil, fmt.Errorf("hostserver: param %d: varchar value too long (%d bytes, max %d)", i, len(payload), maxBytes)
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varchar value too long (%d bytes, max %d)", i, len(payload), maxBytes)
 			}
 			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)))
 			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
 			// Remaining bytes left zero (server reads SL).
 			dataOff += int(p.FieldLength)
 		default:
-			return nil, fmt.Errorf("hostserver: param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
 		}
 	}
-	return buf, nil
+	return nil
 }
 
 // ChangeDescriptorRequest builds the 0x1E00 frame body that uploads

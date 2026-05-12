@@ -413,6 +413,213 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues}, nil
 }
 
+// ExecuteBatch is the v0.7.9 block-insert wire dispatch: same
+// CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE
+// sequence as ExecutePreparedSQL but the EXECUTE payload packs N
+// rows of bind values into a single CP 0x381F block via
+// EncodeDBExtendedDataBatch. The server returns one SQLCA whose
+// SQLERRD[3] is the total rows affected across all rows of the
+// batch -- JT400 cannot report per-row counts either
+// (AS400JDBCPreparedStatementImpl.java line 1701 comment).
+//
+// Caller responsibilities:
+//   - SQL verb is INSERT / UPDATE / DELETE (validated upstream in
+//     driver.Conn.BatchExec); this function does not classify.
+//   - rows is non-empty and every row has the same len as paramShapes
+//     (validated again inside EncodeDBExtendedDataBatch).
+//   - No LOB parameters (locator-allocate would need WRITE_LOB_DATA
+//     before EXECUTE, which doesn't compose with the multi-row
+//     CP 0x381F shape -- JT400 falls back to per-row EXECUTE in
+//     this case via JDSQLStatement.canBatch returning false).
+//   - No OUT/INOUT parameters (IUD never has them; the driver
+//     layer rejects).
+//
+// Returns ExecResult.RowsAffected = server's total. OutValues is
+// always nil.
+func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, rows [][]any, nextCorrelation uint32, opts ...SelectOption) (*ExecResult, error) {
+	o := resolveSelectOpts(opts)
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("hostserver: ExecuteBatch: at least one row required")
+	}
+	corr := nextCorrelation
+
+	// --- 1) CREATE_RPB. Identical shape to ExecutePreparedSQL.
+	stmtNameBytes, err := ebcdic.CCSID37.Encode("STMT0001")
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode stmt name: %w", err)
+	}
+	cursorNameBytes, err := ebcdic.CCSID37.Encode("CRSR0001")
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode cursor name: %w", err)
+	}
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSDataCompression,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		createParams := []DBParam{
+			DBParamVarString(cpDBPrepareStatementName, rpbStringCCSID(), stmtNameBytes),
+			DBParamVarString(cpDBCursorName, rpbStringCCSID(), cursorNameBytes),
+		}
+		if o.extendedDynamic && o.packageLibrary != "" {
+			libParam, err := buildPackageLibraryParam(o.packageLibrary)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package library: %w", err)
+			}
+			createParams = append(createParams, libParam)
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLRPBCreate, tpl, createParams)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build CREATE_RPB: %w", err)
+		}
+		hdr.CorrelationID = corr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send CREATE_RPB: %w", err)
+		}
+	}
+
+	// --- 2) PREPARE_DESCRIBE. Identical shape to ExecutePreparedSQL.
+	stmtBytes := utf16BE(sql)
+	prepCorr := corr
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSParameterMarkerFmt | ORSDataCompression,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 0,
+		}
+		prepParams := []DBParam{
+			dbParamExtendedString(cpDBExtendedStmtText, 13488, stmtBytes),
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			DBParamByte(cpDBPrepareOption, prepareOptionByte(o.extendedDynamic && o.packageName != "")),
+		}
+		if o.extendedDynamic && o.packageName != "" {
+			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode package marker: %w", err)
+			}
+			prepParams = append(prepParams, pkgParam)
+		}
+		hdr, payload, err := BuildDBRequest(ReqDBSQLPrepareDescribe, tpl, prepParams)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build PREPARE_DESCRIBE: %w", err)
+		}
+		hdr.CorrelationID = prepCorr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send PREPARE_DESCRIBE: %w", err)
+		}
+	}
+	prepRepHdr, prepRepPayload, err := ReadDBReplyMatching(conn, prepCorr, 8)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read PREPARE_DESCRIBE reply: %w", err)
+	}
+	if prepRepHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: PREPARE_DESCRIBE reply ReqRepID 0x%04X (want 0x%04X)", prepRepHdr.ReqRepID, RepDBReply)
+	}
+	prepRep, err := ParseDBReply(prepRepPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse PREPARE_DESCRIBE reply: %w", err)
+	}
+	if dbErr := makeDb2Error(prepRep, "PREPARE_DESCRIBE"); dbErr != nil {
+		return nil, dbErr
+	}
+	// Intentionally skip the LOB-rewrite path that
+	// ExecutePreparedSQL runs here -- block-insert and LOB locators
+	// don't compose. Driver-side BatchExec rejects LOB rows.
+	// Intentionally skip the OUT-fixup -- IUD has no OUT params.
+
+	// --- 3) CHANGE_DESCRIPTOR. Same per-column shapes, regardless
+	// of row count.
+	if len(paramShapes) > 0 {
+		hdr, payload, err := ChangeDescriptorRequest(paramShapes)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build CHANGE_DESCRIPTOR: %w", err)
+		}
+		hdr.CorrelationID = corr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send CHANGE_DESCRIPTOR: %w", err)
+		}
+	}
+
+	// --- 4) EXECUTE with the multi-row CP 0x381F block.
+	dataPayload, err := EncodeDBExtendedDataBatch(paramShapes, rows)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: encode batch input parameter data: %w", err)
+	}
+	execCorr := corr
+	{
+		tpl := DBRequestTemplate{
+			ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression,
+			ReturnORSHandle:           1,
+			FillORSHandle:             1,
+			BasedOnORSHandle:          0,
+			RPBHandle:                 1,
+			ParameterMarkerDescriptor: 1,
+		}
+		params := []DBParam{}
+		if o.extendedDynamic && o.packageName != "" {
+			pkgParam, err := buildPackageMarkerParam(o.packageName, o.packageCCSID)
+			if err != nil {
+				return nil, fmt.Errorf("hostserver: encode EXECUTE package marker: %w", err)
+			}
+			params = append(params, pkgParam)
+		}
+		params = append(params,
+			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
+			DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
+		)
+		hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
+		if err != nil {
+			return nil, fmt.Errorf("hostserver: build batch EXECUTE: %w", err)
+		}
+		hdr.CorrelationID = execCorr
+		corr++
+		if err := WriteFrame(conn, hdr, payload); err != nil {
+			return nil, fmt.Errorf("hostserver: send batch EXECUTE: %w", err)
+		}
+	}
+	execRepHdr, execRepPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: read batch EXECUTE reply: %w", err)
+	}
+	if execRepHdr.ReqRepID != RepDBReply {
+		return nil, fmt.Errorf("hostserver: batch EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", execRepHdr.ReqRepID, RepDBReply)
+	}
+	rep, err := ParseDBReply(execRepPayload)
+	if err != nil {
+		return nil, fmt.Errorf("hostserver: parse batch EXECUTE reply: %w", err)
+	}
+	cleanup := func() error { return deleteRPB(conn, corr) }
+	rc := int32(rep.ReturnCode)
+	if rc == 100 {
+		// SQL +100 — no rows matched across the whole batch. Same
+		// handling as the single-row path: drop the RPB and return
+		// zero affected.
+		if err := cleanup(); err != nil {
+			return nil, fmt.Errorf("hostserver: cleanup RPB after batch EXECUTE+100: %w", err)
+		}
+		return &ExecResult{}, nil
+	}
+	if dbErr := makeDb2Error(rep, "EXECUTE_BATCH"); dbErr != nil {
+		_ = cleanup()
+		return nil, dbErr
+	}
+	if err := cleanup(); err != nil {
+		return nil, fmt.Errorf("hostserver: cleanup RPB after batch EXECUTE: %w", err)
+	}
+	return &ExecResult{RowsAffected: rep.RowsAffected()}, nil
+}
+
 // parseOutParameterRow finds the EXECUTE reply's result-data CP and
 // decodes its single row into one Go value per paramShape slot. The
 // server's row layout mirrors the CHANGE_DESCRIPTOR descriptor we
