@@ -21,22 +21,41 @@ const MaxBlockedInputRows = 32000
 // BatchExec packs `rows` into one EXECUTE per 32k-row chunk via the
 // CP 0x381F multi-row block-insert wire shape and returns the
 // total rows affected across all chunks. The SQL text must begin
-// with INSERT, UPDATE, or DELETE; each row's len(args) must match
-// the SQL's parameter-marker count and supply values of types the
-// driver's default bind path accepts (int64 / float64 / bool /
-// string / []byte / time.Time / nil; `database/sql/driver`'s
+// with INSERT, UPDATE, DELETE, or MERGE; each row's len(args) must
+// match the SQL's parameter-marker count and supply values of
+// types the driver's default bind path accepts (int64 / float64 /
+// bool / string / []byte / time.Time / nil; `database/sql/driver`'s
 // DefaultParameterConverter normalises int / int32 / etc).
 //
-// Restrictions (v0.7.9):
+// MERGE batching (v0.7.10): MERGE batches share the same CP 0x381F
+// multi-row shape as IUD on V7R1+ (JT400 sets the same
+// `canBeBatched_` flag for both; see
+// `JDSQLStatement.java:644-648`). The typical pattern uses a
+// `USING (VALUES (?, ?))` source clause so each row supplies the
+// match/insert values; parameter markers inside the USING-VALUES
+// clause MUST be wrapped in explicit `CAST(? AS <type>)` so IBM
+// i's parser can determine the source column types (otherwise
+// PREPARE_DESCRIBE fails with SQL-584 / QSQRCHK):
+//
+//	MERGE INTO target t USING (VALUES (
+//	    CAST(? AS INTEGER), CAST(? AS VARCHAR(32))
+//	)) AS s(id, val)
+//	    ON (t.id = s.id)
+//	    WHEN MATCHED THEN UPDATE SET t.val = s.val
+//	    WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+//
+// Returns the server's combined affected count (matched-updates +
+// not-matched-inserts); MERGE's per-clause counts aren't broken
+// out on the wire.
+//
+// Restrictions:
 //   - LOB values (`*db2i.LOBValue`) are rejected. JT400 falls back
-//     to per-row EXECUTE for LOB batches (locator rule); v0.7.9
-//     rejects with a clear pointer at the per-row path.
-//   - sql.Out / sql.InOut destinations are rejected: IUD has no
-//     OUT params on the wire.
-//   - SELECT / CALL / DECLARE are rejected: BatchExec is for IUD
-//     verbs only.
-//   - MERGE is rejected for now (deferred to v0.7.10 with a JT400
-//     fixture).
+//     to per-row EXECUTE for LOB batches (locator rule);
+//     `BatchExec` rejects with a clear pointer at the per-row path.
+//   - sql.Out / sql.InOut destinations are rejected: IUD/MERGE
+//     have no OUT params on the wire.
+//   - SELECT / CALL / DECLARE are rejected: BatchExec is for
+//     IUD+MERGE verbs only.
 //
 // Access pattern via database/sql:
 //
@@ -63,10 +82,9 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 
 	verb := firstSQLVerb(sql)
 	switch strings.ToUpper(verb) {
-	case "INSERT", "UPDATE", "DELETE":
-		// supported
-	case "MERGE":
-		return 0, fmt.Errorf("db2i: BatchExec: MERGE batching not yet supported (tracked as a v0.7.10 follow-up)")
+	case "INSERT", "UPDATE", "DELETE", "MERGE":
+		// supported -- IUD via CP 0x381F multi-row (v0.7.9);
+		// MERGE via the same wire shape (v0.7.10) on V7R1+.
 	case "SELECT", "VALUES", "WITH":
 		return 0, fmt.Errorf("db2i: BatchExec: SELECT-like verb %q -- use db.QueryContext", verb)
 	case "CALL":
@@ -77,7 +95,7 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 		if verb == "" {
 			return 0, fmt.Errorf("db2i: BatchExec: SQL has no recognisable verb")
 		}
-		return 0, fmt.Errorf("db2i: BatchExec: verb %q not supported (want INSERT / UPDATE / DELETE)", verb)
+		return 0, fmt.Errorf("db2i: BatchExec: verb %q not supported (want INSERT / UPDATE / DELETE / MERGE)", verb)
 	}
 
 	// Up-front per-row validation. Uniform arity + LOB / sql.Out

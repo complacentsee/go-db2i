@@ -24,18 +24,20 @@ func TestBatchExec_VerbTruthTable(t *testing.T) {
 		sql     string
 		wantErr string // substring; empty = accept (will pass verb gate, fail later on nil conn)
 	}{
-		// INSERT/UPDATE/DELETE all pass the verb gate.
+		// INSERT/UPDATE/DELETE/MERGE all pass the verb gate.
+		// MERGE accepted as of v0.7.10 (same CP 0x381F multi-row
+		// shape as IUD on V7R1+).
 		{"INSERT INTO t VALUES (?)", ""},
 		{"UPDATE t SET x=? WHERE id=?", ""},
 		{"DELETE FROM t WHERE id=?", ""},
 		{"insert into t values (?)", ""}, // case-insensitive
+		{"MERGE INTO t USING s ON ... WHEN MATCHED ...", ""},
 		// Rejected verbs.
 		{"SELECT * FROM t WHERE id=?", "SELECT-like verb"},
 		{"VALUES 1", "SELECT-like verb"},
 		{"WITH c AS (SELECT 1) SELECT * FROM c", "SELECT-like verb"},
 		{"CALL mylib.p(?)", "CALL"},
 		{"DECLARE C CURSOR FOR SELECT 1", "DECLARE"},
-		{"MERGE INTO t USING s ON ... WHEN MATCHED ...", "MERGE batching not yet supported"},
 		{"GIBBERISH", "not supported"},
 		{"", "no recognisable verb"},
 	}
@@ -64,7 +66,6 @@ func TestBatchExec_VerbTruthTable(t *testing.T) {
 				if err != nil && (strings.Contains(err.Error(), "not supported") ||
 					strings.Contains(err.Error(), "no recognisable verb") ||
 					strings.Contains(err.Error(), "SELECT-like") ||
-					strings.Contains(err.Error(), "MERGE batching") ||
 					strings.Contains(err.Error(), "CALL is not eligible") ||
 					strings.Contains(err.Error(), "DECLARE is not eligible")) {
 					t.Errorf("verb %q should have passed gate; got verb-gate error: %v", tc.sql, err)

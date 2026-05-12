@@ -1,11 +1,14 @@
 # go-db2i
 
-> **Current: v0.7.9 (2026-05-12)** — adds `Conn.BatchExec` for
-> bulk INSERT / UPDATE / DELETE via the IBM i "block insert" wire
-> shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk
-> vs one per row for a `db.Exec` loop; **~358× speed-up** measured
-> on V7R6M0 via VPC tunnel for a 1000-row INSERT
-> (`TestBatch_PerfDelta`). Builds on v0.7.8's OUT-CALL
+> **Current: v0.7.10 (2026-05-12)** — extends `Conn.BatchExec` to
+> MERGE (alongside the v0.7.9 INSERT / UPDATE / DELETE support).
+> MERGE batches use the same IBM i "block insert" wire shape
+> (CP `0x381F` multi-row); JT400 enables this on V7R1+ via the
+> same `canBeBatched_` flag IUD uses
+> ([`JDSQLStatement.java:644-648`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java)).
+> Same ~358× speed-up profile as the v0.7.9 IUD path. See
+> [`docs/performance.md`](./docs/performance.md#bulk-iud--merge-via-connbatchexec-v079-v0710)
+> for the perf numbers. Builds on v0.7.8's OUT-CALL
 > cache-hit dispatch and v0.7.7's `criteria=extended`. See
 > [`docs/performance.md`](./docs/performance.md#bulk-iud-via-connbatchexec-v079)
 > for the perf numbers and
@@ -114,7 +117,8 @@ implemented end-to-end:
   32k-row chunk vs one per row, **~358× speed-up** measured on
   V7R6M0 via VPC tunnel for a 1000-row INSERT (LPAR-local would
   be smaller since PREPARE_DESCRIBE plan-compile dominates over
-  RTT there).
+  RTT there). v0.7.10 extends BatchExec to MERGE on V7R1+ via
+  the same wire shape.
   The 10-char wire name is byte-equal to JT400 for the same
   session options under `default` / `select`, so a Go client and a
   Java client targeting the same LPAR share one `*PGM`. (`extended`

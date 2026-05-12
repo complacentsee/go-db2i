@@ -177,6 +177,89 @@ func TestBatch_DeleteVerified(t *testing.T) {
 	}
 }
 
+// TestBatch_MergeVerified (v0.7.10) exercises MERGE batching via a
+// parameterised `MERGE INTO ... USING (VALUES (?, ?))` over N rows.
+// Half the batch rows match existing target rows (UPDATE branch);
+// the other half don't (INSERT branch). Asserts the post-state
+// matches both branches' expectations.
+//
+// MERGE wire shape is identical to IUD on V7R1+
+// (JDSQLStatement.java:644-648); v0.7.10 just removed the verb
+// reject in Conn.BatchExec. PUB400 V7R5M0 is at the threshold and
+// supports MERGE batching.
+func TestBatch_MergeVerified(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	db := openDB(t)
+	defer db.Close()
+
+	tbl := schema() + "." + tablePrefix + "bmrg"
+	_, _ = db.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, VAL VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer db.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+
+	// Seed IDs 1..matchCount so the first matchCount batch rows
+	// hit WHEN MATCHED. IDs matchCount+1..n trip WHEN NOT MATCHED
+	// THEN INSERT.
+	const matchCount = 20
+	const n = 50
+	for i := 1; i <= matchCount; i++ {
+		if _, err := db.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?, ?)", int64(i), "seed"); err != nil {
+			t.Fatalf("seed iter %d: %v", i, err)
+		}
+	}
+
+	rows := make([][]any, n)
+	for i := 0; i < n; i++ {
+		rows[i] = []any{int64(i + 1), fmt.Sprintf("merge-%03d", i+1)}
+	}
+	// IBM i SQL's parser needs explicit CASTs around parameter
+	// markers in the USING clause's VALUES so it can determine the
+	// source column types -- without them SQL-584 / QSQRCHK fires
+	// at PREPARE_DESCRIBE.
+	mergeSQL := "MERGE INTO " + tbl + " t USING (VALUES (" +
+		"CAST(? AS INTEGER), CAST(? AS VARCHAR(32)))) AS s(ID, VAL) " +
+		"ON (t.ID = s.ID) " +
+		"WHEN MATCHED THEN UPDATE SET t.VAL = s.VAL " +
+		"WHEN NOT MATCHED THEN INSERT (ID, VAL) VALUES (s.ID, s.VAL)"
+	affected := batchExec(t, db, ctx, mergeSQL, rows)
+	// Server's rows-affected sums matched-updates + not-matched-
+	// inserts. With matchCount matched + (n-matchCount) inserted,
+	// the total equals n.
+	if affected != int64(n) {
+		t.Errorf("MERGE rows-affected = %d, want %d (matched=%d + inserted=%d)",
+			affected, n, matchCount, n-matchCount)
+	}
+
+	var total int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tbl).Scan(&total); err != nil {
+		t.Fatalf("post-MERGE COUNT(*): %v", err)
+	}
+	if total != n {
+		t.Errorf("table row count after MERGE = %d, want %d", total, n)
+	}
+
+	// Spot-check both branches: ID=5 was seeded then matched-and-
+	// updated (so VAL should be the merged value, not "seed");
+	// ID=42 was inserted (didn't exist before).
+	var v5, v42 string
+	if err := db.QueryRowContext(ctx, "SELECT VAL FROM "+tbl+" WHERE ID = ?", int64(5)).Scan(&v5); err != nil {
+		t.Fatalf("spot-check ID=5: %v", err)
+	}
+	if v5 != "merge-005" {
+		t.Errorf("ID=5 VAL = %q after MERGE, want %q (WHEN MATCHED branch did not fire)", v5, "merge-005")
+	}
+	if err := db.QueryRowContext(ctx, "SELECT VAL FROM "+tbl+" WHERE ID = ?", int64(42)).Scan(&v42); err != nil {
+		t.Fatalf("spot-check ID=42: %v", err)
+	}
+	if v42 != "merge-042" {
+		t.Errorf("ID=42 VAL = %q after MERGE, want %q (WHEN NOT MATCHED THEN INSERT did not fire)", v42, "merge-042")
+	}
+}
+
 // TestBatch_AutoSplits32k verifies the 32k client-side split logic.
 // 50k rows -> 2 chunks (32000 + 18000). We don't directly assert
 // chunk count from the wire (no per-test hook), but we do require

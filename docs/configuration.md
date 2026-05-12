@@ -42,7 +42,7 @@ interface; reach them via `sql.Conn.Raw`:
 
 | Method | Purpose | Since |
 |---|---|---|
-| `BatchExec(ctx, sql, rows [][]any) (int64, error)` | Bulk INSERT / UPDATE / DELETE via the IBM i block-insert wire shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk vs N for a per-row loop. See [`performance.md`](./performance.md). | v0.7.9 |
+| `BatchExec(ctx, sql, rows [][]any) (int64, error)` | Bulk INSERT / UPDATE / DELETE / MERGE via the IBM i block-insert wire shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk vs N for a per-row loop. See [`performance.md`](./performance.md). | v0.7.9 (IUD); v0.7.10 (MERGE) |
 
 Example:
 

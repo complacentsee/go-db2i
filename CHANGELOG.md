@@ -10,6 +10,35 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Added: MERGE batching in `Conn.BatchExec`
+
+`MERGE INTO ... USING (VALUES (?, ?)) ...` batches now go through
+the v0.7.9 CP `0x381F` multi-row block-insert wire shape. JT400
+enables MERGE batching on V7R1+ via the same `canBeBatched_` flag
+IUD uses
+([`JDSQLStatement.java:644-648`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java));
+the wire shape is identical to INSERT / UPDATE / DELETE, so
+v0.7.10 is purely the verb-gate removal in `Conn.BatchExec`
+(`driver/conn_batch.go`) — no encoder changes, no dispatch
+changes. `statementTypeForSQL` already returned
+`TYPE_UNDETERMINED=0` for MERGE and the server resolves the verb
+from the SQL text.
+
+Returns the server's combined affected count (matched-updates +
+not-matched-inserts); MERGE's per-clause counts aren't broken
+out on the wire.
+
+Verified via `TestBatch_MergeVerified` (live conformance,
+V7R6M0 + V7R5M0): seed M target rows, batch N source tuples
+where the first M hit `WHEN MATCHED THEN UPDATE` and the
+remaining N-M hit `WHEN NOT MATCHED THEN INSERT`. Asserts
+rows-affected = N + a deterministic spot-check on both branches.
+
+No JT400 byte-equivalence fixture captured for MERGE — the wire
+shape is provably the same as IUD per the source review.
+
+## [0.7.9] - 2026-05-12
+
 ### Added: `Conn.BatchExec` for bulk IUD via block insert
 
 A driver-typed method on `*db2i.Conn` (reach it via `sql.Conn.Raw`)
