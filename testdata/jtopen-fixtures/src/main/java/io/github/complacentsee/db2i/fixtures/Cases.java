@@ -121,6 +121,7 @@ final class Cases {
         cases.add(new PackageCacheDownload(schema));
         cases.add(new PackageFilingVerify(schema));
         cases.add(new PackageFilingIUD(schema));
+        cases.add(new PackageFilingLOBCacheHit(schema));
 
         // Negative paths — SQLException to SQLCARD parsing.
         cases.add(new ErrorSyntax());
@@ -1372,6 +1373,158 @@ final class Cases {
                          + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
                          + "AND PACKAGE_SCHEMA = '" + schema + "' "
                          + "ORDER BY STATEMENT_NUMBER")) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    /**
+     * {@code prepared_package_filing_lob_cache_hit.trace} — companion to
+     * {@link PackageFilingIUD} that pins JT400's wire shape for a LOB-bind
+     * INSERT after the server has filed it into the {@code *SQLPKG}.
+     *
+     * <p>v0.7.5's empirical probe (Go-side {@code TestLOBBind_FilingProbe})
+     * proved on IBM Cloud V7R6M0 that the server DOES file LOB-bind
+     * INSERTs and that {@code SYSPACKAGESTMTSTAT} captures the renamed
+     * 18-char statement name (e.g., {@code QZAF491DC28F222001}). The
+     * server-stored {@code ParameterMarkerFormat} for a BLOB slot carries
+     * the raw-LOB SQL type (404 = {@code SQL_BLOB}), not the locator
+     * type 960 the live PREPARE_DESCRIBE reply reports. v0.7.6 closes
+     * the encoder gap so the cache-hit fast path actually fires for
+     * LOB binds; this fixture pins the JT400 wire shape it must
+     * byte-equal.</p>
+     *
+     * <p>Each iteration ships a 1&nbsp;KB deterministic payload — well
+     * below the single-frame WRITE_LOB_DATA limit so the trace shows
+     * exactly one upload frame per slot per iter. {@value #PREPARE_COUNT}
+     * iters guarantees we cross IBM's 3-PREPARE filing threshold; the
+     * fourth iteration is the one that hits the cache-hit dispatch
+     * path on the JT400 side (and on the Go side once v0.7.6 lands).</p>
+     */
+    private static final class PackageFilingLOBCacheHit extends WithPackage {
+        // 8-char SQL/system name distinct from PackageFilingVerify's
+        // GOJTFLVT and PackageFilingIUD's GOJTFIUD so the three cases
+        // don't share residual state.
+        private static final String TABLE_SHORT = "GOJTFLOB";
+
+        // Same threshold-crossing loop count as the sibling cases:
+        // one above IBM's 3-PREPARE filing threshold so the server
+        // files the statement, and the last iter goes through the
+        // cache-hit path.
+        private static final int PREPARE_COUNT = 4;
+
+        // 1 KB deterministic payload: large enough that the trace
+        // confirms WRITE_LOB_DATA is actually used, small enough that
+        // each iter is exactly one upload frame (no chunking) and the
+        // golden stays comparable.
+        private static final int PAYLOAD_LEN = 1024;
+
+        PackageFilingLOBCacheHit(String schema) {
+            super("prepared_package_filing_lob_cache_hit", schema);
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            // 1. Wipe any prior package so the catalog measurement
+            //    reflects THIS run alone. Wildcard handles the
+            //    4-char options-hash suffix JT400 appends.
+            try (Statement st = conn.createStatement()) {
+                String cmd = "DLTOBJ OBJ(" + schema + "/" + PACKAGE_NAME + "*) "
+                        + "OBJTYPE(*SQLPKG)";
+                try {
+                    st.execute("CALL QSYS2.QCMDEXC('" + cmd + "')");
+                } catch (SQLException ignored) {
+                    // CPF2105 "object not found" on first run; fine.
+                }
+            }
+            // 2. (Re)create the test table. One INTEGER PK + one
+            //    BLOB(64K) column. 64 KB is the smallest declared max
+            //    that still keeps the server-side raw-LOB SQL types in
+            //    play (anything < 4 KB sometimes routes to VARCHAR FOR
+            //    BIT DATA depending on the LPAR's LOB-threshold).
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) {
+                    // First run; expected.
+                }
+                st.execute("CREATE TABLE " + schema + "." + TABLE_SHORT
+                        + " (ID INTEGER NOT NULL PRIMARY KEY, "
+                        + "PAYLOAD BLOB(64K) NOT NULL)");
+            }
+        }
+
+        @Override public void teardown(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                try {
+                    st.execute("DROP TABLE " + schema + "." + TABLE_SHORT);
+                } catch (SQLException ignored) { }
+            }
+        }
+
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            String insertSQL = "INSERT INTO " + schema + "." + TABLE_SHORT
+                    + " (ID, PAYLOAD) VALUES (?, ?)";
+
+            // PREPARE_COUNT iters of the same LOB-bind INSERT. Each
+            // PreparedStatement is closed before the next iteration so
+            // the wire actually issues a fresh PREPARE_DESCRIBE for the
+            // first PREPARE_COUNT-1 iters; the final iter is the one
+            // that hits the cache-hit dispatch path once the server
+            // has filed the renamed statement into the *PGM.
+            for (int i = 0; i < PREPARE_COUNT; i++) {
+                byte[] payload = new byte[PAYLOAD_LEN];
+                for (int j = 0; j < payload.length; j++) {
+                    // Per-iter seeding so the payloads are
+                    // distinguishable in the trace.
+                    payload[j] = (byte) ((i * 31 + j) & 0xFF);
+                }
+                try (PreparedStatement ps = conn.prepareStatement(insertSQL)) {
+                    ps.setInt(1, i + 1);
+                    ps.setBytes(2, payload);
+                    int n = ps.executeUpdate();
+                    if (i == 0) {
+                        golden.recordUpdateCount(n);
+                    }
+                }
+            }
+
+            // Server-side state — confirms NUMBER_STATEMENTS reflects
+            // the one filed LOB-bind INSERT. Plain Statement so the
+            // catalog query doesn't itself try to file.
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT PACKAGE_SCHEMA, PACKAGE_NAME, NUMBER_STATEMENTS, "
+                         + "PACKAGE_USED_SIZE, LAST_USED_TIMESTAMP, DAYS_USED_COUNT "
+                         + "FROM QSYS2.SYSPACKAGESTAT "
+                         + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
+                         + "AND PACKAGE_SCHEMA = '" + schema + "' "
+                         + "ORDER BY PACKAGE_NAME")) {
+                golden.recordResultSet(rs);
+            }
+
+            // Per-statement metadata — STATEMENT_NAME column carries
+            // the 18-char server-assigned renamed name (QZAF...001
+            // etc.) for the filed INSERT. STATEMENT_TEXT confirms our
+            // INSERT statement landed.
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT STATEMENT_NUMBER, STATEMENT_NAME, NUMBER_TIMES_PREPARED, "
+                         + "NUMBER_TIMES_EXECUTED, SUBSTR(STATEMENT_TEXT, 1, 80) AS STMT "
+                         + "FROM QSYS2.SYSPACKAGESTMTSTAT "
+                         + "WHERE PACKAGE_NAME LIKE '" + PACKAGE_NAME + "%' "
+                         + "AND PACKAGE_SCHEMA = '" + schema + "' "
+                         + "ORDER BY STATEMENT_NUMBER")) {
+                golden.recordResultSet(rs);
+            }
+
+            // Round-trip read of the four rows so the golden also
+            // captures the SELECT-back path (and confirms the BLOB
+            // payloads landed intact). Uses BLOB locator return shape
+            // (the read side already supports that path since v0.6).
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT ID, PAYLOAD FROM " + schema + "." + TABLE_SHORT
+                         + " ORDER BY ID")) {
                 golden.recordResultSet(rs);
             }
         }
