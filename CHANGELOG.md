@@ -50,6 +50,24 @@ refreshes regardless of direction. Particularly relevant under the
 new `package-criteria=extended`, where OUT CALLs file but cannot
 cache-hit-dispatch.
 
+### Docs: v0.7.4 auto-populate cited in `performance.md`
+
+The 35 ms vs 71 ms (~50%) post-threshold latency reduction shipped
+in v0.7.4 was measured on IBM Cloud V7R6M0 but only documented in
+the v0.7.4 CHANGELOG entry. `docs/performance.md` now carries a
+"Same-session auto-populate (v0.7.4)" subsection covering the
+mechanism, the IBM SI30855 threshold, the
+`hostserver.MaxFilingRefreshAttempts` cap, and the v0.7.7
+`hasOutDest` refinement.
+
+### Docs: v0.7.8 plan filed (OUT-param cache-hit investigation)
+
+`docs/plans/v0.7.8-out-param-cache-hit.md` opens the question of
+whether the cache-hit fast path can be extended to dispatch
+OUT/INOUT stored procedures, which would obsolete v0.7.7's
+`hasOutDest` refresh-skip. Status: speculative — investigation
+not yet started.
+
 ## [0.7.5] - 2026-05-11
 
 ### Fixed: DDL cache invalidation (SQL-204 / SQL-805 fallback)

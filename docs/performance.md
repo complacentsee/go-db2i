@@ -194,6 +194,43 @@ LPAR-local network the saving is closer to ~10-20%; the
 PREPARE_DESCRIBE frame is doing real plan-compilation work, not
 just a round-trip.
 
+### Same-session auto-populate (v0.7.4)
+
+The cache-hit fast path needs the server-assigned 18-byte statement
+name before it can dispatch. Pre-v0.7.4, that name was learned only
+through `RETURN_PACKAGE` on connect — so a SQL string that the
+server filed mid-session stayed off the fast path until the next
+connection cycled. Cold starts paid for themselves; long-lived
+sessions did not.
+
+v0.7.4 closes that gap. The driver tracks per-SQL local
+`PREPARE_DESCRIBE` counts (`Conn.noteFilingPrepare`); when the
+count crosses IBM's 3-PREPARE threshold (PTF SI30855), the
+post-EXECUTE handler issues a one-shot `RETURN_PACKAGE` refresh.
+The next call of the same SQL dispatches via
+`ExecutePreparedCached` / `OpenSelectPreparedCached` without
+waiting for a reconnect. Capped at
+`hostserver.MaxFilingRefreshAttempts = 3` per SQL so a statement
+the server refuses to file (package full, locked, etc.) doesn't
+burn unbounded refresh round-trips.
+
+Measured on IBM Cloud V7R6M0 (CHANGELOG v0.7.4, commit `7b614b4`):
+**~50% reduction in per-call latency (35 ms vs 71 ms)** after the
+threshold crosses, on the same long-lived `sql.DB` pool.
+
+v0.7.7 refines the refresh trigger: if the dispatch has any
+`sql.Out` destination (stored-procedure OUT/INOUT parameter), the
+refresh is skipped. The cache-hit fast path refuses non-IN
+direction bytes in `preparedParamsFromCached`, so a refreshed
+entry for an OUT CALL is permanently unreachable — chasing it
+would burn round-trips against an unreachable cache slot. Together
+with `package-criteria=extended` this is an intentional improvement
+over JT400, which always refreshes regardless of direction.
+
+Reference: `docs/package-caching.md` "auto-populate" section and
+`test/conformance/cache_hit_test.go` for the threshold-crossing
+fixtures.
+
 ### When to opt out
 
 - **SQL text varies every call.** ORMs that interpolate
