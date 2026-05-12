@@ -1,17 +1,19 @@
 # go-db2i
 
-> **Current: v0.7.20 (2026-05-12)** — `db.Exec` / `db.Query`
-> now dispatch through `driver.ExecerContext` /
-> `driver.QueryerContext` on `*Conn` directly instead of the
-> historical `Conn.Prepare` → `Stmt` → `Stmt.Close` path. Wire
-> flow unchanged; saves one allocation per call and aligns with
-> the standard contract database/sql expects from drivers.
-> `Conn.CheckNamedValue` mirror added in the same release so
-> `sql.Out{...}` / `*LOBValue` arguments continue to flow through
-> the new dispatch surface. Builds on v0.7.19 (SessionResetter
-> dirty-discard), v0.7.18 (`sql.Named` for CALLs), v0.7.17
-> (query-optimize-goal), v0.7.16 (timeouts), and v0.7.15
-> (BatchExec LOB / BeginTx isolation).
+> **Current: v0.7.21 (2026-05-12)** — live-coverage hardening.
+> Nine new live-test groups close documented gaps:
+> `TestContextCancellationMidQuery`, `TestDb2ErrorPredicates`,
+> `TestDSNIsolationLevels`, `TestSocketTimeoutFiresOnSlowQuery`,
+> `TestDateFormatDSNVariants`, `TestSeparatorDSNKeys`,
+> `TestCCSIDOverrides`, `TestLOBThresholdVariants`. TLS now
+> runs by default against the LPAR (DCM cert turn-up
+> complete). Live conformance V7R6M0: **73 PASS / 0 FAIL** (up
+> from 64 in v0.7.20). `docs/configuration.md` clarifies the
+> `?date=` knob's scope (server-side rendering of dates cast
+> to string + literal parsing in SQL text; does NOT affect
+> typed `DATE` columns, which arrive packed-binary and promote
+> to `time.Time` -- matches JT400's `java.sql.Date.toString()`
+> always-ISO contract).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java

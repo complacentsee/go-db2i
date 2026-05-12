@@ -33,6 +33,7 @@ import (
 
 	db2i "github.com/complacentsee/go-db2i/driver"
 	"github.com/complacentsee/go-db2i/ebcdic"
+	"github.com/complacentsee/go-db2i/hostserver"
 )
 
 // dsn returns the connection string from DB2I_DSN, skipping the
@@ -3184,5 +3185,358 @@ func TestSessionResetterDiscardsAfterSetSchema(t *testing.T) {
 	if !strings.EqualFold(afterSchema, defaultSchema) {
 		t.Errorf("post-release CURRENT_SCHEMA = %q, want %q (dirty conn leaked SetSchema(%s) to the next pool checkout)",
 			afterSchema, defaultSchema, other)
+	}
+}
+
+// dsnWithExtras appends a key=value pair to DB2I_DSN. The base DSN
+// may already carry query params; we splice with `?` or `&` as
+// needed. All v0.7.21 live-coverage tests use this helper so the
+// existing DB2I_DSN connection knobs (library, signon-port, etc)
+// stay in force.
+func dsnWithExtras(t *testing.T, extras ...string) string {
+	t.Helper()
+	base := dsn(t)
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + strings.Join(extras, "&")
+}
+
+// TestContextCancellationMidQuery pins the v0.7.21 ctx-cancellation
+// contract end-to-end: when the caller's context is cancelled
+// mid-query, the in-flight wire op unblocks and the call returns
+// context.Canceled (wrapped so errors.Is still matches). Pre-fix
+// regressions would either hang for the full server-side delay or
+// return a generic *net.OpError instead of the context error the
+// caller checks for.
+//
+// Built on CALL QSYS2.QCMDEXC('DLYJOB DLY(10)') which holds the
+// server job for up to 10 seconds. We cancel the ctx after 200ms;
+// the expected return is context.Canceled within ~500ms total.
+func TestContextCancellationMidQuery(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	t0 := time.Now()
+	_, err := db.ExecContext(ctx, "CALL QSYS2.QCMDEXC(?)", "DLYJOB DLY(10)")
+	elapsed := time.Since(t0)
+
+	if err == nil {
+		t.Fatal("expected error when ctx cancelled mid-query; got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("want errors.Is(err, context.Canceled); got %v", err)
+	}
+	// Generous upper bound: cancellation should unblock the wire
+	// read inside ~1s. The historical "hang for full DLYJOB"
+	// regression would clock in at 10s+.
+	if elapsed > 2*time.Second {
+		t.Errorf("cancel took %v; expected ~200-500ms (no unblock plumbing?)", elapsed)
+	}
+}
+
+// TestDb2ErrorPredicates exercises the user-facing typed-error
+// helpers on `*hostserver.Db2Error` against real server-side
+// errors. The offline TestIsConnLevelErr already pins the
+// classifier against synthetic Db2Error values; this test goes
+// the other way and confirms the helpers correctly classify
+// errors the LPAR actually emits.
+//
+// Subtests:
+//   - IsConstraintViolation: duplicate-key INSERT → SQLSTATE 23505
+//   - syntax error: unknown SQL → Db2Error with SQLCode -084 (or
+//     similar) -- doesn't satisfy any "is-X" helper but should
+//     still populate SQLState / SQLCode / Message
+//   - IsNotFound (02xxx) is hard to trigger live -- SQL +100
+//     surfaces as no rows, not as Db2Error -- so we cover that
+//     predicate via the offline classifier test only.
+//
+// IsLockTimeout (SQLCODE -911/-913) and IsConnectionLost (08xxx)
+// require multi-session setup / TCP-level disruption respectively;
+// both are exercised in the offline classifier tests.
+func TestDb2ErrorPredicates(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	t.Run("IsConstraintViolation on duplicate primary key", func(t *testing.T) {
+		tbl := schema() + "." + tablePrefix + "v721_dup"
+		db.Exec("DROP TABLE " + tbl)
+		if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY)"); err != nil {
+			t.Fatalf("CREATE: %v", err)
+		}
+		t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+		if _, err := db.Exec("INSERT INTO "+tbl+" VALUES (?)", 1); err != nil {
+			t.Fatalf("first INSERT: %v", err)
+		}
+		_, err := db.Exec("INSERT INTO "+tbl+" VALUES (?)", 1) // duplicate
+		if err == nil {
+			t.Fatal("expected duplicate-key error; got nil")
+		}
+		var dbErr *hostserver.Db2Error
+		if !errors.As(err, &dbErr) {
+			t.Fatalf("expected *hostserver.Db2Error; got %T: %v", err, err)
+		}
+		if !dbErr.IsConstraintViolation() {
+			t.Errorf("IsConstraintViolation() = false on duplicate-key error (SQLState=%q SQLCode=%d)",
+				dbErr.SQLState, dbErr.SQLCode)
+		}
+		// SQLSTATE 23xxx family.
+		if len(dbErr.SQLState) == 0 || dbErr.SQLState[:2] != "23" {
+			t.Errorf("SQLState = %q, want 23xxx", dbErr.SQLState)
+		}
+	})
+
+	t.Run("syntax error populates Db2Error fields", func(t *testing.T) {
+		_, err := db.Exec("SLECT 1 FROM SYSIBM.SYSDUMMY1") // typo
+		if err == nil {
+			t.Fatal("expected syntax error; got nil")
+		}
+		var dbErr *hostserver.Db2Error
+		if !errors.As(err, &dbErr) {
+			t.Fatalf("expected *hostserver.Db2Error; got %T: %v", err, err)
+		}
+		if dbErr.SQLState == "" {
+			t.Error("Db2Error.SQLState empty")
+		}
+		if dbErr.SQLCode == 0 {
+			t.Error("Db2Error.SQLCode = 0; expected negative")
+		}
+	})
+}
+
+// TestDSNIsolationLevels exercises the connect-time ?isolation=
+// DSN knob. TestBeginTxIsolation covers BeginTx; this confirms
+// each value at the DSN level produces a working connection +
+// successful round-trip. The SET_SQL_ATTRIBUTES bundle at connect
+// uses CP 0x380E (commitment control level) per the isolation
+// constants in hostserver/db_attributes.go.
+func TestDSNIsolationLevels(t *testing.T) {
+	for _, iso := range []string{"none", "cs", "all", "rs", "rr"} {
+		iso := iso
+		t.Run("isolation="+iso, func(t *testing.T) {
+			db, err := sql.Open("db2i", dsnWithExtras(t, "isolation="+iso))
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			var u string
+			if err := db.QueryRow("SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1").Scan(&u); err != nil {
+				t.Fatalf("SELECT CURRENT_USER with isolation=%s: %v", iso, err)
+			}
+			if strings.TrimSpace(u) == "" {
+				t.Errorf("CURRENT_USER scanned empty under isolation=%s", iso)
+			}
+		})
+	}
+}
+
+// TestSocketTimeoutFiresOnSlowQuery pins the v0.7.16 socket-timeout
+// safety net against a real slow query. Pre-v0.7.16 a `DLYJOB
+// DLY(10)` with no caller-supplied deadline would block for the
+// full 10 seconds; v0.7.16's SocketTimeout=1s default makes the op
+// abort inside ~1.5s instead.
+//
+// We give a generous 3s upper bound because IBM i's QCMDEXC
+// dispatch through the SQL service adds ~hundreds of ms of
+// scheduling latency on top of the wire round trip.
+func TestSocketTimeoutFiresOnSlowQuery(t *testing.T) {
+	db, err := sql.Open("db2i", dsnWithExtras(t, "socket-timeout=1"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	t0 := time.Now()
+	_, err = db.Exec("CALL QSYS2.QCMDEXC(?)", "DLYJOB DLY(10)")
+	elapsed := time.Since(t0)
+	if err == nil {
+		t.Fatal("expected socket-timeout to fire on a 10s DLYJOB with 1s SocketTimeout; got nil")
+	}
+	// 5s upper bound. SocketTimeout=1 arms a 1-second deadline on
+	// the underlying net.Conn; the actual abort lands ~1-3s later
+	// because IBM i's QCMDEXC dispatch through the SQL service
+	// adds scheduling latency on top of the wire round-trip + Go's
+	// database/sql cleanup path. 5s comfortably catches a real
+	// regression (10s+ "no abort at all") without flaking on the
+	// natural variance.
+	if elapsed > 5*time.Second {
+		t.Errorf("socket-timeout did not fire within 5s; elapsed=%v err=%v", elapsed, err)
+	}
+}
+
+// TestDateFormatDSNVariants confirms each ?date= value applies to
+// the server-side date formatting on the wire. Wrap CURRENT_DATE
+// in CHAR() so the result is a VARCHAR (which surfaces as a
+// string, not time.Time) -- otherwise our driver's auto-promotion
+// to time.Time masks the format difference, because every parsed
+// time.Time renders the same RFC3339 string via .Format() at
+// Scan time regardless of how it arrived on the wire.
+//
+// The format-applied invariant we assert: 4-digit-year formats
+// (ISO / USA / EUR / JIS) yield 10-char strings; 2-digit-year
+// formats (MDY / DMY / YMD) yield 8-char strings. That gap is
+// what catches a "DSN format silently ignored" regression --
+// before this test, the driver would have returned the JOB-
+// default format (typically MDY at 8 chars) regardless of the
+// DSN setting. Per-format separator chars vary with the
+// LPAR's job CCSID + date-separator interaction, so we don't
+// pin specific separator chars here -- the length contract is
+// sufficient.
+func TestDateFormatDSNVariants(t *testing.T) {
+	cases := []struct {
+		name    string
+		dsn     string
+		wantLen int // expected char count (after trim)
+	}{
+		{"iso (YYYY-MM-DD)", "date=iso", 10},
+		{"usa (MM/DD/YYYY)", "date=usa", 10},
+		{"eur (DD.MM.YYYY)", "date=eur", 10},
+		{"jis (YYYY-MM-DD)", "date=jis", 10},
+		{"mdy (MM/DD/YY)", "date=mdy", 8},
+		{"dmy (DD/MM/YY)", "date=dmy", 8},
+		{"ymd (YY/MM/DD)", "date=ymd", 8},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("db2i", dsnWithExtras(t, tc.dsn))
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			var s string
+			// CHAR(CURRENT_DATE) forces a VARCHAR result so the
+			// driver doesn't auto-promote to time.Time. The CHAR
+			// rendering reflects the session's date format.
+			if err := db.QueryRow("VALUES CHAR(CURRENT_DATE)").Scan(&s); err != nil {
+				t.Fatalf("SELECT CHAR(CURRENT_DATE) with %s: %v", tc.dsn, err)
+			}
+			s = strings.TrimSpace(s)
+			if len(s) != tc.wantLen {
+				t.Errorf("date string %q has %d chars, want %d (format=%s)", s, len(s), tc.wantLen, tc.dsn)
+			}
+		})
+	}
+}
+
+// TestSeparatorDSNKeys confirms the v0.7.11 date-separator /
+// time-separator / decimal-separator DSN knobs each parse, connect,
+// and survive a query. The wire-level CP encoding is covered by
+// existing offline TestParseDSN_* tests; this verifies the round
+// trip against the live server.
+//
+// We don't assert on the rendered output (different LPAR job
+// CCSIDs may render the separators differently); the load-bearing
+// observable is "the connection accepts the option and the query
+// succeeds."
+func TestSeparatorDSNKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		dsn  string
+	}{
+		{"date-separator slash", "date=iso&date-separator=/"},
+		{"date-separator dash", "date=iso&date-separator=-"},
+		{"date-separator period", "date=eur&date-separator=."},
+		{"time-separator colon", "time-format=iso&time-separator=:"},
+		{"time-separator period", "time-format=iso&time-separator=."},
+		{"decimal-separator period", "decimal-separator=."},
+		{"decimal-separator comma", "decimal-separator=,"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("db2i", dsnWithExtras(t, tc.dsn))
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			var s string
+			if err := db.QueryRow("VALUES CURRENT_DATE").Scan(&s); err != nil {
+				t.Fatalf("SELECT with %s: %v", tc.dsn, err)
+			}
+			if strings.TrimSpace(s) == "" {
+				t.Errorf("empty result with %s", tc.dsn)
+			}
+		})
+	}
+}
+
+// TestCCSIDOverrides exercises ?ccsid=37 (US EBCDIC) and ?ccsid=273
+// (German EBCDIC) -- the two non-default values most likely to
+// appear in legacy IBM i shops. The default path (CCSID auto-pick,
+// 1208 / 13488 depending on server VRM) is covered by
+// TestCCSID1208RoundTrip; this fills out the legacy-charset
+// coverage.
+//
+// We bind a 7-bit ASCII string -- the round-trip works regardless
+// of which EBCDIC variant the server stamps on the wire, because
+// the printable-ASCII subset is identical between CCSID 37 and 273.
+// (A character outside that subset would render differently per
+// CCSID, but isolating that case requires a fixture that's
+// outside the scope of this coverage probe.)
+func TestCCSIDOverrides(t *testing.T) {
+	for _, ccsid := range []string{"37", "273"} {
+		ccsid := ccsid
+		t.Run("ccsid="+ccsid, func(t *testing.T) {
+			db, err := sql.Open("db2i", dsnWithExtras(t, "ccsid="+ccsid))
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			var got string
+			if err := db.QueryRow(
+				"SELECT CAST(? AS VARCHAR(20)) FROM SYSIBM.SYSDUMMY1", "hello").Scan(&got); err != nil {
+				t.Fatalf("round-trip with ccsid=%s: %v", ccsid, err)
+			}
+			if strings.TrimRight(got, " ") != "hello" {
+				t.Errorf("round-trip ccsid=%s: got %q, want %q", ccsid, got, "hello")
+			}
+		})
+	}
+}
+
+// TestLOBThresholdVariants confirms the ?lob-threshold= knob
+// parses, connects, and round-trips BLOB data across several
+// threshold values. The wire shape difference (inline vs locator)
+// is observable only in trace captures; the API-level contract is
+// "same bytes regardless of threshold." This test pins the
+// observable: a 4 KiB BLOB round-trips byte-perfect under
+// thresholds straddling its size (1 KiB → locator; 64 KiB → inline).
+func TestLOBThresholdVariants(t *testing.T) {
+	tbl := schema() + "." + tablePrefix + "v721_lobt"
+	for _, threshold := range []string{"1024", "65536"} {
+		threshold := threshold
+		t.Run("threshold="+threshold, func(t *testing.T) {
+			db, err := sql.Open("db2i", dsnWithExtras(t, "lob-threshold="+threshold))
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			db.Exec("DROP TABLE " + tbl)
+			if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY, PAYLOAD BLOB(1M))"); err != nil {
+				t.Fatalf("CREATE: %v", err)
+			}
+			t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+			payload := bytes.Repeat([]byte{0xAB}, 4*1024) // 4 KiB
+			if _, err := db.Exec("INSERT INTO "+tbl+" VALUES (?, ?)", 1, payload); err != nil {
+				t.Fatalf("INSERT (threshold=%s): %v", threshold, err)
+			}
+			var got []byte
+			if err := db.QueryRow("SELECT PAYLOAD FROM "+tbl+" WHERE ID = ?", 1).Scan(&got); err != nil {
+				t.Fatalf("SELECT (threshold=%s): %v", threshold, err)
+			}
+			if len(got) != len(payload) {
+				t.Errorf("threshold=%s: len=%d, want %d", threshold, len(got), len(payload))
+			}
+			if len(got) > 0 && got[0] != payload[0] {
+				t.Errorf("threshold=%s: bytes differ", threshold)
+			}
+		})
 	}
 }

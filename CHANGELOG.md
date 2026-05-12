@@ -10,6 +10,76 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.21] - 2026-05-12
+
+### Added: live-coverage hardening (9 new test groups, TLS turned on)
+
+Audit of the public surface against the live conformance suite
+turned up nine documented features without direct live-test
+coverage. v0.7.21 adds tests for each, plus enables TLS now that
+the LPAR has DCM cert turn-up. Live conformance V7R6M0 moves
+from 64 PASS / 0 FAIL to **73 PASS / 0 FAIL**.
+
+New tests:
+
+- `TestContextCancellationMidQuery`: starts a `DLYJOB DLY(10)` via
+  `QSYS2.QCMDEXC`, cancels the ctx after 200ms, asserts the call
+  returns `context.Canceled` within ~1-2s. Catches a regression
+  where ctx cancellation hangs for the full server-side delay or
+  returns a generic `*net.OpError` instead of the context error.
+- `TestDb2ErrorPredicates`: triggers a real duplicate-key INSERT
+  on V7R6M0 and asserts `*hostserver.Db2Error.IsConstraintViolation()`
+  fires. Plus a syntax-error subtest that pins the
+  `SQLState` / `SQLCode` fields populate.
+- `TestDSNIsolationLevels`: opens a connection at each of
+  `?isolation=none|cs|all|rs|rr` and runs a basic round-trip --
+  proves the DSN parser + SET_SQL_ATTRIBUTES wiring honour every
+  value. (`TestBeginTxIsolation` covers the `BeginTx` form;
+  this fills out the connect-time form.)
+- `TestSocketTimeoutFiresOnSlowQuery`: sets `?socket-timeout=1`,
+  runs `DLYJOB DLY(10)`, asserts the SocketTimeout safety net
+  fires within 5s instead of hanging for the full 10s. The
+  v0.7.16 SocketTimeout was previously offline-tested only.
+- `TestDateFormatDSNVariants`: opens connections at every
+  `?date=` value (iso/usa/eur/jis/mdy/dmy/ymd), queries
+  `CHAR(CURRENT_DATE)`, asserts the rendered string length
+  matches the format. Validates the wire-level format applies.
+- `TestSeparatorDSNKeys`: parses + connects under each
+  `date-separator` / `time-separator` / `decimal-separator`
+  value the DSN accepts.
+- `TestCCSIDOverrides`: round-trips a 7-bit ASCII string under
+  `?ccsid=37` (US EBCDIC) and `?ccsid=273` (German EBCDIC).
+  Extends `TestCCSID1208RoundTrip`'s modern-CCSID coverage to
+  the legacy single-byte tables.
+- `TestLOBThresholdVariants`: round-trips a 4 KiB BLOB under
+  thresholds straddling its size (1 KiB → locator path; 64 KiB
+  → inline path).
+- `TestTLSConnectivity` now actively runs (previously gated on
+  `DB2I_TLS_TARGET` which was unset). The `.env.ibmcloud-v7r6`
+  env file now defines the SSL DSN by default; comment it back
+  out if the DCM cert ever lapses. Two subtests pass: `smoketest`
+  (sign-on + start-database + PREPARE / EXECUTE / FETCH over
+  TLS) and `multi-row` (5-row byte-diff against the plaintext
+  counterpart).
+
+### Docs: `?date=` scope clarified
+
+`docs/configuration.md` previously listed the `?date=` knob's
+values without explaining what scope they apply to. After this
+release's live testing turned up the surprising "auto-promoted
+`time.Time` ignores the format" behaviour, the doc now spells
+out the scope explicitly:
+
+- The knob affects (a) how the server renders dates when
+  explicitly cast to string (`CHAR(CURRENT_DATE)`, etc.) and
+  (b) how it parses date literals in SQL text.
+- It does NOT affect typed `DATE` columns delivered over the
+  wire -- those arrive as packed binary and the driver promotes
+  them to `time.Time`, which `Scan(*string)` renders as RFC3339
+  regardless. Mirrors JT400's `java.sql.Date.toString()`
+  always-ISO contract; matches lib/pq and other JDBC-tradition
+  Go drivers.
+
 ## [0.7.20] - 2026-05-12
 
 ### Added: `driver.ExecerContext` + `driver.QueryerContext` on `*Conn`
