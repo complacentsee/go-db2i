@@ -1393,15 +1393,11 @@ func TestFiling_ServerSideStateVerified(t *testing.T) {
 
 	// 2. Run two distinct parameterised SELECTs filingPrepareCount
 	//    times each so IBM's 3-PREPARE threshold is crossed for
-	//    each one. We use two SELECTs (not SELECT + INSERT)
-	//    because the current driver only emits 0x3808=01 on the
-	//    SELECT path (db_prepared.go); the EXECUTE_IMMEDIATE
-	//    path for INSERT/UPDATE/DELETE hard-codes 0x3808=00
-	//    (db_exec.go:187, deferred filing until JT400's
-	//    nameOverride_ wire dance is implemented). The cache-hit
-	//    fast path's value proposition is the SELECT round-trip
-	//    saving anyway, so SELECT-only coverage is the right
-	//    proof-of-life until INSERT filing lands.
+	//    each one. SELECT-side coverage is the ground-truth proof
+	//    for this test; IUD filing has its own dedicated probes
+	//    (TestFiling_InsertVerified / UpdateVerified / DeleteVerified
+	//    / AllThreeInOnePackage) that file through the EXECUTE
+	//    path with extended-dynamic active.
 	//
 	//    Pin a single *sql.Conn so all PREPAREs land on the same
 	//    QZDASOINIT job -- the server-side threshold counter is
