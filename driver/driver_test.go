@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/complacentsee/go-db2i/hostserver"
 )
@@ -1166,5 +1167,87 @@ func TestParseDSN_PackageCCSIDRejectMentionsM11(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "M11+") {
 		t.Errorf("error %q does not mention M11+ deferral", err)
+	}
+}
+
+// TestParseDSN_LoginTimeout pins the v0.7.16 ?login-timeout= knob.
+// Accepts both integer-seconds (JT400-style) and Go duration form;
+// rejects negatives and unparseable strings.
+func TestParseDSN_LoginTimeout(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		dsn     string
+		want    time.Duration
+		wantErr string // substring
+	}{
+		{"unset is zero (default 30s downstream)", "db2i://u:p@h/", 0, ""},
+		{"int seconds", "db2i://u:p@h/?login-timeout=5", 5 * time.Second, ""},
+		{"go duration", "db2i://u:p@h/?login-timeout=2m500ms", 2*time.Minute + 500*time.Millisecond, ""},
+		{"zero", "db2i://u:p@h/?login-timeout=0", 0, ""},
+		{"negative int", "db2i://u:p@h/?login-timeout=-1", 0, "negative"},
+		{"garbage", "db2i://u:p@h/?login-timeout=banana", 0, "login-timeout"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := parseDSN(tc.dsn)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("want error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDSN(%q): %v", tc.dsn, err)
+			}
+			if cfg.LoginTimeout != tc.want {
+				t.Errorf("LoginTimeout: got %v want %v", cfg.LoginTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseDSN_SocketTimeout pins the v0.7.16 ?socket-timeout= knob.
+// Mirrors the login-timeout matrix; the two share parseTimeoutSeconds.
+func TestParseDSN_SocketTimeout(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		dsn     string
+		want    time.Duration
+		wantErr string
+	}{
+		{"unset is zero (no automatic deadline)", "db2i://u:p@h/", 0, ""},
+		{"int seconds", "db2i://u:p@h/?socket-timeout=60", 60 * time.Second, ""},
+		{"go duration", "db2i://u:p@h/?socket-timeout=30s", 30 * time.Second, ""},
+		{"negative", "db2i://u:p@h/?socket-timeout=-5", 0, "negative"},
+		{"garbage", "db2i://u:p@h/?socket-timeout=forever", 0, "socket-timeout"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := parseDSN(tc.dsn)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("want error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDSN(%q): %v", tc.dsn, err)
+			}
+			if cfg.SocketTimeout != tc.want {
+				t.Errorf("SocketTimeout: got %v want %v", cfg.SocketTimeout, tc.want)
+			}
+		})
 	}
 }

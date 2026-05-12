@@ -137,7 +137,12 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 
 	// 32k-row split. JT400 caps a single block-insert EXECUTE at
 	// 32k rows so the server doesn't have to allocate an unbounded
-	// buffer for the data block; we mirror.
+	// buffer for the data block; we mirror. Wrap the whole chunk
+	// loop in one withContextDeadlineDefault so the per-conn
+	// SocketTimeout safety net (v0.7.16) and any caller-supplied
+	// ctx deadline both bound the batch end-to-end.
+	cleanup := withContextDeadlineDefault(ctx, c.conn, c.socketTimeout())
+	defer cleanup()
 	start := time.Now()
 	stringCCSID := c.preferredStringCCSID()
 	totalAffected := int64(0)

@@ -115,8 +115,8 @@ the *Notes* column says why.
 | `query optimize goal` | — | Falls back to the job default (`*ALLIO` on most V7R5+ systems). |
 | `query storage limit` | — | Not plumbed. |
 | `query timeout mechanism` | — | Use `context.WithTimeout` per call; cancel propagates via `Conn.SetDeadline`. |
-| `socket timeout` | — | JT400 ties to per-read timeouts; go-db2i uses `ctx` deadline plus `Conn.SetDeadline` per-op so cancellation works the standard Go way. |
-| `login timeout` | — (always 30 s) | Dial timeout default. Override via passing a deadline-carrying `ctx` to `sql.OpenDB().Conn(ctx)`. |
+| `socket timeout` | `socket-timeout` | v0.7.16. Per-op read-deadline default when caller's `ctx` has none. Accepts integer seconds (JT400-style: `?socket-timeout=30`) or Go duration form (`?socket-timeout=30s`). An explicit `ctx` deadline still wins; default 0 = no automatic timeout. Belt-and-suspenders against an unresponsive LPAR that doesn't drop TCP. |
+| `login timeout` | `login-timeout` | v0.7.16. Overrides the dial-plus-handshake timeout (default 30 s). Same value-parsing as `socket-timeout`. An explicit deadline-carrying `ctx` passed to `db.Conn(ctx)` still wins. |
 | `tcp no delay` / `keep alive` / `stay alive` / `receive buffer size` / `send buffer size` | — | Use Go's net.Dialer customisation if needed; not plumbed through the DSN. |
 | `thread used` / `virtual threads` | — | Go runtime decides; no toolbox-side thread pool. |
 
@@ -190,8 +190,9 @@ mirror `Connection.setSavepoint` etc.); `SetSchema` /
 db2iiter.ScanAll(rows, scanFn)` loops.
 
 ⏭️ **Deferred** (would benefit a future release): `query optimize goal`,
-`socket timeout` (per-op default), `login timeout` (per-op
-override; today the dial timeout is the only knob).
+plus `CallableStatement.setObject("name", ...)` named-parameter
+binding for stored-procedure CALLs (positional `CALL proc(?, ?,
+?)` works today).
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`

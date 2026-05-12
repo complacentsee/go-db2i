@@ -71,7 +71,7 @@ func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
 // DeadlineExceeded) when the cancellation is the actual cause,
 // regardless of which I/O step bailed.
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	cleanup := withContextDeadline(ctx, s.conn.conn)
+	cleanup := withContextDeadlineDefault(ctx, s.conn.conn, s.conn.socketTimeout())
 	defer cleanup()
 
 	ctx, span := s.startSpan(ctx, "EXEC", len(args))
@@ -92,7 +92,7 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 // QueryContext implements driver.StmtQueryContext. Same plumbing as
 // ExecContext.
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	cleanup := withContextDeadline(ctx, s.conn.conn)
+	cleanup := withContextDeadlineDefault(ctx, s.conn.conn, s.conn.socketTimeout())
 	defer cleanup()
 
 	ctx, span := s.startSpan(ctx, "QUERY", len(args))

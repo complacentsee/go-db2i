@@ -27,7 +27,11 @@ import (
 // deadline; the host-server protocol exchanges currently use a
 // fixed 30s timeout (the underlying net.Conn deadline).
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
-	deadline, _ := contextDeadline(ctx, 30*time.Second)
+	loginTimeout := c.cfg.LoginTimeout
+	if loginTimeout <= 0 {
+		loginTimeout = 30 * time.Second
+	}
+	deadline, _ := contextDeadline(ctx, loginTimeout)
 
 	// Derive a per-Conn child logger tagged with driver/host so
 	// every line a single conn emits is pre-attributed. The conn_id
@@ -798,6 +802,19 @@ func (c *Conn) nextCorrFunc() func() uint32 {
 	}
 }
 
+// socketTimeout returns the SocketTimeout configured on this conn's
+// Config, or zero if unset. Used by exec / query / batch entry
+// points to pass into withContextDeadlineDefault: when the caller's
+// ctx has no deadline, this duration becomes the per-op read
+// timeout. Zero disables the auto-deadline (the caller's ctx alone
+// drives cancellation).
+func (c *Conn) socketTimeout() time.Duration {
+	if c.cfg == nil {
+		return 0
+	}
+	return c.cfg.SocketTimeout
+}
+
 // Prepare returns a Stmt that buffers the SQL string. Real
 // PREPARE-on-the-wire happens at execute time; this matches how our
 // hostserver.SelectStaticSQL and ExecuteImmediate work today.
@@ -879,7 +896,7 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	if err != nil {
 		return nil, err
 	}
-	cleanup := withContextDeadline(ctx, c.conn)
+	cleanup := withContextDeadlineDefault(ctx, c.conn, c.socketTimeout())
 	defer cleanup()
 	if err := hostserver.AutocommitOffWithIsolation(c.conn, c.nextCorr(), isolation); err != nil {
 		return nil, c.classifyConnErr(fmt.Errorf("db2i: BeginTx: autocommit off: %w", err))

@@ -10,6 +10,74 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-05-12
+
+### Added: `?socket-timeout=N` DSN knob (production-reliability safety net)
+
+`Config.SocketTimeout` + `?socket-timeout=N` set a per-operation
+read-deadline default that applies when the caller's `context.Context`
+has no deadline of its own. Pre-v0.7.16, an LPAR that went
+unresponsive but didn't drop the TCP connection blocked every
+`Exec` / `Query` / `BatchExec` until the OS-level TCP timeout
+(typically hours). The new knob is the connection-wide safety net
+the production playbook needs: set it to `30s` or `60s` at the DSN
+and every operation gets bounded.
+
+An explicit `ctx` deadline still wins (covered by
+`TestWithContextDeadlineDefault_ctxDeadlineWins`); the default only
+fires when no deadline is set. `?socket-timeout=0` (the default)
+preserves the historical "no automatic timeout" behaviour
+byte-for-byte.
+
+Threading goes through a new `withContextDeadlineDefault(ctx,
+conn, default)` helper that the four entry-points
+(`Stmt.ExecContext`, `Stmt.QueryContext`, `Conn.BeginTx`,
+`Conn.BatchExec`) now use. The plain `withContextDeadline`
+variant is preserved for sites that legitimately want
+"ctx-deadline-only, never auto-arm" semantics.
+
+DSN value accepts both forms:
+
+- Integer seconds (JT400-style): `?socket-timeout=30`
+- Go `time.ParseDuration`: `?socket-timeout=30s`, `?socket-timeout=1m500ms`
+
+Negative values reject with a clear error.
+
+### Added: `?login-timeout=N` DSN knob
+
+`Config.LoginTimeout` + `?login-timeout=N` override the
+historical hardcoded 30-second dial-plus-handshake timeout. Set
+this when you want a flaky-host connect to fail fast (e.g. behind
+a load balancer where the standard 30s default would mask
+problems). An explicit deadline-carrying `ctx` passed to
+`db.Conn(ctx)` still takes precedence.
+
+Same DSN value-parsing as `?socket-timeout=`: integer seconds OR
+Go duration form, negatives reject.
+
+Mechanics: `Connector.Connect` now computes its dial deadline as
+`contextDeadline(ctx, cfg.LoginTimeout)` (falling back to 30s
+when unset), so the deadline propagates through both the
+plaintext `dialWithDeadline` path and the TLS `dialHostServer`
+path without further changes. Verified by
+`TestConnect_LoginTimeoutOverride` against RFC 5737's TEST-NET-3
+unroutable address: a 250ms `LoginTimeout` fails in under 750ms
+(3× upper bound), versus the wall-clock 30s the historical
+default would impose.
+
+### Fixed: `Conn.BatchExec` now installs a context deadline
+
+The fast-path batch loop (`hostserver.ExecuteBatch` for each
+32k-row chunk) previously ran without arming the underlying
+`net.Conn` deadline, so a caller passing `ctx.WithTimeout` saw
+the timeout fire on the *next* operation rather than the
+in-flight batch. The chunk loop now wraps in
+`withContextDeadlineDefault(ctx, c.conn, c.socketTimeout())` so
+both ctx-driven cancellation and the v0.7.16 SocketTimeout safety
+net take effect end-to-end. (The per-row LOB fallback was
+already covered indirectly because it loops through
+`Stmt.ExecContext`.)
+
 ## [0.7.15] - 2026-05-12
 
 ### Fixed: `BatchExec` LOB binds now fall back to per-row EXECUTE

@@ -135,6 +135,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
@@ -498,6 +499,30 @@ type Config struct {
 	// Use the API package (`go.opentelemetry.io/otel/trace`), not
 	// the SDK, so callers can plug in any OTel SDK / exporter.
 	Tracer trace.Tracer
+
+	// LoginTimeout caps the dial-plus-handshake time when the caller
+	// passes a context without a deadline (typically `sql.Open` /
+	// `db.Ping` / first-use `db.Query`). Default is 30s. Overriding
+	// to a smaller value makes a flaky-host connect fail fast; an
+	// explicit ctx deadline still wins over this knob.
+	//
+	// Mirrors JT400's `login timeout` JDBC URL property. Set via
+	// DSN `?login-timeout=N` (N in seconds; e.g. `?login-timeout=5`).
+	LoginTimeout time.Duration
+
+	// SocketTimeout caps the read-deadline on every Exec / Query /
+	// BatchExec round trip when the caller's context has no
+	// deadline. Without this, an LPAR that goes unresponsive but
+	// doesn't drop the TCP connection blocks the in-flight op until
+	// the OS-level TCP timeout (typically hours) -- a real
+	// production-reliability hazard. A 30-60s default is a safe
+	// belt-and-suspenders bound; an explicit ctx deadline still
+	// wins.
+	//
+	// Mirrors JT400's `socket timeout` JDBC URL property. Set via
+	// DSN `?socket-timeout=N` (N in seconds). Default 0 = no
+	// driver-level timeout; rely on caller-supplied ctx.
+	SocketTimeout time.Duration
 }
 
 // DefaultConfig returns the values used when DSN doesn't specify a
@@ -894,6 +919,20 @@ func parseDSN(dsn string) (*Config, error) {
 	if cfg.ExtendedDynamic && cfg.PackageName == "" {
 		return nil, fmt.Errorf("extended-dynamic=true requires package=<name>")
 	}
+	if v := q.Get("login-timeout"); v != "" {
+		d, err := parseTimeoutSeconds(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid login-timeout %q: %w", v, err)
+		}
+		cfg.LoginTimeout = d
+	}
+	if v := q.Get("socket-timeout"); v != "" {
+		d, err := parseTimeoutSeconds(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid socket-timeout %q: %w", v, err)
+		}
+		cfg.SocketTimeout = d
+	}
 	// Normalise the Library / Libraries pair. After this block,
 	// cfg.Libraries (if any) carries the full wire ordering and
 	// cfg.Library is the default SQL schema (Libraries[0] when not
@@ -908,6 +947,34 @@ func parseDSN(dsn string) (*Config, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// parseTimeoutSeconds parses an integer-seconds value for the DSN
+// timeout knobs (login-timeout, socket-timeout). Accepts a bare
+// integer (matching JT400's seconds-only form: `?socket-timeout=30`)
+// OR a Go time.ParseDuration form (`?socket-timeout=30s` /
+// `?socket-timeout=1m500ms`) for callers who'd rather be explicit.
+// Negative values reject; zero is "no timeout" (the default).
+//
+// Returns the duration plus any parse error. Caller wraps the error
+// with the offending key name for the user-facing message.
+func parseTimeoutSeconds(v string) (time.Duration, error) {
+	// Try integer-seconds first (the JT400-style form).
+	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			return 0, fmt.Errorf("negative value %d not allowed", n)
+		}
+		return time.Duration(n) * time.Second, nil
+	}
+	// Fall back to Go duration form (5s / 1m / 500ms / 1h).
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("not an integer or Go duration: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("negative duration %s not allowed", d)
+	}
+	return d, nil
 }
 
 // canonSep folds a separator alias (e.g. "slash", "space") onto its

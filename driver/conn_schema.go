@@ -80,10 +80,11 @@ func (c *Conn) AddLibraries(ctx context.Context, libs []string) error {
 		}
 		canon[i] = c
 	}
-	// withContextDeadline arms the underlying net.Conn so the
-	// in-flight write/read unblocks on ctx cancellation -- same
-	// pattern Stmt.ExecContext uses for the prepared-exec path.
-	cleanup := withContextDeadline(ctx, c.conn)
+	// withContextDeadlineDefault arms the underlying net.Conn so
+	// the in-flight write/read unblocks on ctx cancellation -- same
+	// pattern Stmt.ExecContext uses for the prepared-exec path. The
+	// SocketTimeout default kicks in when ctx has no deadline.
+	cleanup := withContextDeadlineDefault(ctx, c.conn, c.socketTimeout())
 	defer cleanup()
 	if err := hostserver.NDBAddLibraryListMulti(c.conn, canon, c.nextCorr()); err != nil {
 		return c.classifyConnErr(fmt.Errorf("db2i: AddLibraries: %w", resolveCtxErr(ctx, err)))

@@ -30,6 +30,21 @@ import (
 //
 // Returns a no-op cleanup if ctx is nil or already done.
 func withContextDeadline(ctx context.Context, conn net.Conn) func() {
+	return withContextDeadlineDefault(ctx, conn, 0)
+}
+
+// withContextDeadlineDefault is the SocketTimeout-aware variant of
+// withContextDeadline (v0.7.16). When `ctx` has no deadline AND
+// `defaultDur > 0`, the helper installs `time.Now().Add(defaultDur)`
+// as the conn's read deadline -- giving callers a per-op safety net
+// against unresponsive servers that don't drop the TCP connection.
+// An explicit ctx deadline still wins (it's installed unchanged).
+//
+// Use this wrapper from sites that have access to Config.SocketTimeout
+// (Stmt.ExecContext / QueryContext, Conn.BatchExec, BeginTx). Sites
+// that legitimately need "no automatic timeout, the ctx alone is
+// authoritative" can keep using plain withContextDeadline.
+func withContextDeadlineDefault(ctx context.Context, conn net.Conn, defaultDur time.Duration) func() {
 	if ctx == nil || conn == nil {
 		return func() {}
 	}
@@ -42,6 +57,11 @@ func withContextDeadline(ctx context.Context, conn net.Conn) func() {
 
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
+	} else if defaultDur > 0 {
+		// No caller-supplied deadline: arm the SocketTimeout default.
+		// AfterFunc still fires on ctx cancellation; the deadline
+		// triggers on inactivity past defaultDur.
+		_ = conn.SetDeadline(time.Now().Add(defaultDur))
 	}
 
 	stop := context.AfterFunc(ctx, func() {
