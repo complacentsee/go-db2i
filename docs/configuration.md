@@ -35,6 +35,28 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `package-add`                | (ignored)    | JT400-compatibility key. Accepted but no-op; the driver always adds. |
 | `package-clear`              | (warn)       | JT400-compatibility key. Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. |
 
+## Driver-typed methods (`sql.Conn.Raw`)
+
+A few methods live on `*db2i.Conn` rather than the `database/sql`
+interface; reach them via `sql.Conn.Raw`:
+
+| Method | Purpose | Since |
+|---|---|---|
+| `BatchExec(ctx, sql, rows [][]any) (int64, error)` | Bulk INSERT / UPDATE / DELETE via the IBM i block-insert wire shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk vs N for a per-row loop. See [`performance.md`](./performance.md). | v0.7.9 |
+
+Example:
+
+```go
+conn, _ := db.Conn(ctx); defer conn.Close()
+var affected int64
+err := conn.Raw(func(driverConn any) error {
+    d := driverConn.(*db2i.Conn)
+    n, err := d.BatchExec(ctx, "INSERT INTO t VALUES (?, ?)", rows)
+    affected = n
+    return err
+})
+```
+
 ## TLS
 
 The driver wraps the as-signon and as-database sockets in `crypto/tls`

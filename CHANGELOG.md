@@ -10,6 +10,74 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Added: `Conn.BatchExec` for bulk IUD via block insert
+
+A driver-typed method on `*db2i.Conn` (reach it via `sql.Conn.Raw`)
+that packs N rows of parameter values into a single CP `0x381F`
+multi-row block on one EXECUTE request — the IBM i "block insert"
+wire shape JT400 uses for non-LOB INSERT / UPDATE / DELETE batches.
+One round-trip per 32k-row chunk vs one per row for a `db.Exec`
+loop.
+
+```go
+conn, _ := db.Conn(ctx); defer conn.Close()
+var affected int64
+err := conn.Raw(func(driverConn any) error {
+    d := driverConn.(*db2i.Conn)
+    n, err := d.BatchExec(ctx, "INSERT INTO t VALUES (?, ?)", rows)
+    affected = n
+    return err
+})
+```
+
+Measured **~358× speed-up** for a 1000-row INSERT against IBM
+Cloud V7R6M0 via VPC tunnel (`TestBatch_PerfDelta`: 3.9 s
+`db.Exec` loop vs 11 ms `BatchExec`; the high-RTT path
+amplifies the round-trip savings). LPAR-local networks see
+smaller multipliers (10–50×) since PREPARE_DESCRIBE plan-compile
+cost dominates over RTT there. A 50k-row batch finishes in
+~160 ms on the same tunnel (two 32k+18k chunks). Auto-splits at
+`MaxBlockedInputRows = 32000` —
+mirrors JT400's `maximumBlockedInputRows`
+([`AS400JDBCPreparedStatementImpl.java:1636-1677`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/AS400JDBCPreparedStatementImpl.java)).
+
+Limitations (v0.7.9):
+- INSERT / UPDATE / DELETE only. MERGE deferred to v0.7.10 with a
+  JT400 fixture capture (MERGE has trickier parameter-marker
+  semantics that warrant byte-equivalence evidence).
+- No LOB parameters. JT400 falls back to per-row EXECUTE for LOB
+  batches (`JDSQLStatement.canBatch` returns false on
+  `containsLocator_ == LOCATOR_FOUND`); v0.7.9 rejects with a
+  pointer at the per-row path.
+- No `sql.Out` destinations. IUD has no OUT params on the wire.
+- Every row in a single call must have the same Go types per
+  column position (validated up-front before any wire activity).
+
+Implementation:
+- `hostserver/db_prepared.go` — `EncodeDBExtendedData` refactored
+  into a thin wrapper over the new
+  `EncodeDBExtendedDataBatch(params, rows [][]any)` which
+  parametrises the `rowCount` field in the CP `0x381F` header
+  (was hard-coded to 1 since v0.3 / M3). Per-row encoding is the
+  same byte-format as the legacy single-row path.
+- `hostserver/db_exec.go` — `ExecuteBatch` adds the multi-row
+  EXECUTE dispatch sequence (CREATE_RPB + PREPARE_DESCRIBE +
+  CHANGE_DESCRIPTOR + EXECUTE with the multi-row payload). Skips
+  the LOB-rewrite and OUT-fixup paths since neither is relevant
+  to IUD batches.
+- `driver/conn_batch.go` — `Conn.BatchExec` validates the verb,
+  row arity, value types, and splits at 32k rows.
+
+Unit tests (no live LPAR): byte-level golden vectors for the
+multi-row encoder; verb / arity / LOB / `sql.Out` rejection
+truth tables for `Conn.BatchExec`. Live conformance:
+`TestBatch_InsertVerified` / `TestBatch_UpdateVerified` /
+`TestBatch_DeleteVerified` / `TestBatch_AutoSplits32k` /
+`TestBatch_PerfDelta` (the last logs the per-row vs batch
+timing for perf-doc citation).
+
+## [0.7.8] - 2026-05-12
+
 ### Added: OUT/INOUT CALL cache-hit dispatch (v0.7.8)
 
 `package-criteria=extended` plus an OUT-parameter stored procedure

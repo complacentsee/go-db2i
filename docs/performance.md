@@ -269,6 +269,52 @@ Reference: `test/conformance/cache_hit_test.go` exercises 12
 scenarios across the JDBC type matrix and asserts the slog probe
 on each cache-hit dispatch.
 
+## Bulk IUD via `Conn.BatchExec` (v0.7.9)
+
+A driver-typed extension on `*db2i.Conn`. Packs N parameter-marker
+sets into a single CP `0x381F` multi-row block on one EXECUTE
+request — the IBM i "block insert" wire shape JT400 uses for
+non-LOB IUD batches
+([`AS400JDBCPreparedStatementImpl.java:944-948`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/AS400JDBCPreparedStatementImpl.java)).
+One round-trip per 32k-row chunk vs N per row for a regular
+`db.Exec` loop. Auto-splits at `MaxBlockedInputRows = 32000`
+(matches JT400's `maximumBlockedInputRows` cap).
+
+Wire savings:
+
+| Path | Round-trips for 1000-row INSERT |
+|---|---|
+| `db.Exec` loop | 1000 (one PREPARE_DESCRIBE + EXECUTE per row; PREPARE_DESCRIBE is amortised via `database/sql`'s plan cache but the EXECUTE remains) |
+| `Conn.BatchExec` | 1 EXECUTE for the whole batch (plus the once-per-batch CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR) |
+
+Measured on IBM Cloud V7R6M0 via VPC tunnel for 1000-row INSERT
+into a small table (`TestBatch_PerfDelta` in
+`test/conformance/batch_test.go`): `db.Exec` loop ~3.9 s vs
+`BatchExec` ~11 ms (**~358× speed-up**). The win is the
+round-trip elimination — each per-row INSERT pays one full
+network round-trip; the batch collapses to one wire frame. Speed-
+up scales with RTT: an LPAR-local network at ~0.1 ms RTT would
+see closer to 10–50× (PREPARE_DESCRIBE's plan-compile cost on the
+server dominates at low RTT), while the high-RTT tunneled path
+sees the wire savings nearly unattenuated. A 50k-row batch
+finishes in ~160 ms on the same tunnel (two 32k+18k chunks, two
+EXECUTEs).
+
+Limitations (v0.7.9):
+- INSERT / UPDATE / DELETE only. MERGE deferred to v0.7.10 with a
+  JT400 fixture capture.
+- No LOB parameters. JT400 falls back to per-row EXECUTE for LOB
+  batches (locator-allocate doesn't compose with the multi-row
+  CP `0x381F` shape); v0.7.9 rejects `*db2i.LOBValue` rows with a
+  pointer at the per-row path.
+- No `sql.Out` destinations. IUD has no OUT params on the wire.
+- Every row in a single call must have the same Go types per
+  column position; mismatches are caught up-front before any
+  wire activity.
+
+Access pattern documented in
+[`configuration.md`](./configuration.md#driver-typed-methods-sqlconnraw).
+
 ## Lazy iteration via `Rows.Next`
 
 `Rows.Next` pulls one row at a time from the underlying

@@ -1,19 +1,16 @@
 # go-db2i
 
-> **Current: v0.7.8 (2026-05-12)** — extends the cache-hit fast
-> path to OUT/INOUT stored procedures under
-> `package-criteria=extended`. A V7R6M0 probe confirmed the server
-> honours OUT direction bytes on cache-hit dispatch, so v0.7.8
-> relaxes `preparedParamsFromCached`'s defensive reject, decodes
-> CP `0x380E` for OUT values in `ExecutePreparedCached`, and writes
-> them back into the bound `sql.Out` destinations. v0.7.7's
-> `hasOutDest` refresh-skip gate is gone — OUT CALLs now
-> auto-populate and cache-hit-dispatch like every other eligible
-> statement. Builds on v0.7.7's `DECLARE PROCEDURE` routing fix
-> and `criteria=extended` (CALL / VALUES / WITH filing) +
-> v0.7.7.1 docs corrections. See
-> [`docs/package-caching.md`](./docs/package-caching.md) for the
-> operator's guide and the `Example_packageCache*` godoc snippets.
+> **Current: v0.7.9 (2026-05-12)** — adds `Conn.BatchExec` for
+> bulk INSERT / UPDATE / DELETE via the IBM i "block insert" wire
+> shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk
+> vs one per row for a `db.Exec` loop; **~358× speed-up** measured
+> on V7R6M0 via VPC tunnel for a 1000-row INSERT
+> (`TestBatch_PerfDelta`). Builds on v0.7.8's OUT-CALL
+> cache-hit dispatch and v0.7.7's `criteria=extended`. See
+> [`docs/performance.md`](./docs/performance.md#bulk-iud-via-connbatchexec-v079)
+> for the perf numbers and
+> [`docs/configuration.md`](./docs/configuration.md#driver-typed-methods-sqlconnraw)
+> for the access pattern.
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
@@ -112,6 +109,12 @@ implemented end-to-end:
   `ORSResultData` and decodes CP `0x380E`, and OUT values flow
   back through `writeBackOutParams` into the bound `sql.Out`
   destinations. Empirically validated on V7R6M0 (2026-05-12 probe).
+  v0.7.9 adds `Conn.BatchExec` for bulk IUD via block insert
+  (CP `0x381F` multi-row with `rowCount=N`): one round-trip per
+  32k-row chunk vs one per row, **~358× speed-up** measured on
+  V7R6M0 via VPC tunnel for a 1000-row INSERT (LPAR-local would
+  be smaller since PREPARE_DESCRIBE plan-compile dominates over
+  RTT there).
   The 10-char wire name is byte-equal to JT400 for the same
   session options under `default` / `select`, so a Go client and a
   Java client targeting the same LPAR share one `*PGM`. (`extended`
