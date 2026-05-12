@@ -848,6 +848,64 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	return &Stmt{conn: c, query: query}, nil
 }
 
+// ExecContext implements driver.ExecerContext. When a driver
+// exposes this method, database/sql skips the
+// Conn.Prepare → Stmt.ExecContext → Stmt.Close dance and calls
+// straight through for one-shot `db.Exec` / `tx.Exec` paths.
+//
+// The wire flow is identical to going through Stmt.ExecContext
+// (PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE for prepared,
+// EXECUTE_IMMEDIATE for arg-less); the saving is one Stmt struct
+// allocation per call and the call-stack indirection through
+// Conn.Prepare. Useful for high-throughput paths where the
+// allocation cost matters; behaviourally indistinguishable from
+// the Prepare-then-Exec form for everything else.
+//
+// Stmt-bound features that DON'T survive the one-shot path:
+//   - The v0.7.18 paramNames cache on Stmt. A `db.Exec` with
+//     sql.Named() args pays the QSYS2.SYSPARMS catalog lookup
+//     every call. Callers issuing the same named-CALL repeatedly
+//     should use `db.Prepare` and reuse the *sql.Stmt to amortise
+//     the lookup; the cache lives there.
+//
+// Added in v0.7.20.
+func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.closed {
+		return nil, driver.ErrBadConn
+	}
+	stmt := &Stmt{conn: c, query: query}
+	return stmt.ExecContext(ctx, args)
+}
+
+// QueryContext implements driver.QueryerContext. Mirror of
+// ExecContext above for db.Query / tx.Query / db.QueryRow paths.
+// Same allocation-saving and same paramNames caching caveat.
+//
+// Added in v0.7.20.
+func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.closed {
+		return nil, driver.ErrBadConn
+	}
+	stmt := &Stmt{conn: c, query: query}
+	return stmt.QueryContext(ctx, args)
+}
+
+// CheckNamedValue implements driver.NamedValueChecker on *Conn so
+// the v0.7.20 ExecerContext / QueryerContext shortcut path admits
+// the same custom value types as the Stmt-routed path: *LOBValue
+// and stdlib sql.Out. database/sql consults the Conn-level
+// NamedValueChecker BEFORE falling back to the Stmt-level one --
+// without this, sql.Out args go through database/sql's default
+// converter, which rejects them as "unsupported type ...struct"
+// and breaks every db.Exec("CALL ...", sql.Out{...}) call that
+// previously worked via Stmt.
+//
+// Delegates to the shared checkNamedValue helper in stmt.go so
+// the two surfaces stay in sync.
+func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
+	return checkNamedValue(nv)
+}
+
 // Close releases the as-database socket.
 func (c *Conn) Close() error {
 	if c.closed {

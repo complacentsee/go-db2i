@@ -63,8 +63,23 @@ func (s *Stmt) Close() error { return nil }
 // returning driver.ErrSkip tells it to fall back to its default
 // conversion (int -> int64, etc.).
 //
-// Implements database/sql/driver.NamedValueChecker.
+// Implements database/sql/driver.NamedValueChecker. Mirrored on
+// *Conn (in conn.go) because database/sql consults the Conn-level
+// checker when dispatching through the v0.7.20
+// driver.ExecerContext / QueryerContext shortcuts -- the Stmt-
+// level checker only fires when the call goes through
+// Conn.Prepare → Stmt.ExecContext.
 func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error {
+	return checkNamedValue(nv)
+}
+
+// checkNamedValue is the shared predicate behind Stmt.CheckNamedValue
+// and Conn.CheckNamedValue. database/sql consults the Stmt checker
+// for Prepare-then-Exec paths and the Conn checker for the
+// shortcut paths (db.Exec / db.Query without Prepare). Both must
+// admit the same custom value types so the dispatch surface is
+// uniform.
+func checkNamedValue(nv *driver.NamedValue) error {
 	if _, ok := nv.Value.(*LOBValue); ok {
 		return nil
 	}

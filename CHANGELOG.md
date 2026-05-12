@@ -10,6 +10,56 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.20] - 2026-05-12
+
+### Added: `driver.ExecerContext` + `driver.QueryerContext` on `*Conn`
+
+`*Conn` now implements the database/sql shortcut interfaces so
+`db.Exec` / `db.Query` / `tx.Exec` / `tx.Query` dispatch directly
+through `Conn.ExecContext` / `Conn.QueryContext` instead of the
+historical `Conn.Prepare` → `Stmt.ExecContext` → `Stmt.Close`
+path. Wire flow is unchanged; the saving is one `Stmt` struct
+allocation per call plus one round of indirection. Marginal on
+its own, but it brings the driver in line with the standard
+contract database/sql expects from "modern" drivers.
+
+### Fixed: `CheckNamedValue` mirrored on `*Conn` so the shortcut admits sql.Out and `*LOBValue`
+
+The shortcut path consults `Conn.CheckNamedValue` BEFORE falling
+through to `Stmt.CheckNamedValue` -- without a `*Conn` mirror, every
+`db.Exec("CALL …", sql.Out{...})` / `*LOBValue` arg landed in
+database/sql's default converter, which rejected them as
+"unsupported type ...struct". v0.7.20 adds the mirror so the two
+dispatch surfaces are uniform.
+
+The shared predicate `checkNamedValue` (in stmt.go) backs both
+`Stmt.CheckNamedValue` and `Conn.CheckNamedValue`; adding a new
+custom value type only needs editing the helper, not both call
+sites.
+
+### Caveat: paramNames cache only survives via `db.Prepare`
+
+The v0.7.18 `sql.Named()` catalog-lookup cache lives on `*Stmt`.
+The shortcut path creates a transient `*Stmt` per call -- so a
+`db.Exec("CALL …", sql.Named(...))` pays the `QSYS2.SYSPARMS`
+round-trip every time. Callers issuing the same named-CALL in a
+hot loop should use `db.Prepare` + reuse the `*sql.Stmt` to
+amortise the lookup; the cache works as expected on the prepared
+path.
+
+### Tests
+
+- Offline `TestConnImplementsExecerContext` / `…QueryerContext`
+  pin the interface satisfaction at compile-time -- if a future
+  refactor accidentally drops the methods, the tests stop
+  compiling.
+- Offline `TestConnShortcutsRejectClosedConn` confirms both
+  shortcuts honour `c.closed` and return `driver.ErrBadConn`,
+  matching `Conn.Prepare`'s gate.
+- Live conformance V7R6M0: 64 PASS / 0 FAIL (same count as
+  v0.7.19; all `sql.Out` / `*LOBValue` cases continue to pass
+  through the new dispatch path).
+
 ## [0.7.19] - 2026-05-12
 
 ### Fixed: session state can no longer leak across pool checkouts

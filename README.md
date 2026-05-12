@@ -1,15 +1,17 @@
 # go-db2i
 
-> **Current: v0.7.19 (2026-05-12)** — session state can no
-> longer leak across pool checkouts. `SetSchema`,
-> `AddLibraries`, and `RemoveLibraries` now mark the conn dirty;
-> `ResetSession` discards dirty conns via `driver.ErrBadConn` so
-> the pool dials fresh on the next checkout. Multi-tenant
-> services calling `SetSchema(tenantID)` per request no longer
-> leak the schema into the next request's connection. Builds on
-> v0.7.18 (`sql.Named` for CALLs), v0.7.17 (query-optimize-goal),
-> v0.7.16 (timeouts), and v0.7.15 (BatchExec LOB / BeginTx
-> isolation).
+> **Current: v0.7.20 (2026-05-12)** — `db.Exec` / `db.Query`
+> now dispatch through `driver.ExecerContext` /
+> `driver.QueryerContext` on `*Conn` directly instead of the
+> historical `Conn.Prepare` → `Stmt` → `Stmt.Close` path. Wire
+> flow unchanged; saves one allocation per call and aligns with
+> the standard contract database/sql expects from drivers.
+> `Conn.CheckNamedValue` mirror added in the same release so
+> `sql.Out{...}` / `*LOBValue` arguments continue to flow through
+> the new dispatch surface. Builds on v0.7.19 (SessionResetter
+> dirty-discard), v0.7.18 (`sql.Named` for CALLs), v0.7.17
+> (query-optimize-goal), v0.7.16 (timeouts), and v0.7.15
+> (BatchExec LOB / BeginTx isolation).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
