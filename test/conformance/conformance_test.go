@@ -2932,3 +2932,49 @@ func TestBeginTxIsolation(t *testing.T) {
 		}
 	})
 }
+
+// TestQueryOptimizeGoal exercises the v0.7.17 ?query-optimize-goal=
+// DSN knob end-to-end: open a connection under each accepted value
+// and confirm SET_SQL_ATTRIBUTES + a simple SELECT succeed without
+// the server returning SQL-401 or a *Db2Error. The wire-shape
+// regression (CP 0x3833 byte) is covered offline by
+// TestQueryOptimizeGoalWireShape; this test guarantees the live
+// server still accepts the byte after the option flows through.
+func TestQueryOptimizeGoal(t *testing.T) {
+	base := dsn(t)
+
+	for _, goal := range []string{"firstio", "allio"} {
+		goal := goal
+		t.Run("goal="+goal, func(t *testing.T) {
+			sep := "?"
+			if strings.Contains(base, "?") {
+				sep = "&"
+			}
+			db, err := sql.Open("db2i", base+sep+"query-optimize-goal="+goal)
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			defer db.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			var u string
+			if err := db.QueryRowContext(ctx, "SELECT CURRENT_USER FROM SYSIBM.SYSDUMMY1").Scan(&u); err != nil {
+				t.Fatalf("SELECT with query-optimize-goal=%s: %v", goal, err)
+			}
+			if strings.TrimSpace(u) == "" {
+				t.Errorf("CURRENT_USER scanned empty for goal=%s", goal)
+			}
+		})
+	}
+
+	t.Run("invalid value rejects", func(t *testing.T) {
+		sep := "?"
+		if strings.Contains(base, "?") {
+			sep = "&"
+		}
+		_, err := sql.Open("db2i", base+sep+"query-optimize-goal=fastest")
+		if err == nil {
+			t.Fatal("expected sql.Open to reject query-optimize-goal=fastest")
+		}
+	})
+}

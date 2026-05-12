@@ -1,17 +1,14 @@
 # go-db2i
 
-> **Current: v0.7.16 (2026-05-12)** — production-reliability
-> timeouts. `?socket-timeout=N` arms a per-operation read-deadline
-> default on every `Exec` / `Query` / `BatchExec` /
-> `BeginTx` when the caller's `ctx` has none; an unresponsive
-> LPAR that doesn't drop the TCP connection used to hang
-> operations for the full OS-level TCP timeout (~hours), now
-> bounded at the configured duration. `?login-timeout=N`
-> overrides the historical hardcoded 30-second dial timeout.
-> `Conn.BatchExec` now also installs a deadline on its fast-path
-> chunk loop. Builds on v0.7.15 (BatchExec LOB fallback +
-> BeginTx isolation), v0.7.14 (large user-table streaming
-> delivers all rows), and v0.7.13 (cursor + race fixes).
+> **Current: v0.7.17 (2026-05-12)** —
+> `?query-optimize-goal=firstio|allio` pins the server-side
+> optimizer objective on CP 0x3833 in SET_SQL_ATTRIBUTES. Use
+> `firstio` to minimise time-to-first-row (OLTP, streaming
+> reads); `allio` to maximise total throughput (reports, bulk
+> extracts). Default omits the CP entirely (server uses its
+> job default). Builds on v0.7.16 (production-reliability
+> timeouts), v0.7.15 (BatchExec LOB fallback + BeginTx
+> isolation), and v0.7.14 (large user-table streaming).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
@@ -51,8 +48,6 @@ JT400-byte-equal session options for the
 A handful of items would benefit a future release but don't block
 production use:
 
-- **`query optimize goal`** — DSN knob not plumbed; falls back to
-  the job default (`*ALLIO` on most V7R5+ systems).
 - **`sql.Named("p", ...)` for stored-procedure CALLs** — today,
   positional only (`CALL proc(?, ?, ?)` with three positional
   args). The JT400-equivalent `CallableStatement.setObject("p",

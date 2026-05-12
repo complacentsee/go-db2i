@@ -1,0 +1,43 @@
+{
+  "case" : "select_dummy_qog_allio",
+  "resultSets" : [ {
+    "columns" : [ {
+      "name" : "00001",
+      "label" : "00001",
+      "typeName" : "TIMESTAMP",
+      "sqlType" : 93,
+      "displaySize" : 26,
+      "precision" : 26,
+      "scale" : 6,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "00002",
+      "label" : "00002",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 128,
+      "precision" : 128,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    }, {
+      "name" : "00003",
+      "label" : "00003",
+      "typeName" : "VARCHAR",
+      "sqlType" : 12,
+      "displaySize" : 18,
+      "precision" : 18,
+      "scale" : 0,
+      "nullable" : 0,
+      "signed" : false,
+      "schema" : "",
+      "table" : ""
+    } ],
+    "rows" : [ [ "2026-05-12T20:17:43.152371", "GOTEST", "SERIES" ] ]
+  } ]
+}

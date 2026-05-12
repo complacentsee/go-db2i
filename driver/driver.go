@@ -510,6 +510,24 @@ type Config struct {
 	// DSN `?login-timeout=N` (N in seconds; e.g. `?login-timeout=5`).
 	LoginTimeout time.Duration
 
+	// QueryOptimizeGoal sets the server-side query optimizer's
+	// objective. Mirrors JT400's `query optimize goal` JDBC URL
+	// property and translates to CP 0x3833 in SET_SQL_ATTRIBUTES.
+	// Use the hostserver.QueryOptimize* constants:
+	//
+	//   QueryOptimizeFirstIO (0xC6) -- time-to-first-row (streaming,
+	//                                   OLTP, cursor.Next loops)
+	//   QueryOptimizeAllIO   (0xC1) -- total throughput (reports,
+	//                                   bulk extracts)
+	//   QueryOptimizeUnset   (0)    -- omit the CP, server uses its
+	//                                   job default (typically *ALLIO
+	//                                   on V7R5+). Default; preserves
+	//                                   byte-equality with pre-v0.7.17
+	//                                   fixtures.
+	//
+	// DSN form: `?query-optimize-goal=firstio` or `=allio`.
+	QueryOptimizeGoal byte
+
 	// SocketTimeout caps the read-deadline on every Exec / Query /
 	// BatchExec round trip when the caller's context has no
 	// deadline. Without this, an LPAR that goes unresponsive but
@@ -918,6 +936,16 @@ func parseDSN(dsn string) (*Config, error) {
 	// driver can't put together a CP 0x3804 to send).
 	if cfg.ExtendedDynamic && cfg.PackageName == "" {
 		return nil, fmt.Errorf("extended-dynamic=true requires package=<name>")
+	}
+	if v := q.Get("query-optimize-goal"); v != "" {
+		switch strings.ToLower(v) {
+		case "firstio", "first":
+			cfg.QueryOptimizeGoal = hostserver.QueryOptimizeFirstIO
+		case "allio", "all":
+			cfg.QueryOptimizeGoal = hostserver.QueryOptimizeAllIO
+		default:
+			return nil, fmt.Errorf("invalid query-optimize-goal %q (want firstio|allio)", v)
+		}
 	}
 	if v := q.Get("login-timeout"); v != "" {
 		d, err := parseTimeoutSeconds(v)

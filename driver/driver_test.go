@@ -1170,6 +1170,50 @@ func TestParseDSN_PackageCCSIDRejectMentionsM11(t *testing.T) {
 	}
 }
 
+// TestParseDSN_QueryOptimizeGoal pins the v0.7.17 ?query-optimize-goal= knob.
+// Accepts firstio/first and allio/all (case-insensitive); rejects
+// unknown values.
+func TestParseDSN_QueryOptimizeGoal(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		dsn     string
+		want    byte
+		wantErr string
+	}{
+		{"unset is zero (omits CP)", "db2i://u:p@h/", 0, ""},
+		{"firstio", "db2i://u:p@h/?query-optimize-goal=firstio", hostserver.QueryOptimizeFirstIO, ""},
+		{"first alias", "db2i://u:p@h/?query-optimize-goal=first", hostserver.QueryOptimizeFirstIO, ""},
+		{"allio", "db2i://u:p@h/?query-optimize-goal=allio", hostserver.QueryOptimizeAllIO, ""},
+		{"all alias", "db2i://u:p@h/?query-optimize-goal=all", hostserver.QueryOptimizeAllIO, ""},
+		{"FIRSTIO uppercase", "db2i://u:p@h/?query-optimize-goal=FIRSTIO", hostserver.QueryOptimizeFirstIO, ""},
+		{"unknown value", "db2i://u:p@h/?query-optimize-goal=fastest", 0, "firstio|allio"},
+		{"empty value treated as unset", "db2i://u:p@h/?query-optimize-goal=", 0, ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := parseDSN(tc.dsn)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("want error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %q does not contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDSN(%q): %v", tc.dsn, err)
+			}
+			if cfg.QueryOptimizeGoal != tc.want {
+				t.Errorf("QueryOptimizeGoal: got 0x%02X want 0x%02X", cfg.QueryOptimizeGoal, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseDSN_LoginTimeout pins the v0.7.16 ?login-timeout= knob.
 // Accepts both integer-seconds (JT400-style) and Go duration form;
 // rejects negatives and unparseable strings.

@@ -10,6 +10,48 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-05-12
+
+### Added: `?query-optimize-goal=firstio|allio` DSN knob
+
+`Config.QueryOptimizeGoal` + `?query-optimize-goal=firstio|allio`
+let callers pin the server-side optimizer goal at connect:
+
+- **firstio** (CP 0x3833 = `'F'` EBCDIC 0xC6) — optimize for
+  time-to-first-row. Good fit for OLTP, streaming `Rows.Next` loops,
+  and any path where the driver consumes the result lazily without
+  caring about total throughput.
+- **allio** (CP 0x3833 = `'A'` EBCDIC 0xC1) — optimize for total
+  throughput. Good fit for reports and bulk extracts that drain the
+  whole result set.
+- **unset** (default) — omit CP 0x3833 entirely; the server falls
+  back to its job default (typically `*ALLIO` on V7R5+). Preserves
+  byte-equality with the existing `select_dummy.trace` fixture.
+
+Wire shape: CP 0x3833 is context-sensitive on the host-server
+protocol. In SET_SQL_ATTRIBUTES it's QueryOptimizeGoal (this
+release); in OPEN_DESCRIBE_FETCH the same numeric CP carries
+VariableFieldCompr. The two live in separate constants
+(`hostserver.cpDBQueryOptimizeGoal` vs `cpDBVariableFieldCompr`) to
+make the dual use unambiguous.
+
+Mirrors JT400's `query optimize goal` JDBC URL property; reference
+fixtures `testdata/jtopen-fixtures/fixtures/select_dummy_qog_*`
+were captured under JT400 with the matching property and a new
+`SelectDummyQOG` case in the Java harness.
+
+New tests:
+
+- Offline: `TestQueryOptimizeGoalWireShape` cross-checks JT400's
+  fixture against our encoder for unset / firstio / allio.
+- Offline: `TestParseDSN_QueryOptimizeGoal` covers firstio /
+  first alias / allio / all alias / case-insensitivity / unknown
+  value rejection / empty value passthrough.
+- Live: `TestQueryOptimizeGoal` opens a connection under each
+  accepted value and confirms SET_SQL_ATTRIBUTES + a simple SELECT
+  succeed without an SQL-401 from the server. Validated on
+  V7R6M0 (IBM Cloud Power VS).
+
 ## [0.7.16] - 2026-05-12
 
 ### Added: `?socket-timeout=N` DSN knob (production-reliability safety net)

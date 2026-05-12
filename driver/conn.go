@@ -76,6 +76,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	opts := hostserver.DefaultDBAttributesOptions()
 	opts.DateFormat = c.cfg.DateFormat
 	opts.IsolationLevel = c.cfg.Isolation
+	opts.QueryOptimizeGoal = c.cfg.QueryOptimizeGoal
 	if c.cfg.Library != "" {
 		opts.DefaultSQLLibrary = c.cfg.Library
 	}

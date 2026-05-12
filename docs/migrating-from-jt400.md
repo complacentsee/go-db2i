@@ -112,7 +112,7 @@ the *Notes* column says why.
 | `full open` | — (always optimised) | We never request a non-prepared OPEN. |
 | `data compression` | — (server-decides) | We always set the RLE-1 wholedata bit and unwrap `0x3832`. The per-CP RLE-1 path also works. |
 | `variable field compression` | — | Inline-RLE-1 compression flag from JT400 isn't sent; we let the server pick. |
-| `query optimize goal` | — | Falls back to the job default (`*ALLIO` on most V7R5+ systems). |
+| `query optimize goal` | `query-optimize-goal` | v0.7.17. `firstio` (CP 0x3833=0xC6 EBCDIC 'F') or `allio` (CP 0x3833=0xC1 EBCDIC 'A'). Unset omits CP 0x3833 -- server uses its job default (typically `*ALLIO` on V7R5+). Mirrors JT400's wire shape byte-for-byte against the captured fixtures. |
 | `query storage limit` | — | Not plumbed. |
 | `query timeout mechanism` | — | Use `context.WithTimeout` per call; cancel propagates via `Conn.SetDeadline`. |
 | `socket timeout` | `socket-timeout` | v0.7.16. Per-op read-deadline default when caller's `ctx` has none. Accepts integer seconds (JT400-style: `?socket-timeout=30`) or Go duration form (`?socket-timeout=30s`). An explicit `ctx` deadline still wins; default 0 = no automatic timeout. Belt-and-suspenders against an unresponsive LPAR that doesn't drop TCP. |
@@ -189,10 +189,10 @@ mirror `Connection.setSavepoint` etc.); `SetSchema` /
 `iter.Seq2[T, error]` over `*sql.Rows` for `for v, err := range
 db2iiter.ScanAll(rows, scanFn)` loops.
 
-⏭️ **Deferred** (would benefit a future release): `query optimize goal`,
-plus `CallableStatement.setObject("name", ...)` named-parameter
-binding for stored-procedure CALLs (positional `CALL proc(?, ?,
-?)` works today).
+⏭️ **Deferred** (would benefit a future release):
+`CallableStatement.setObject("name", ...)` named-parameter binding
+for stored-procedure CALLs (positional `CALL proc(?, ?, ?)` works
+today).
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`

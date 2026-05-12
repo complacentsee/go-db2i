@@ -131,6 +131,21 @@ type DBAttributesOptions struct {
 	//   0='.' 1=','
 	// -1 (default) = omit the CP (job default).
 	DecimalSeparator int8
+
+	// QueryOptimizeGoal sets the server-side optimizer goal byte on
+	// CP 0x3833 in SET_SQL_ATTRIBUTES. Mirrors JT400's
+	// "query optimize goal" JDBC URL property:
+	//
+	//   QueryOptimizeFirstIO (0xC6, 'F') -- optimize for time-to-
+	//                                       first-row (streaming, OLTP)
+	//   QueryOptimizeAllIO   (0xC1, 'A') -- optimize for total
+	//                                       throughput (reports / analytics)
+	//   QueryOptimizeUnset   (0)         -- omit the CP entirely;
+	//                                       server uses its job default
+	//                                       (typically *ALLIO on V7R5+)
+	//
+	// Default 0 preserves byte-equality with pre-v0.7.17 fixtures.
+	QueryOptimizeGoal byte
 }
 
 // DateFormat constants for DBAttributesOptions.DateFormat. The
@@ -248,6 +263,38 @@ const (
 	IsolationRepeatableRd  int16 = 3  // *RR   -- repeatable read
 	IsolationSerializable  int16 = 4  // *RS   -- serializable
 )
+
+// QueryOptimizeGoal values for DBAttributesOptions.QueryOptimizeGoal.
+// Sent on CP 0x3833 in SET_SQL_ATTRIBUTES as a single EBCDIC byte
+// matching JT400's `query optimize goal` JDBC URL property:
+//
+//	'F' (0xC6) → *FIRSTIO -- optimize for time-to-first-row (good
+//	             for streaming reads, OLTP, ResultSet.next() loops)
+//	'A' (0xC1) → *ALLIO   -- optimize for total throughput (good
+//	             for reports / analytics that drain whole result sets)
+//
+// Note CP 0x3833 is context-sensitive in the host-server protocol:
+// in SET_SQL_ATTRIBUTES it's QueryOptimizeGoal (this constant);
+// in OPEN_DESCRIBE_FETCH it's VariableFieldCompr (cpDBVariableFieldCompr
+// in db_select.go). The constants live in separate files to make
+// the dual use unambiguous.
+//
+// QueryOptimizeUnset (0) is the wire-equivalence sentinel: when the
+// field stays at its zero value, the CP is omitted entirely from
+// SET_SQL_ATTRIBUTES, matching the existing select_dummy fixture
+// byte-for-byte.
+const (
+	QueryOptimizeUnset   byte = 0x00
+	QueryOptimizeFirstIO byte = 0xC6 // EBCDIC 'F'
+	QueryOptimizeAllIO   byte = 0xC1 // EBCDIC 'A'
+)
+
+// cpDBQueryOptimizeGoal is the SET_SQL_ATTRIBUTES code point for
+// the query-optimize-goal byte. See QueryOptimize* for the encoded
+// values. (Numerically identical to cpDBVariableFieldCompr in
+// db_select.go, which is the same CP in the OPEN_DESCRIBE_FETCH
+// context -- different meaning per frame type.)
+const cpDBQueryOptimizeGoal uint16 = 0x3833
 
 // DefaultDBAttributesOptions returns the minimum-acceptable defaults
 // for an as-database session. These match the JTOpen JDBC driver
@@ -448,6 +495,13 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		DBParamByte(0x3828, 0x00),                                       // HexConstantParserOption
 		DBParamShort(0x3830, 0x0001),                                    // LocatorPersistence
 	)
+	// CP 0x3833 QueryOptimizeGoal -- omitted entirely unless the
+	// caller set it via ?query-optimize-goal=. Position in the wire
+	// order (between LocatorPersistence and the application-info CPs)
+	// matches the captured JT400 fixture select_dummy_qog_*.trace.
+	if opts.QueryOptimizeGoal != QueryOptimizeUnset {
+		params = append(params, DBParamByte(cpDBQueryOptimizeGoal, opts.QueryOptimizeGoal))
+	}
 	// Application info CPs. We match JTOpen's exact "JDBC" /
 	// "IBM Toolbox for Java" / "07060001" identifiers because
 	// PUB400 V7R5 returns SQL -401 on PREPARE_DESCRIBE if the

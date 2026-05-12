@@ -30,6 +30,13 @@ final class Cases {
         cases.add(new ConnectOnly());
         cases.add(new SelectDummy());
 
+        // Probe captures for v0.7.17 (query-optimize-goal DSN knob).
+        // Same SELECT under different `query optimize goal` JDBC
+        // properties so the byte-diff identifies the CP that
+        // carries the goal value.
+        cases.add(new SelectDummyQOG("select_dummy_qog_firstio", "*FIRSTIO"));
+        cases.add(new SelectDummyQOG("select_dummy_qog_allio",   "*ALLIO"));
+
         // Integer types via CAST so we don't need a schema.
         cases.add(typeFromDummy("types_smallint", "CAST(-12345 AS SMALLINT)"));
         cases.add(typeFromDummy("types_integer", "CAST(-2147483648 AS INTEGER)"));
@@ -158,6 +165,38 @@ final class Cases {
 
     private static final class SelectDummy extends Case {
         SelectDummy() { super("select_dummy"); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(
+                         "SELECT CURRENT_TIMESTAMP, CURRENT_USER, CURRENT_SERVER FROM SYSIBM.SYSDUMMY1")) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    /**
+     * Variant of {@link SelectDummy} that pins JT400's
+     * {@code "query optimize goal"} JDBC property so the
+     * SET_SQL_ATTRIBUTES init carries the optimize-goal CP. Used by
+     * the v0.7.17 wire investigation to identify which CP holds the
+     * goal value (capture two traces, byte-diff, look for the byte
+     * that changes between *FIRSTIO and *ALLIO).
+     */
+    private static final class SelectDummyQOG extends Case {
+        private final String goal;
+        SelectDummyQOG(String name, String goal) {
+            super(name);
+            this.goal = goal;
+        }
+        @Override public java.util.Map<String, String> extraConnectionProperties() {
+            java.util.Map<String, String> m = new java.util.HashMap<>();
+            // JT400 JDProperties name: "query optimize goal".
+            // Values "1" (*FIRSTIO -- first-row latency) and
+            // "2" (*ALLIO -- total-throughput). Mirrors
+            // JDProperties.QUERY_OPTIMIZE_GOAL enum.
+            m.put("query optimize goal", goal.equals("*FIRSTIO") ? "1" : "2");
+            return m;
+        }
         @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery(
