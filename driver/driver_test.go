@@ -118,11 +118,43 @@ func TestParseDSNRejectsBadInputs(t *testing.T) {
 		"bad signon-port":   "db2i://u:p@h/?signon-port=notanumber",
 		"signon-port zero":  "db2i://u:p@h/?signon-port=0",
 		"bad lob mode":      "db2i://u:p@h/?lob=bogus",
+		"block-size zero":   "db2i://u:p@h/?block-size=0",
+		"block-size 513":    "db2i://u:p@h/?block-size=513",
+		"block-size abc":    "db2i://u:p@h/?block-size=abc",
+		"block-size neg":    "db2i://u:p@h/?block-size=-1",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, err := parseDSN(dsn); err == nil {
 				t.Errorf("expected error for %q, got nil", dsn)
+			}
+		})
+	}
+}
+
+func TestParseDSNBlockSize(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		dsn  string
+		want int
+	}{
+		{"unset = zero (default 32 KiB downstream)", "db2i://u:p@h/", 0},
+		{"min 1", "db2i://u:p@h/?block-size=1", 1},
+		{"default 32", "db2i://u:p@h/?block-size=32", 32},
+		{"common 64", "db2i://u:p@h/?block-size=64", 64},
+		{"max 512", "db2i://u:p@h/?block-size=512", 512},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := parseDSN(tc.dsn)
+			if err != nil {
+				t.Fatalf("parseDSN(%q): %v", tc.dsn, err)
+			}
+			if cfg.BlockSizeKiB != tc.want {
+				t.Fatalf("BlockSizeKiB: got %d want %d", cfg.BlockSizeKiB, tc.want)
 			}
 		})
 	}

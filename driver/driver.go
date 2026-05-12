@@ -438,6 +438,16 @@ type Config struct {
 	// Default false to preserve the pre-flag wire shape byte-for-byte.
 	ExtendedMetadata bool
 
+	// BlockSizeKiB sets the continuation-FETCH BufferSize (CP
+	// 0x3834) the driver emits on PREPARE_DESCRIBE OPEN and every
+	// subsequent FETCH. Zero (the default) preserves the historical
+	// 32 KiB shape byte-for-byte. Valid range 1..512 KiB; out-of-
+	// range DSN values reject at parse time so users don't
+	// accidentally request a 16 GiB buffer through a typo. Mirrors
+	// JT400's `block size` JDBC URL knob (configured via DSN
+	// `block-size=N`).
+	BlockSizeKiB int
+
 	// Logger is the *slog.Logger callers want the driver to emit
 	// diagnostic events through. Nil (the default) silences all
 	// driver-side logging; the driver internally substitutes a
@@ -771,6 +781,16 @@ func parseDSN(dsn string) (*Config, error) {
 			return nil, fmt.Errorf("invalid extended-metadata %q (want true|false): %w", v, err)
 		}
 		cfg.ExtendedMetadata = b
+	}
+	if v := q.Get("block-size"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid block-size %q (want integer KiB in 1..512): %w", v, err)
+		}
+		if n < 1 || n > 512 {
+			return nil, fmt.Errorf("invalid block-size %d (want integer KiB in 1..512)", n)
+		}
+		cfg.BlockSizeKiB = n
 	}
 	if v := q.Get("extended-dynamic"); v != "" {
 		b, err := parseBool(v)

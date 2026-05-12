@@ -708,7 +708,7 @@ func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte,
 		}
 		params = append(params,
 			DBParamByte(cpDBVariableFieldCompr, 0xE8),
-			DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
+			bufferSizeParam(opts.blockSizeKiB),
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),

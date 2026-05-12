@@ -396,7 +396,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	// SELECT). The returned Cursor owns the RPB and supports
 	// continuation FETCH normally because we still issue CREATE_RPB.
 	if cached := s.conn.packageLookup(s.query); cached != nil && len(cached.DataFormat) > 0 && s.conn.pkg != nil {
-		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
+		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37, s.conn.selectOptionsFor(s.query, len(args) > 0)...)
 		s.logQueryCached(len(args), start, cached.Name, err)
 		if shouldRefallbackToPrepare(err) {
 			// SQL-204 / SQL-805: stale cached plan. Purge and

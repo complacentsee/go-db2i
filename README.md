@@ -1,25 +1,29 @@
 # go-db2i
 
-> **Current: v0.7.11 (2026-05-12)** — JT400 parity cleanup
-> (M11). Five new DSN knobs close out the last documented
-> migration gaps: `?libraries=A,B,C` for multi-library job-list
-> setup (M11-2); `?naming=system` for slash-qualified
-> `MYLIB/TABLE` identifiers (M11-3); `?time-format`,
-> `?date-separator`, `?time-separator`, `?decimal-separator`
-> for the four passthroughs that were previously hardcoded as
-> job-default (M11-4). Bug #15 was confirmed already closed in
-> commit `d84cb3e` (M11-1). All sub-items live-validated on
-> V7R6M0. See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
+> **Current: v0.7.12 (2026-05-12)** — savepoints, runtime
+> schema/library mutation, fetch tuning, iter adapter (M12).
+> Six new driver-typed methods on `*db2i.Conn` (reachable via
+> `sql.Conn.Raw`) close the last "I miss this from JT400" gaps:
+> `Savepoint` / `ReleaseSavepoint` / `RollbackToSavepoint` for
+> nested-Tx patterns (M12-1); `SetSchema` / `AddLibraries` /
+> `RemoveLibraries` for mid-session schema and library-list
+> mutation (M12-2). DSN `?block-size=N` (1-512 KiB, default 32)
+> tunes the continuation-FETCH buffer per JT400's BLOCK_SIZE
+> (M12-3). New `db2iiter` sub-package adds an `iter.Seq2`
+> range-over-func adapter for `*sql.Rows` (M12-4). The default
+> block-size is byte-identical to v0.7.11, so existing fixture
+> tests still match.
+> See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
 > for the full JT400 URL → go-db2i DSN mapping
-> (27 supported keys now).
+> (28 supported keys now).
 >
-> Builds on v0.7.10 (MERGE batching), v0.7.9 (IUD batching via
-> CP `0x381F`), v0.7.8 (OUT-CALL cache-hit dispatch), v0.7.7
-> (`criteria=extended`). See
-> [`docs/performance.md`](./docs/performance.md#bulk-iud--merge-via-connbatchexec-v079-v0710)
+> Builds on v0.7.11 (JT400 parity cleanup), v0.7.10 (MERGE
+> batching), v0.7.9 (IUD batching via CP `0x381F`), v0.7.8
+> (OUT-CALL cache-hit dispatch), v0.7.7 (`criteria=extended`).
+> See [`docs/performance.md`](./docs/performance.md#bulk-iud--merge-via-connbatchexec-v079-v0710)
 > for the batched-IUD/MERGE perf numbers and
 > [`docs/configuration.md`](./docs/configuration.md#driver-typed-methods-sqlconnraw)
-> for the access pattern.
+> for the driver-typed-method access pattern.
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java

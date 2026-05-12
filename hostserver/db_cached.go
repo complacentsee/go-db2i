@@ -193,7 +193,8 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 // packageLibrary is the on-wire EBCDIC library name; it's attached
 // to CREATE_RPB so the server can resolve the package-named
 // statement on the RPB's bind side.
-func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16) (*Cursor, error) {
+func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16, opts ...SelectOption) (*Cursor, error) {
+	o := resolveSelectOpts(opts)
 	if cached == nil {
 		return nil, fmt.Errorf("hostserver: OpenSelectPreparedCached: cached statement nil")
 	}
@@ -264,7 +265,7 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 	params = append(params,
 		DBParamVarString(cpDBPrepareStatementName, 273, cached.NameBytes),
 		DBParamByte(cpDBVariableFieldCompr, 0xE8),
-		DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},
+		bufferSizeParam(o.blockSizeKiB),
 		DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 		DBParamByte(cpDBResultSetHoldability, 0xE8),
 		DBParamShort(cpDBStatementType, stmtType),
@@ -314,7 +315,7 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 		return nil, fmt.Errorf("hostserver: parse cached OPEN row data: %w", err)
 	}
 	outcome := interpretFetchReply(rep)
-	return newCursor(conn, cols, rows, outcome, nextCorr, outcome.numberOfResults), nil
+	return newCursor(conn, cols, rows, outcome, nextCorr, outcome.numberOfResults, o.blockSizeKiB), nil
 }
 
 // sendCachedCreateRPB issues a CREATE_RPB matching the JT400 wire

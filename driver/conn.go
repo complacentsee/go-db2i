@@ -416,6 +416,9 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 	if c.cfg != nil && c.cfg.ExtendedMetadata {
 		opts = append(opts, hostserver.WithExtendedMetadata(true))
 	}
+	if c.cfg != nil && c.cfg.BlockSizeKiB > 0 {
+		opts = append(opts, hostserver.WithBlockSize(c.cfg.BlockSizeKiB))
+	}
 	if c.pkg != nil && c.packageEligibleFor(sql, hasParams) {
 		// Extended-dynamic + packaged statement: emit CP 0x3804
 		// carrying the full package name + prepare-option=0x01.

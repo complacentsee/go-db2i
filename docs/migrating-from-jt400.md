@@ -105,7 +105,7 @@ the *Notes* column says why.
 
 | JT400 | go-db2i | Notes |
 |---|---|---|
-| `block size` | — | Block-fetch buffer fixed at 32 KB (`hostserver.Cursor.fetchMore`). |
+| `block size` | `block-size` | v0.7.12. KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 1-512. Default 32, byte-identical to pre-v0.7.12. |
 | `block criteria` | — | The cursor uses JT400's "fetch/close" path (M5+); no per-query tuning. |
 | `prefetch` | — (always on) | We always pre-fetch the first batch from `OPEN_DESCRIBE_FETCH`. |
 | `lazy close` | — (always lazy) | `Rows.Close()` skips an explicit CLOSE when the server signalled cursor auto-close. |
@@ -167,15 +167,27 @@ the *Notes* column says why.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (27 DSN keys): `library`, `libraries`, `naming`,
+✅ **Supported** (28 DSN keys): `library`, `libraries`, `naming`,
 `signon-port`, `date`, `time-format`, `date-separator`,
 `time-separator`, `decimal-separator`, `isolation`, `lob`,
-`lob-threshold`, `ccsid`, `extended-metadata`, `tls`,
-`tls-insecure-skip-verify`, `tls-server-name`, `extended-dynamic`,
-`package`, `package-library`, `package-cache`, `package-error`,
-`package-criteria`, `package-ccsid`, `package-add` (accept-ignore),
-`package-clear` (accept-warn-log), plus programmatic
-`Config.Logger` / `Config.LogSQL` / `Config.Tracer`.
+`lob-threshold`, `ccsid`, `extended-metadata`, `block-size`,
+`tls`, `tls-insecure-skip-verify`, `tls-server-name`,
+`extended-dynamic`, `package`, `package-library`, `package-cache`,
+`package-error`, `package-criteria`, `package-ccsid`,
+`package-add` (accept-ignore), `package-clear` (accept-warn-log),
+plus programmatic `Config.Logger` / `Config.LogSQL` /
+`Config.Tracer`.
+
+✅ **Driver-typed methods on `*db2i.Conn`** (reach via
+`sql.Conn.Raw`): `BatchExec` (v0.7.9 IUD / v0.7.10 MERGE);
+`Savepoint` / `ReleaseSavepoint` / `RollbackToSavepoint` (v0.7.12;
+mirror `Connection.setSavepoint` etc.); `SetSchema` /
+`AddLibraries` / `RemoveLibraries` (v0.7.12; mirror
+`Connection.setSchema` and the Toolbox-only `setLibraries`).
+
+✅ **Convenience** (v0.7.12): `db2iiter.ScanAll[T]` returns an
+`iter.Seq2[T, error]` over `*sql.Rows` for `for v, err := range
+db2iiter.ScanAll(rows, scanFn)` loops.
 
 ⏭️ **Deferred** (would benefit a future release): `query optimize goal`,
 `socket timeout` (per-op default), `login timeout` (per-op

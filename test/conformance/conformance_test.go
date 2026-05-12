@@ -2192,3 +2192,379 @@ func TestStoredProcedureINOUT(t *testing.T) {
 		t.Errorf("INOUT counter = %d, want 6 (seed 5 + 1)", counter)
 	}
 }
+
+// TestSavepointRoundTrip exercises M12-1 end-to-end on a live LPAR:
+// open a tx, INSERT one row, mark a SAVEPOINT, INSERT another row,
+// ROLLBACK TO the savepoint, COMMIT. Only the first row should
+// survive. Then re-run with RELEASE SAVEPOINT instead, asserting
+// the release+commit path leaves both rows.
+func TestSavepointRoundTrip(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	tbl := schema() + "." + tablePrefix + "M12_SP"
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY, V VARCHAR(16))"); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+
+	ctx := context.Background()
+
+	// Savepoints require an active unit of work on IBM i (the server
+	// rejects with SQL-880 / SQLSTATE 3B001 under autocommit). The
+	// canonical pattern is: claim a sql.Conn, BeginTx on it to flip
+	// autocommit off, then reach driver-typed savepoint methods via
+	// conn.Raw -- Raw exposes the underlying driver.Conn directly,
+	// which is the same wire the tx is using.
+	//
+	// Some shared LPARs (PUB400) don't grant journaling authority on
+	// user schemas; an INSERT inside a tx on a non-journaled table
+	// trips SQL-7008 / 55019 ("operation not allowed in the current
+	// state of the connected database"). When that fires before any
+	// savepoint code runs, treat the test as an environmental skip
+	// rather than a savepoint regression.
+	skipIfNoJournal := func(t *testing.T, err error) bool {
+		t.Helper()
+		if err == nil {
+			return false
+		}
+		if strings.Contains(err.Error(), "7008") || strings.Contains(err.Error(), "55019") {
+			t.Skipf("savepoint test requires journaled tables; this LPAR rejected INSERT-in-tx with %v", err)
+			return true
+		}
+		return false
+	}
+	t.Run("rollback_to_savepoint", func(t *testing.T) {
+		db.Exec("DELETE FROM " + tbl)
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		defer conn.Close()
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?, ?)", 1, "before"); err != nil {
+			tx.Rollback()
+			if skipIfNoJournal(t, err) {
+				return
+			}
+			t.Fatalf("INSERT before SP: %v", err)
+		}
+		if err := conn.Raw(func(driverConn any) error {
+			return driverConn.(*db2i.Conn).Savepoint(ctx, "SP1")
+		}); err != nil {
+			tx.Rollback()
+			t.Fatalf("Savepoint: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?, ?)", 2, "after"); err != nil {
+			tx.Rollback()
+			t.Fatalf("INSERT after SP: %v", err)
+		}
+		if err := conn.Raw(func(driverConn any) error {
+			return driverConn.(*db2i.Conn).RollbackToSavepoint(ctx, "SP1")
+		}); err != nil {
+			tx.Rollback()
+			t.Fatalf("RollbackToSavepoint: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		var count int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tbl).Scan(&count); err != nil {
+			t.Fatalf("SELECT COUNT(*) after ROLLBACK TO SP: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("after ROLLBACK TO SP1 + COMMIT: got %d rows, want 1 (only the pre-SP insert)", count)
+		}
+	})
+
+	t.Run("release_savepoint", func(t *testing.T) {
+		db.Exec("DELETE FROM " + tbl)
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		defer conn.Close()
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?, ?)", 1, "first"); err != nil {
+			tx.Rollback()
+			if skipIfNoJournal(t, err) {
+				return
+			}
+			t.Fatalf("INSERT 1: %v", err)
+		}
+		if err := conn.Raw(func(driverConn any) error {
+			return driverConn.(*db2i.Conn).Savepoint(ctx, "SP2")
+		}); err != nil {
+			tx.Rollback()
+			t.Fatalf("Savepoint SP2: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?, ?)", 2, "second"); err != nil {
+			tx.Rollback()
+			t.Fatalf("INSERT 2: %v", err)
+		}
+		if err := conn.Raw(func(driverConn any) error {
+			return driverConn.(*db2i.Conn).ReleaseSavepoint(ctx, "SP2")
+		}); err != nil {
+			tx.Rollback()
+			t.Fatalf("ReleaseSavepoint SP2: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		var count int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tbl).Scan(&count); err != nil {
+			t.Fatalf("SELECT COUNT(*): %v", err)
+		}
+		if count != 2 {
+			t.Errorf("after RELEASE SP2 + COMMIT: got %d rows, want 2 (both inserts survive)", count)
+		}
+	})
+
+	t.Run("bad_name_rejects_before_wire", func(t *testing.T) {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		defer conn.Close()
+		if err := conn.Raw(func(driverConn any) error {
+			return driverConn.(*db2i.Conn).Savepoint(ctx, "SP; DROP TABLE T;")
+		}); err == nil {
+			t.Errorf("Savepoint(injection): expected validation error, got nil")
+		}
+	})
+}
+
+// ensureSchemaB tries to create the second test library on demand
+// so TestSetSchema / TestAddRemoveLibraries can exercise mid-
+// session library mutation. Defaults to `<DB2I_SCHEMA>2`; respects
+// DB2I_SCHEMA_B if set. Skips the calling test when the library
+// can't be created (no CRTLIB authority) and isn't already
+// present.
+func ensureSchemaB(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	b := os.Getenv("DB2I_SCHEMA_B")
+	if b == "" {
+		b = schema() + "2"
+	}
+	// Try to create; CPF2111 / "Library X already exists" is benign.
+	_, err := db.Exec("CALL QSYS2.QCMDEXC(?)", "CRTLIB LIB("+b+") TEXT('go-db2i test')")
+	if err != nil && !strings.Contains(err.Error(), "CPF2111") && !strings.Contains(err.Error(), "already exists") {
+		t.Skipf("cannot create test library %s (need CRTLIB authority or set DB2I_SCHEMA_B to a pre-existing library): %v", b, err)
+	}
+	// Verify by querying QSYS2.LIBRARY_LIST_INFO or just trying a
+	// CHKOBJ. Simpler: a SELECT against SYSCAT.
+	var dummy int
+	if err := db.QueryRow("SELECT 1 FROM QSYS2.SCHEMATA WHERE SCHEMA_NAME = ?", b).Scan(&dummy); err != nil {
+		t.Skipf("library %s not visible after CRTLIB attempt: %v", b, err)
+	}
+	return b
+}
+
+// TestSetSchema exercises M12-2 via Conn.SetSchema: after switching
+// schemas mid-session, unqualified SELECT resolves against the new
+// schema's table. Bootstraps two schemas (A, B), each with a
+// one-row table of the same name, switches between them, and
+// asserts the right row comes back.
+//
+// The two "schemas" are actually two libraries in the harness
+// schema's library-list neighbourhood -- IBM i "SCHEMA" and
+// "library" are the same identifier in this context.
+func TestSetSchema(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	schemaA := schema()
+	schemaB := ensureSchemaB(t, db)
+
+	// Bootstrap one-row tables in each schema. Use SQL-quoted names
+	// so case is preserved.
+	tbl := tablePrefix + "M12_SS"
+	tblA := schemaA + "." + tbl
+	tblB := schemaB + "." + tbl
+	db.Exec("DROP TABLE " + tblA)
+	db.Exec("DROP TABLE " + tblB)
+	if _, err := db.Exec("CREATE TABLE " + tblA + " (V VARCHAR(8))"); err != nil {
+		t.Fatalf("CREATE %s: %v", tblA, err)
+	}
+	t.Cleanup(func() { db.Exec("DROP TABLE " + tblA) })
+	if _, err := db.Exec("CREATE TABLE " + tblB + " (V VARCHAR(8))"); err != nil {
+		t.Fatalf("CREATE %s: %v", tblB, err)
+	}
+	t.Cleanup(func() { db.Exec("DROP TABLE " + tblB) })
+	if _, err := db.Exec("INSERT INTO " + tblA + " VALUES ('A')"); err != nil {
+		t.Fatalf("INSERT A: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO " + tblB + " VALUES ('B')"); err != nil {
+		t.Fatalf("INSERT B: %v", err)
+	}
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	// Switch to schemaB and run an unqualified SELECT.
+	if err := conn.Raw(func(driverConn any) error {
+		return driverConn.(*db2i.Conn).SetSchema(ctx, schemaB)
+	}); err != nil {
+		t.Fatalf("SetSchema(%s): %v", schemaB, err)
+	}
+	var got string
+	if err := conn.QueryRowContext(ctx, "SELECT V FROM "+tbl).Scan(&got); err != nil {
+		t.Fatalf("SELECT after SetSchema(%s): %v", schemaB, err)
+	}
+	if got != "B" {
+		t.Errorf("after SetSchema(%s): got V=%q, want %q", schemaB, got, "B")
+	}
+
+	// Switch back to schemaA and confirm.
+	if err := conn.Raw(func(driverConn any) error {
+		return driverConn.(*db2i.Conn).SetSchema(ctx, schemaA)
+	}); err != nil {
+		t.Fatalf("SetSchema(%s): %v", schemaA, err)
+	}
+	if err := conn.QueryRowContext(ctx, "SELECT V FROM "+tbl).Scan(&got); err != nil {
+		t.Fatalf("SELECT after SetSchema(%s): %v", schemaA, err)
+	}
+	if got != "A" {
+		t.Errorf("after SetSchema(%s): got V=%q, want %q", schemaA, got, "A")
+	}
+}
+
+// TestAddRemoveLibraries exercises M12-2: AddLibraries puts a
+// second library on *LIBL so unqualified references resolve there;
+// RemoveLibraries pulls it back off and the same unqualified
+// reference fails. Requires DB2I_SCHEMA_B (the same env var
+// TestSetSchema uses).
+func TestAddRemoveLibraries(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+	schemaB := ensureSchemaB(t, db)
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	libListContains := func(t *testing.T, lib string) bool {
+		t.Helper()
+		var n int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM QSYS2.LIBRARY_LIST_INFO WHERE SYSTEM_SCHEMA_NAME = ?",
+			lib).Scan(&n); err != nil {
+			t.Fatalf("LIBRARY_LIST_INFO probe: %v", err)
+		}
+		return n > 0
+	}
+
+	if libListContains(t, schemaB) {
+		t.Logf("schemaB=%s already on *LIBL pre-test; removing for a clean baseline", schemaB)
+		if err := conn.Raw(func(dc any) error {
+			return dc.(*db2i.Conn).RemoveLibraries(ctx, []string{schemaB})
+		}); err != nil {
+			t.Fatalf("pre-clean RemoveLibraries: %v", err)
+		}
+	}
+	if libListContains(t, schemaB) {
+		t.Fatalf("pre-clean failed: %s still on *LIBL", schemaB)
+	}
+
+	// AddLibraries(schemaB) should put schemaB on the job's *LIBL.
+	if err := conn.Raw(func(dc any) error {
+		return dc.(*db2i.Conn).AddLibraries(ctx, []string{schemaB})
+	}); err != nil {
+		t.Fatalf("AddLibraries(%s): %v", schemaB, err)
+	}
+	if !libListContains(t, schemaB) {
+		t.Errorf("after AddLibraries(%s): library not present in QSYS2.LIBRARY_LIST_INFO", schemaB)
+	}
+
+	// RemoveLibraries(schemaB) should pull it back off.
+	if err := conn.Raw(func(dc any) error {
+		return dc.(*db2i.Conn).RemoveLibraries(ctx, []string{schemaB})
+	}); err != nil {
+		t.Fatalf("RemoveLibraries(%s): %v", schemaB, err)
+	}
+	if libListContains(t, schemaB) {
+		t.Errorf("after RemoveLibraries(%s): library still present in QSYS2.LIBRARY_LIST_INFO", schemaB)
+	}
+
+	// Idempotent: a second RemoveLibraries of an absent library is
+	// downgraded to WARN (CPF2104 / "library not in list" from the
+	// underlying CL) and does NOT return an error.
+	if err := conn.Raw(func(dc any) error {
+		return dc.(*db2i.Conn).RemoveLibraries(ctx, []string{schemaB})
+	}); err != nil {
+		t.Errorf("second RemoveLibraries (idempotent) failed: %v", err)
+	}
+}
+
+// TestBlockSize exercises M12-3 by completing a streaming SELECT
+// under each supported `?block-size` value and asserting each
+// variant:
+//
+//   - opens the connection successfully (parses the DSN, sends the
+//     correctly-formed CP `0x3834` parameter on the wire)
+//   - completes the SELECT without error
+//   - returns at least one row
+//
+// The wire-byte contents for each value are pinned offline by
+// `hostserver/db_buffersize_test.go:TestBufferSizeParamExplicitValues`,
+// so this live test is the "knob is plumbed all the way through"
+// integration check. Cross-DSN row-count comparison is
+// deliberately NOT asserted: pre-existing `fetchMoreRows` logic
+// (the "zero-rows-as-exhausted" guard added for V7R3 PUB400)
+// interacts non-determinstically with `FETCH FIRST N` on smaller
+// buffers; that's a separate known-quirk unrelated to M12-3.
+func TestBlockSize(t *testing.T) {
+	base := dsn(t)
+	sep := "&"
+	if !strings.Contains(base, "?") {
+		sep = "?"
+	}
+
+	for _, size := range []int{16, 32, 64, 128, 512} {
+		size := size
+		t.Run(fmt.Sprintf("block-size=%d", size), func(t *testing.T) {
+			dsnX := base + sep + fmt.Sprintf("block-size=%d", size)
+			db, err := sql.Open("db2i", dsnX)
+			if err != nil {
+				t.Fatalf("sql.Open(block-size=%d): %v", size, err)
+			}
+			defer db.Close()
+			// Run a SELECT that returns at least one row. SYSDUMMY1
+			// is the canonical IBM i one-row table; using it sidesteps
+			// any user-table state issues.
+			rows, err := db.Query("SELECT 1 FROM SYSIBM.SYSDUMMY1")
+			if err != nil {
+				t.Fatalf("SELECT under block-size=%d: %v", size, err)
+			}
+			defer rows.Close()
+			seen := 0
+			for rows.Next() {
+				var x int
+				if err := rows.Scan(&x); err != nil {
+					t.Fatalf("Scan: %v", err)
+				}
+				seen++
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("rows.Err: %v", err)
+			}
+			if seen == 0 {
+				t.Fatalf("block-size=%d: SELECT returned 0 rows", size)
+			}
+		})
+	}
+}

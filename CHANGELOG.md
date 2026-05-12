@@ -10,6 +10,78 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-05-12
+
+### Added: Savepoint driver-typed methods (M12-1)
+
+Three new methods on `*db2i.Conn` reachable via `sql.Conn.Raw`:
+`Savepoint(ctx, name)`, `ReleaseSavepoint(ctx, name)`, and
+`RollbackToSavepoint(ctx, name)`. Each issues plain SQL through
+the existing Exec path -- matches JT400's
+`AS400JDBCConnection.setSavepoint` byte-for-byte (no special wire
+CP for savepoints in either driver).
+
+Name validation enforces the IBM i SQL identifier rules (1-128
+chars, leading letter, body letters / digits / underscore) before
+any wire activity, so injection attempts like `SP'; DROP TABLE T;`
+reject up front.
+
+### Added: Runtime schema + library-list mutation (M12-2)
+
+Three new methods on `*db2i.Conn`:
+
+- `SetSchema(ctx, name)` issues `SET SCHEMA <name>` via the
+  existing Exec path. Matches JT400's `Connection.setSchema` wire
+  output. Closes the longstanding "I want to switch schemas after
+  connect" gap for multi-tenant / environment-mirroring shops.
+- `AddLibraries(ctx, libs)` reuses the existing
+  `hostserver.NDBAddLibraryListMulti` helper (same wire shape as
+  the connect-time `libraries=` knob); first entry tagged `'C'`,
+  the rest `'L'`.
+- `RemoveLibraries(ctx, libs)` loops `CALL QSYS2.QCMDEXC('RMVLIBLE
+  LIB(X)')` once per library. JT400 doesn't expose a NDB REMOVE
+  wire either -- mid-session list shrinking is a CL operation on
+  both sides. CPF2104 ("library not in list") and CPF9810
+  ("library not found") are downgraded to slog WARN; other errors
+  abort the loop with the partial-removal already applied.
+
+Library names canonicalise to uppercase via the existing
+`canonPackageIdent` helper and validate against the 1-10 char
+`[A-Z0-9_#@$]` IBM-i object-name rules. Schema names use the same
+charset (a library name is the maximally-restrictive form).
+
+### Added: `?block-size=N` DSN knob (M12-3)
+
+`Config.BlockSizeKiB int` (default 0 = the historical 32 KiB
+shape) tunes the CP `0x3834` BufferSize parameter the driver emits
+on every PREPARE_DESCRIBE OPEN / continuation FETCH. Valid range
+1-512 KiB; out-of-range DSN values reject at parse time so users
+don't accidentally request multi-MiB buffers through a typo.
+Mirrors JT400's `block size` JDBC URL knob.
+
+The default (unset / 0) byte-equals pre-M12 wire shape exactly --
+existing `TestSentBytesMatch*` fixtures still match without
+modification. New `hostserver.bufferSizeParam(kib)` helper builds
+the parameter; `hostserver.WithBlockSize(kib)` SelectOption
+threads through OpenSelectStatic / OpenSelectPrepared /
+OpenSelectPreparedCached.
+
+### Added: `db2iiter` sub-package (M12-4)
+
+New module path `github.com/complacentsee/go-db2i/db2iiter`. One
+exported function:
+
+```go
+func ScanAll[T any](rows *sql.Rows,
+    scan func(*sql.Rows) (T, error)) iter.Seq2[T, error]
+```
+
+Lets callers replace the classic `for rows.Next() { ... }`
+boilerplate with `for v, err := range db2iiter.ScanAll(rows,
+scanFn)`. No dependency on the `driver` package -- works with any
+`*sql.Rows` regardless of the underlying SQL driver. Caller still
+owns `rows.Close()`.
+
 ## [0.7.11] - 2026-05-12
 
 ### Added: `?libraries=A,B,C` multi-library DSN (M11-2)

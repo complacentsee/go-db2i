@@ -143,7 +143,7 @@ func interpretFetchReply(rep *DBReply) fetchOutcome {
 //
 // The blocking factor and buffer size mirror what we requested in
 // the original OPEN: 32 KB buffer, server-chosen blocking factor.
-func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32) (rows []SelectRow, outcome fetchOutcome, err error) {
+func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32, blockSizeKiB int) (rows []SelectRow, outcome fetchOutcome, err error) {
 	tpl := DBRequestTemplate{
 		// 0x86040000: ReturnData + ResultData + SQLCA + RLE.
 		// (Bit 17 = 0x00008000 from OPEN is "cursor attributes"
@@ -156,9 +156,9 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 		ParameterMarkerDescriptor: 0,
 	}
 	params := []DBParam{
-		DBParamShort(cpDBScrollableCursorFlag, 0x0000),                          // 0x380D
-		{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},       // 0x3834: 32KB
-		DBParamByte(cpDBVariableFieldCompr, 0xE8),                               // 0x3833: VLF on
+		DBParamShort(cpDBScrollableCursorFlag, 0x0000), // 0x380D
+		bufferSizeParam(blockSizeKiB),                  // 0x3834: kib*1024 (default 32 KiB)
+		DBParamByte(cpDBVariableFieldCompr, 0xE8),      // 0x3833: VLF on
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
 	if err != nil {
@@ -553,6 +553,15 @@ type selectOpts struct {
 	packageName     string
 	packageCCSID    uint16
 	packageLibrary  string
+
+	// blockSizeKiB is the continuation-FETCH buffer size in KiB.
+	// Zero (the default) emits 0x00008000 = 32 KiB on the wire,
+	// preserving byte-equality with pre-M12 fixtures. Non-zero
+	// values 1..512 emit kib*1024 as a uint32 in the CP 0x3834
+	// parameter. WithBlockSize sets this; the cursor carries the
+	// resolved value so continuation FETCHes use the same size as
+	// the initial OPEN_DESCRIBE_FETCH.
+	blockSizeKiB int
 }
 
 // rpbStringCCSID returns the CCSID the CREATE_RPB statement-name
@@ -625,6 +634,40 @@ func WithPackageName(name string, ccsid uint16) SelectOption {
 // Config.PackageLibrary (default "QGPL").
 func WithPackageLibrary(lib string) SelectOption {
 	return func(o *selectOpts) { o.packageLibrary = lib }
+}
+
+// WithBlockSize sets the continuation-FETCH buffer size in KiB.
+// Default (zero or omit) is 32 KiB, byte-identical to the pre-M12
+// hardcoded 0x00008000. Accepted range 1..512 KiB; out-of-range
+// values silently fall back to 32 KiB (validation lives at the
+// driver/Config boundary so callers passing through SelectOption
+// directly aren't penalised by panic-on-zero behaviour).
+//
+// Maps to CP 0x3834 (BufferSize) on PREPARE_DESCRIBE OPEN /
+// continuation FETCH frames. Mirrors JT400's BLOCK_SIZE connection
+// property.
+func WithBlockSize(kib int) SelectOption {
+	return func(o *selectOpts) {
+		if kib < 1 || kib > 512 {
+			return
+		}
+		o.blockSizeKiB = kib
+	}
+}
+
+// bufferSizeParam returns the CP 0x3834 (BufferSize) parameter
+// encoded as a 4-byte uint32 carrying kib*1024. kib=0 yields the
+// historical 32 KiB default, preserving byte-equality with
+// pre-M12 fixtures.
+func bufferSizeParam(kib int) DBParam {
+	bytes := uint32(32 * 1024)
+	if kib > 0 {
+		bytes = uint32(kib) * 1024
+	}
+	data := []byte{
+		byte(bytes >> 24), byte(bytes >> 16), byte(bytes >> 8), byte(bytes),
+	}
+	return DBParam{CodePoint: cpDBBufferSize, Data: data}
 }
 
 func resolveSelectOpts(opts []SelectOption) selectOpts {
@@ -860,7 +903,7 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 		}
 		params = append(params,
 			DBParamByte(cpDBVariableFieldCompr, 0xE8),                                  // VLF compression on
-			DBParam{CodePoint: cpDBBufferSize, Data: []byte{0x00, 0x00, 0x80, 0x00}},   // 32 KB buffer
+			bufferSizeParam(opts.blockSizeKiB), // 0x3834: kib*1024 (default 32 KiB)
 			DBParamShort(cpDBScrollableCursorFlag, 0x0000),
 			DBParamByte(cpDBResultSetHoldability, 0xE8),
 		)

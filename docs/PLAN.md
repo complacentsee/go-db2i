@@ -895,6 +895,58 @@ ISO format; non-ISO `?time-format=` callers must `Scan` into a
 `string`. Widening the promotion is a separate, larger work
 item (touches the row-decode path).
 
+### M12 — Savepoints, runtime schema/libraries, fetch tuning, iter adapter (complete 2026-05-12)
+
+Closes the last batch of JT400-parity ergonomics gaps: structured
+savepoint API, mid-session schema / library-list mutation,
+configurable block-fetch size, and a Go 1.23 `iter.Seq2`
+range-over-func adapter. Six new driver-typed methods on
+`*db2i.Conn` (via `sql.Conn.Raw`), one DSN knob, and one new
+sub-package. All wire-touching paths preserve byte-equality with
+v0.7.11 defaults.
+
+- **M12-1** ✅ — Savepoint methods. `Conn.Savepoint`,
+  `Conn.ReleaseSavepoint`, `Conn.RollbackToSavepoint` each issue
+  plain SQL through the existing Stmt.ExecContext path; no
+  special wire CP (matches JT400 byte-for-byte). Name validation
+  pre-empts injection (`SP'; DROP TABLE T;` rejects with a
+  validation error, never touching the wire). New file
+  `driver/conn_savepoint.go` + offline test coverage.
+- **M12-2** ✅ — Runtime schema / library-list mutation.
+  `Conn.SetSchema` issues `SET SCHEMA <name>` plain SQL.
+  `Conn.AddLibraries` reuses `hostserver.NDBAddLibraryListMulti`
+  (same wire shape as the connect-time `?libraries=` knob).
+  `Conn.RemoveLibraries` loops `CALL QSYS2.QCMDEXC('RMVLIBLE
+  LIB(X)')`; CPF2104 ("library not in list") and CPF9810
+  ("library not found") downgrade to slog WARN. New file
+  `driver/conn_schema.go` + offline tests.
+- **M12-3** ✅ — `?block-size=N` DSN knob (1-512 KiB, default 32).
+  `Config.BlockSizeKiB`, `hostserver.WithBlockSize(kib)`
+  SelectOption, and `hostserver.bufferSizeParam(kib)` helper
+  replace the four hardcoded `[]byte{0x00, 0x00, 0x80, 0x00}`
+  sites (fetchMoreRows, OpenStaticFirstBatch / OpenPreparedFirstBatch,
+  OpenSelectPreparedCached). The default (0 = unset) emits the
+  historical 32 KiB shape so every `TestSentBytesMatch*` fixture
+  still matches without modification.
+- **M12-4** ✅ — New sub-package `github.com/complacentsee/go-db2i/db2iiter`.
+  Single exported function `ScanAll[T any](rows *sql.Rows, scan
+  func(*sql.Rows) (T, error)) iter.Seq2[T, error]` enables `for v,
+  err := range db2iiter.ScanAll(rows, scanFn)` loops. No
+  dependency on the driver package; works with any
+  `database/sql` driver. Tested with a small in-process fake
+  driver (no live LPAR required).
+- **M12-5** ✅ — Documentation refresh. `docs/configuration.md`
+  table extended with six new driver-typed methods + `block-size`
+  DSN row. `docs/migrating-from-jt400.md` 27 → 28 DSN keys plus
+  new driver-typed-methods + convenience sections. CHANGELOG
+  entry per sub-item under `[0.7.12]`. README banner bumped to
+  v0.7.12.
+
+**M12 complete 2026-05-12.** All five items shipped + live-
+validated on V7R6M0 and PUB400 V7R5M0. Public API additions
+(`Config.BlockSizeKiB`, six `Conn.*` methods, the `db2iiter`
+sub-package) are purely additive; no breaking changes vs v0.7.11.
+
 ## Working rhythm
 
 The pattern that worked for M1 should keep working:

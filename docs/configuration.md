@@ -40,6 +40,7 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `package-ccsid`              | `13488`      | CCSID for package-stored SQL text. Accepts `13488` (UCS-2 BE), `1200` (UTF-16 LE), or `0` (job default). |
 | `package-add`                | (ignored)    | JT400-compatibility key. Accepted but no-op; the driver always adds. |
 | `package-clear`              | (warn)       | JT400-compatibility key. Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. |
+| `block-size`                 | `32`         | v0.7.12. KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 1-512. Default (or unset) is byte-identical to pre-v0.7.12. Mirrors JT400's `block size` JDBC URL property. |
 
 ## Driver-typed methods (`sql.Conn.Raw`)
 
@@ -49,6 +50,12 @@ interface; reach them via `sql.Conn.Raw`:
 | Method | Purpose | Since |
 |---|---|---|
 | `BatchExec(ctx, sql, rows [][]any) (int64, error)` | Bulk INSERT / UPDATE / DELETE / MERGE via the IBM i block-insert wire shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk vs N for a per-row loop. See [`performance.md`](./performance.md). | v0.7.9 (IUD); v0.7.10 (MERGE) |
+| `Savepoint(ctx, name) error` | Issue `SAVEPOINT <name> ON ROLLBACK RETAIN CURSORS`. Matches JT400's `Connection.setSavepoint` wire output (plain SQL, no special CP). Name rules: 1-128 chars, leading letter, body letters/digits/underscore. | v0.7.12 |
+| `ReleaseSavepoint(ctx, name) error` | Issue `RELEASE SAVEPOINT <name>`. | v0.7.12 |
+| `RollbackToSavepoint(ctx, name) error` | Issue `ROLLBACK TO SAVEPOINT <name>`. | v0.7.12 |
+| `SetSchema(ctx, name) error` | Issue `SET SCHEMA <name>` to change the connection's default schema mid-session. Matches JT400's `Connection.setSchema`. Library-name rules (1-10 chars `[A-Z0-9_#@$]`); canonicalised to uppercase. | v0.7.12 |
+| `AddLibraries(ctx, libs []string) error` | Append libraries to the connection's *LIBL via one NDB ADD_LIBRARY_LIST round-trip. First entry tagged `'C'` (current schema), rest `'L'`. Same wire helper as the connect-time `?libraries=` knob. | v0.7.12 |
+| `RemoveLibraries(ctx, libs []string) error` | Loop `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')` per library. JT400 doesn't expose a NDB REMOVE wire either -- mid-session shrinking goes through CL on both sides. CPF2104 / CPF9810 downgraded to slog WARN. | v0.7.12 |
 
 Example:
 

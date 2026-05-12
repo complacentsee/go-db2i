@@ -68,6 +68,15 @@ type Cursor struct {
 	// FetchScrollOption+BlockingFactor per JT400. Next() dispatches
 	// continuation FETCHes accordingly.
 	isCallCursor bool
+
+	// blockSizeKiB is the continuation-FETCH BufferSize the cursor
+	// emits on subsequent FETCHes. Set at construction from
+	// selectOpts.blockSizeKiB; zero means the historical 32 KiB
+	// default (preserving byte-equality with pre-M12 fixtures).
+	// Only consulted by fetchMoreRows (plain SELECT path) -- CALL-
+	// cursor FETCH uses BlockingFactor instead, deliberately left
+	// at the JT400 default until that path gets its own knob.
+	blockSizeKiB int
 }
 
 // Columns returns the result-set descriptor list. Stable for the
@@ -99,7 +108,7 @@ func (c *Cursor) Next() (SelectRow, error) {
 	if c.isCallCursor {
 		more, outcome, err = fetchCallRows(c.conn, c.cols, c.nextCorr())
 	} else {
-		more, outcome, err = fetchMoreRows(c.conn, c.cols, c.nextCorr())
+		more, outcome, err = fetchMoreRows(c.conn, c.cols, c.nextCorr(), c.blockSizeKiB)
 	}
 	if err != nil {
 		return nil, err
@@ -185,11 +194,12 @@ func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, op
 	if nextCorr == nil {
 		return nil, errors.New("hostserver: OpenSelectStatic requires a non-nil nextCorr")
 	}
-	cols, firstBatch, outcome, err := openStaticUntilFirstBatch(conn, sql, nextCorr, resolveSelectOpts(opts))
+	o := resolveSelectOpts(opts)
+	cols, firstBatch, outcome, err := openStaticUntilFirstBatch(conn, sql, nextCorr, o)
 	if err != nil {
 		return nil, err
 	}
-	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults), nil
+	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults, o.blockSizeKiB), nil
 }
 
 // OpenSelectPrepared opens a streaming cursor for a parameterised
@@ -199,14 +209,15 @@ func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	if nextCorr == nil {
 		return nil, errors.New("hostserver: OpenSelectPrepared requires a non-nil nextCorr")
 	}
-	cols, firstBatch, outcome, err := openPreparedUntilFirstBatch(conn, sql, paramShapes, paramValues, nextCorr, resolveSelectOpts(opts))
+	o := resolveSelectOpts(opts)
+	cols, firstBatch, outcome, err := openPreparedUntilFirstBatch(conn, sql, paramShapes, paramValues, nextCorr, o)
 	if err != nil {
 		return nil, err
 	}
-	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults), nil
+	return newCursor(conn, cols, firstBatch, outcome, nextCorr, outcome.numberOfResults, o.blockSizeKiB), nil
 }
 
-func newCursor(conn io.ReadWriter, cols []SelectColumn, firstBatch []SelectRow, outcome fetchOutcome, nextCorr func() uint32, numberOfResults int) *Cursor {
+func newCursor(conn io.ReadWriter, cols []SelectColumn, firstBatch []SelectRow, outcome fetchOutcome, nextCorr func() uint32, numberOfResults int, blockSizeKiB int) *Cursor {
 	current := 0
 	isCall := false
 	if numberOfResults > 0 {
@@ -224,6 +235,7 @@ func newCursor(conn io.ReadWriter, cols []SelectColumn, firstBatch []SelectRow, 
 		numberOfResults:  numberOfResults,
 		currentResultSet: current,
 		isCallCursor:     isCall,
+		blockSizeKiB:     blockSizeKiB,
 	}
 }
 
