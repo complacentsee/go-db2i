@@ -5,20 +5,22 @@ import (
 	"testing"
 )
 
-// TestExecutePreparedCached_RejectsOutParameter is the defense-in-
-// depth assertion: a cached PMF with a non-input direction byte must
-// abort the fast path rather than silently lose the OUT slot.
-// Callable statements are excluded from the package by the criteria
-// filter, but a future custom-criteria flag might let them through;
-// the host-server layer must still refuse.
-func TestExecutePreparedCached_RejectsOutParameter(t *testing.T) {
+// TestExecutePreparedCached_RejectsUnknownDirection is the defense-
+// in-depth assertion: a cached PMF with an unrecognised direction
+// byte must abort the fast path rather than silently send bytes the
+// server may misinterpret. v0.7.1-v0.7.7 rejected any non-IN byte
+// (including OUT/INOUT); v0.7.8 accepts 0x00 / 0xF0 / 0xF1 / 0xF2
+// after empirically confirming the server honours OUT on cache-hit
+// (probe 2026-05-12 against V7R6M0). Direction bytes outside that
+// set are still undefined and must abort.
+func TestExecutePreparedCached_RejectsUnknownDirection(t *testing.T) {
 	cached := syntheticCachedSelectInt()
-	cached.ParameterMarkerFormat[0].ParamType = 0xF1 // OUT
+	cached.ParameterMarkerFormat[0].ParamType = 0xAB // bogus
 
 	conn := newFakeConn() // no replies; the call should error before Write
 	_, err := ExecutePreparedCached(conn, cached, []any{int64(42)}, closureFromInt(3), "GOJTPK9899", "GOTEST", 37)
 	if err == nil {
-		t.Fatalf("expected error for OUT-direction param")
+		t.Fatalf("expected error for unknown direction byte")
 	}
 	if conn.written.Len() != 0 {
 		t.Errorf("written bytes leaked on rejected fast-path call: %d", conn.written.Len())
@@ -51,13 +53,13 @@ func TestExecutePreparedCached_RejectsNilCached(t *testing.T) {
 
 // TestPreparedParamsFromCached exercises the SQLDA -> PreparedParam
 // shape conversion that drives both Exec and Query cache-hit paths.
-// Non-input direction bytes must abort; input-only round-trips the
-// SQL type / length / CCSID. Precision and Scale are zeroed for
-// non-decimal SQLTypes (the cached SQLDA's high/low-byte split is
-// redundant with FieldLength for non-numeric types and produces
-// values the server interprets incorrectly on EXECUTE -- see
-// preparedParamsFromCached doc). ParamType is forced to 0x00 to
-// match JT400's cache-hit wire bytes.
+// IN bytes (0x00 / 0xF0) normalise to 0x00; OUT (0xF1) and INOUT
+// (0xF2) preserve their direction byte verbatim. Unknown direction
+// bytes abort. Precision and Scale are zeroed for non-decimal
+// SQLTypes (the cached SQLDA's high/low-byte split is redundant
+// with FieldLength for non-numeric types and produces values the
+// server interprets incorrectly on EXECUTE -- see
+// preparedParamsFromCached doc).
 func TestPreparedParamsFromCached(t *testing.T) {
 	in := []ParameterMarkerField{
 		// INTEGER with a "scale=4" leak from the SQLDA's high/low
@@ -69,13 +71,21 @@ func TestPreparedParamsFromCached(t *testing.T) {
 		// because the high/low-byte split is semantically meaningful
 		// for decimal-family types.
 		{SQLType: 484, FieldLength: 3, Precision: 5, Scale: 2, ParamType: 0x00},
+		// v0.7.8: OUT and INOUT slots are now preserved on cache-hit
+		// dispatch. INTEGER OUT slot mirroring the GOSPROCS.P_LOOKUP
+		// shape that the probe verified.
+		{SQLType: 497, FieldLength: 4, ParamType: 0xF1},
+		// INOUT VARCHAR -- precision/scale must still zero for the
+		// non-decimal type even though the direction byte rides
+		// through.
+		{SQLType: 449, FieldLength: 32, CCSID: 1208, ParamType: 0xF2},
 	}
 	out, err := preparedParamsFromCached(in)
 	if err != nil {
 		t.Fatalf("preparedParamsFromCached: %v", err)
 	}
-	if len(out) != 3 {
-		t.Fatalf("got %d shapes, want 3", len(out))
+	if len(out) != 5 {
+		t.Fatalf("got %d shapes, want 5", len(out))
 	}
 	if out[0].SQLType != 497 || out[0].FieldLength != 4 ||
 		out[0].Precision != 0 || out[0].Scale != 0 || out[0].ParamType != 0x00 {
@@ -84,19 +94,27 @@ func TestPreparedParamsFromCached(t *testing.T) {
 	}
 	if out[1].CCSID != 1208 || out[1].ParamType != 0x00 {
 		t.Errorf("shape[1] VARCHAR mismatch: %+v "+
-			"(want CCSID=1208 ParamType=0x00)", out[1])
+			"(want CCSID=1208 ParamType=0x00 -- 0xF0 normalises to 0x00)", out[1])
 	}
 	if out[2].Precision != 5 || out[2].Scale != 2 || out[2].ParamType != 0x00 {
 		t.Errorf("shape[2] DECIMAL(5,2) precision/scale stripped: %+v "+
 			"(want Precision=5 Scale=2 ParamType=0x00)", out[2])
 	}
+	if out[3].ParamType != 0xF1 {
+		t.Errorf("shape[3] OUT direction byte not preserved: %+v "+
+			"(want ParamType=0xF1)", out[3])
+	}
+	if out[4].ParamType != 0xF2 || out[4].Precision != 0 || out[4].Scale != 0 {
+		t.Errorf("shape[4] INOUT VARCHAR mismatch: %+v "+
+			"(want ParamType=0xF2 Precision=0 Scale=0)", out[4])
+	}
 
-	// OUT direction must abort.
+	// Unknown direction byte still aborts.
 	_, err = preparedParamsFromCached([]ParameterMarkerField{
-		{SQLType: 497, FieldLength: 4, ParamType: 0xF1},
+		{SQLType: 497, FieldLength: 4, ParamType: 0xAB},
 	})
 	if err == nil {
-		t.Fatalf("expected error for OUT direction")
+		t.Fatalf("expected error for unknown direction byte 0xAB")
 	}
 }
 

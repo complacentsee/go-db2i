@@ -181,17 +181,22 @@ v0.7.0–v0.7.2; v0.7.3 narrowed it to match JT400's wire-equivalent
 gate so Go and Java clients hash to the same `*PGM` for the same
 session options.
 
-`extended` and OUT/INOUT CALL: a CALL with `sql.Out` destinations
-files into the `*PGM` but the cache-hit fast path refuses it —
-`preparedParamsFromCached` rejects non-IN direction bytes, so the
-cache entry is permanently unreachable for that SQL. go-db2i skips
-the v0.7.4 auto-populate `RETURN_PACKAGE` refresh when any OUT
-destination is present so we don't burn round-trips chasing an
-unreachable cache entry. Whether OUT-CALL cache-hit could be made
-to work is an open question tracked in
-[`docs/plans/v0.7.8-out-param-cache-hit.md`](./plans/v0.7.8-out-param-cache-hit.md);
-no JT400 reference exists for this path since JT400 doesn't file
-CALL under any of its criteria.
+`extended` and OUT/INOUT CALL (v0.7.8): a CALL with `sql.Out`
+destinations files into the `*PGM` under `extended` AND cache-hit
+dispatches through `ExecutePreparedCached` once the auto-populate
+refresh learns the server-renamed name. The cached PMF carries
+the server-stored direction bytes (`0xF1` for OUT, `0xF2` for
+INOUT); `CHANGE_DESCRIPTOR` sends them on the wire, EXECUTE
+requests `ORSResultData`, and the reply ships CP `0x380E` with the
+OUT-value row decoded back into the bound `sql.Out` destinations.
+
+This is a go-db2i-original extension — JT400 has no equivalent
+behaviour because it doesn't file CALL under any of its criteria.
+The v0.7.8 plan
+([`docs/plans/v0.7.8-out-param-cache-hit.md`](./plans/v0.7.8-out-param-cache-hit.md))
+documents the V7R6M0 probe that confirmed the server honours this
+path. v0.7.1–v0.7.7 defensively rejected OUT direction bytes on
+the cache-hit path; that reject is gone.
 
 Examples:
 

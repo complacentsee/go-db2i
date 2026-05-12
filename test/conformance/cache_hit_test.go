@@ -808,14 +808,31 @@ func TestCacheHit_ServerErrorDoesntPoisonRPB(t *testing.T) {
 	}
 }
 
-// TestCacheHit_OutParameterFallthrough verifies stored procedures
-// with sql.Out destinations skip the cache (criteria filter +
-// hostserver.ExecutePreparedCached guard). The conformance stored-
-// proc fixtures live in GOSPROCS; we reuse P_LOOKUP.
+// TestCacheHit_OutParameterFallthrough verifies that an OUT-CALL
+// under criteria=default does not end up in the cache: the
+// `default` filter excludes CALL entirely, so the SQL never files
+// and no cache-hit fires.
+//
+// Pre-v0.7.8 this test also relied on a second defense layer --
+// preparedParamsFromCached rejecting OUT direction bytes -- but
+// v0.7.8 removed that reject after the V7R6M0 probe (see
+// docs/plans/v0.7.8-out-param-cache-hit.md). The remaining
+// invariant is purely the criteria filter, which still holds.
+//
+// IMPORTANT: this test wipes the GOTCHE *PGM at start so a prior
+// test that filed P_LOOKUP under criteria=extended (e.g.,
+// TestCacheHit_CriteriaExtended_OutCallDispatches) doesn't
+// contaminate the default-criteria precondition. The cache is
+// keyed on SQL text, not criteria, so a filed entry survives the
+// criteria switch and would otherwise cache-hit here.
 func TestCacheHit_OutParameterFallthrough(t *testing.T) {
 	setupDB := openDB(t)
 	setUpStoredProcs(t, setupDB)
 	setupDB.Close()
+
+	wipeDB := openDB(t)
+	defer wipeDB.Close()
+	wipePackage(t, wipeDB, cachePackageName)
 
 	db, buf := openDBWithPackageCache(t, "")
 	defer db.Close()
@@ -1092,15 +1109,21 @@ func TestCacheHit_CriteriaExtended(t *testing.T) {
 	})
 }
 
-// TestCacheHit_CriteriaExtended_OutCallSkipsRefresh (v0.7.7) pins
-// the hasOutDest gate at driver/stmt.go:283: an OUT-param CALL
-// under criteria=extended is package-eligible, but preparedParams
-// FromCached refuses non-IN direction bytes -- so a refreshed cache
-// entry can never dispatch. The driver skips the auto-populate
-// RETURN_PACKAGE refresh for OUT dispatches; the test asserts the
-// "db2i: cache refresh" slog line is absent in the buffer after
-// threshold-crossing iters.
-func TestCacheHit_CriteriaExtended_OutCallSkipsRefresh(t *testing.T) {
+// TestCacheHit_CriteriaExtended_OutCallDispatches (v0.7.8) pins the
+// OUT-CALL cache-hit path. Files GOSPROCS.P_LOOKUP (IN VARCHAR +
+// 2 OUT) through threshold under criteria=extended, then on a fresh
+// connection dispatches via cache-hit and asserts the OUT values
+// land in the bound sql.Out destinations correctly.
+//
+// v0.7.7 shipped a defensive hasOutDest gate that skipped both the
+// cache-hit dispatch AND the auto-populate refresh for any
+// sql.Out-bearing dispatch. The v0.7.8 probe overturned that --
+// the server honours OUT direction bytes on cache-hit and returns
+// OUT values via CP 0x380E. This test pins the working path so a
+// regression in preparedParamsFromCached's direction-byte
+// preservation, ExecutePreparedCached's ORSResultData flag, or
+// writeBackOutParams's call site in Stmt.Exec surfaces here.
+func TestCacheHit_CriteriaExtended_OutCallDispatches(t *testing.T) {
 	requireFiling(t)
 	setupDB := openDB(t)
 	setUpStoredProcs(t, setupDB)
@@ -1113,45 +1136,59 @@ func TestCacheHit_CriteriaExtended_OutCallSkipsRefresh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	db, buf := openDBWithPackageCache(t, "extended")
-	defer db.Close()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("db.Conn: %v", err)
-	}
-	defer conn.Close()
-
-	// Loop past the threshold so refresh WOULD fire under the old
-	// (pre-v0.7.7) behaviour. Each call binds OUT destinations.
 	const callSQL = "CALL " + procLibrary + ".P_LOOKUP(?, ?, ?)"
+
+	// 1. Warm-up filing on a pinned conn so all PREPAREs land on
+	//    one QZDASOINIT job and the 3-PREPARE threshold crosses.
+	warm, _ := openDBWithPackageCache(t, "extended")
+	warmConn, err := warm.Conn(ctx)
+	if err != nil {
+		t.Fatalf("warm conn: %v", err)
+	}
 	for i := 0; i < filingPrepareCount; i++ {
 		var name string
 		var qty int
-		if _, err := conn.ExecContext(ctx, callSQL,
+		if _, err := warmConn.ExecContext(ctx, callSQL,
 			"WIDGET",
 			sql.Out{Dest: &name},
 			sql.Out{Dest: &qty},
 		); err != nil {
-			t.Fatalf("CALL P_LOOKUP iter %d: %v", i, err)
+			warmConn.Close()
+			t.Fatalf("warm CALL iter %d: %v", i, err)
+		}
+		if i == 0 && name != "Acme Widget" {
+			warmConn.Close()
+			t.Fatalf("warm iter 0 OUT name = %q, want %q (regular path broken)", name, "Acme Widget")
 		}
 	}
-	conn.Close()
+	warmConn.Close()
+	warm.Close()
 
-	// Assert: NO "db2i: cache refresh" lines. The hasOutDest gate
-	// must prevent refreshPackageCache from being called even
-	// though P_LOOKUP is package-eligible under extended.
-	out := buf.String()
-	if strings.Contains(out, "db2i: cache refresh") {
-		t.Errorf("expected no cache-refresh dispatch for OUT-CALL under "+
-			"criteria=extended (hasOutDest gate should suppress refresh); "+
-			"got:\n%s", out)
+	// 2. Fresh conn -> RETURN_PACKAGE downloads the filed PMF
+	//    including the OUT direction bytes for slots 2 + 3.
+	db, buf := openDBWithPackageCache(t, "extended")
+	defer db.Close()
+
+	var name string
+	var qty int
+	if _, err := db.ExecContext(ctx, callSQL,
+		"WIDGET",
+		sql.Out{Dest: &name},
+		sql.Out{Dest: &qty},
+	); err != nil {
+		t.Fatalf("cache-hit CALL: %v", err)
 	}
-	// Defensive: also confirm cache-hit didn't fire (the cached
-	// path refuses non-IN direction bytes; OUT-CALL dispatch must
-	// take the regular PREPARE_DESCRIBE path).
-	if strings.Contains(out, cacheHitExecMsg) {
-		t.Errorf("OUT-CALL should not cache-hit under any criteria; got:\n%s", out)
+	if name != "Acme Widget" {
+		t.Errorf("cache-hit OUT name = %q, want %q "+
+			"(v0.7.8 ExecutePreparedCached OUT decode broken)", name, "Acme Widget")
 	}
+	if qty != 100 {
+		t.Errorf("cache-hit OUT qty = %d, want 100", qty)
+	}
+	// The cache-hit slog line must have fired -- if it didn't,
+	// either the cache lookup missed (warm-up never populated
+	// Cached[].NameBytes) or the routing skipped the fast path.
+	expectCacheHit(t, buf, cacheHitExecMsg)
 }
 
 // TestCacheHit_LOBBindFallthrough verifies that INSERTs binding a

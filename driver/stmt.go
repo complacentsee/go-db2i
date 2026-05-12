@@ -236,16 +236,22 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 
-	// Cache-hit fast path: when the SQL byte-equals a cached entry
-	// and there's no sql.Out destination, skip PREPARE_DESCRIBE.
-	// Saves one wire round-trip per call by relying on the server-
-	// side plan filed in the *PGM under the cached statement name.
+	// Cache-hit fast path: when the SQL byte-equals a cached entry,
+	// skip PREPARE_DESCRIBE. Saves one wire round-trip per call by
+	// relying on the server-side plan filed in the *PGM under the
+	// cached statement name.
+	//
+	// v0.7.8: OUT/INOUT CALLs go through this path too. The cached
+	// PMF carries the server-stored direction bytes (preserved by
+	// preparedParamsFromCached), CHANGE_DESCRIPTOR sends them on
+	// the wire, EXECUTE sets ORSResultData, and the reply ships
+	// CP 0x380E with the OUT-value row. v0.7.1-v0.7.7 short-
+	// circuited cache-hit dispatch for any !hasOutDest reason; that
+	// gate is gone since the probe in
+	// docs/plans/v0.7.8-out-param-cache-hit.md confirmed
+	// the server honours OUT direction bytes here on V7R6M0.
 	cached := s.conn.packageLookup(s.query)
-	// outDests is preallocated to len(args) -- only non-nil
-	// entries are actual sql.Out destinations. The earlier
-	// `len(outDests) == 0` test always falsified for any
-	// parameterised call, defeating the cache-hit dispatch.
-	if cached != nil && !hasOutDest(outDests) && s.conn.pkg != nil {
+	if cached != nil && s.conn.pkg != nil {
 		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logExecCached(logger, len(args), start, res, cached.Name, err)
 		if shouldRefallbackToPrepare(err) {
@@ -260,6 +266,9 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 			if err != nil {
 				return nil, s.conn.classifyConnErr(err)
 			}
+			if err := writeBackOutParams(outDests, res.OutValues); err != nil {
+				return nil, err
+			}
 			return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
 		}
 	}
@@ -272,16 +281,8 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// after the EXECUTE returns. Only counts when the SQL
 	// passes packageEligibleFor (otherwise the server isn't
 	// going to file no matter how often we prepare).
-	//
-	// hasOutDest gate (v0.7.7): skip the refresh when the dispatch
-	// has any sql.Out destinations. preparedParamsFromCached
-	// rejects non-IN direction bytes, so the cache-hit fast path is
-	// unreachable for an OUT/INOUT CALL even after RETURN_PACKAGE
-	// learns the server-renamed name -- the refresh would burn
-	// round-trips for a cache entry that can never dispatch. An
-	// intentional improvement over JT400, which always refreshes.
 	shouldRefresh := false
-	if s.conn.packageEligibleFor(s.query, len(args) > 0) && !hasOutDest(outDests) {
+	if s.conn.packageEligibleFor(s.query, len(args) > 0) {
 		shouldRefresh = s.conn.noteFilingPrepare(s.query)
 	}
 	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)

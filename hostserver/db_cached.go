@@ -88,8 +88,24 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 		return nil, fmt.Errorf("hostserver: encode cached input parameter data: %w", err)
 	}
 	execCorr := nextCorr()
+	// v0.7.8: when any shape carries an OUT/INOUT direction byte,
+	// request ORSResultData so the reply ships CP 0x380E with the
+	// OUT-value row. preparedParamsFromCached preserves the byte
+	// from the *PGM-stored PMF; the server honours it on cache-hit
+	// dispatch (probe confirmed on V7R6M0 2026-05-12).
+	expectOutput := false
+	for _, s := range shapes {
+		if s.ParamType == 0xF1 || s.ParamType == 0xF2 {
+			expectOutput = true
+			break
+		}
+	}
+	ors := uint32(ORSReturnData | ORSSQLCA | ORSDataCompression)
+	if expectOutput {
+		ors |= ORSResultData
+	}
 	tpl := DBRequestTemplate{
-		ORSBitmap:                 ORSReturnData | ORSSQLCA | ORSDataCompression,
+		ORSBitmap:                 ors,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
@@ -151,10 +167,20 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 		_ = cleanup()
 		return nil, dbErr
 	}
+	// v0.7.8: decode OUT/INOUT values from the synthetic CP 0x380E
+	// single-row data block when the EXECUTE asked for ORSResultData.
+	var outValues []any
+	if expectOutput {
+		outValues, err = parseOutParameterRow(rep, shapes)
+		if err != nil {
+			_ = cleanup()
+			return nil, fmt.Errorf("hostserver: parse cached OUT-parameter row: %w", err)
+		}
+	}
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after cached EXECUTE: %w", err)
 	}
-	return &ExecResult{RowsAffected: rep.RowsAffected()}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues}, nil
 }
 
 // OpenSelectPreparedCached is the Query-path companion to
@@ -351,9 +377,7 @@ func sendCachedChangeDescriptor(conn io.ReadWriter, shapes []PreparedParam, corr
 // preparedParamsFromCached converts the SQLDA-derived
 // ParameterMarkerField shapes the package decoder produced into the
 // PreparedParam shape the existing EncodeDBExtendedDataFormat /
-// EncodeDBExtendedData encoders consume. Refuses any non-input
-// direction up front (sql.Out / sql.InOut callers must skip the
-// cache).
+// EncodeDBExtendedData encoders consume.
 //
 // Precision/Scale handling: the package SQLDA encodes Precision in
 // the high byte of the per-field "length" field and Scale in the
@@ -366,14 +390,26 @@ func sendCachedChangeDescriptor(conn io.ReadWriter, shapes []PreparedParam, corr
 // the bound value at EXECUTE).
 //
 // JT400's wire emits Precision/Scale of 0 for non-decimal SQLTypes
-// on cache-hit EXECUTE; we mirror that here. ParamType is forced
-// to 0x00 (input-only, no direction tag) to match JT400's
-// cache-hit byte sequence verified on V7R6M0 2026-05-11.
+// on cache-hit EXECUTE; we mirror that here.
+//
+// Direction-byte handling (v0.7.8): the cached PMF's direction
+// byte is preserved on output. v0.7.1-v0.7.7 forced 0x00 on every
+// slot and rejected non-IN inputs entirely. The v0.7.8 probe
+// (docs/plans/v0.7.8-out-param-cache-hit.md, Part A confirmed
+// 2026-05-12 on V7R6M0) showed the server honours OUT (0xF1) and
+// INOUT (0xF2) on cache-hit dispatch, returning OUT values via
+// CP 0x380E when the EXECUTE request asks for ORSResultData. So
+// the reject is gone and the byte rides through. Unknown direction
+// bytes (anything other than 0x00, 0xF0, 0xF1, 0xF2) still abort
+// up front since their semantics are undefined.
 func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, error) {
 	out := make([]PreparedParam, 0, len(pmf))
 	for i, p := range pmf {
-		if p.ParamType != 0x00 && p.ParamType != 0xF0 {
-			return nil, fmt.Errorf("hostserver: cached PMF[%d] direction 0x%02X (only IN is cacheable)", i, p.ParamType)
+		switch p.ParamType {
+		case 0x00, 0xF0, 0xF1, 0xF2:
+			// 0x00 / 0xF0: IN. 0xF1: OUT. 0xF2: INOUT.
+		default:
+			return nil, fmt.Errorf("hostserver: cached PMF[%d] direction 0x%02X (unsupported)", i, p.ParamType)
 		}
 		precision := uint16(0)
 		scale := uint16(0)
@@ -384,13 +420,21 @@ func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, erro
 			precision = p.Precision
 			scale = p.Scale
 		}
+		// Preserve the cached direction byte. Normalising 0xF0 to
+		// 0x00 keeps the wire path consistent with v0.7.7-and-earlier
+		// captures for IN slots while still letting OUT/INOUT bytes
+		// flow through unchanged.
+		paramType := p.ParamType
+		if paramType == 0xF0 {
+			paramType = 0x00
+		}
 		out = append(out, PreparedParam{
 			SQLType:     p.SQLType,
 			FieldLength: p.FieldLength,
 			Precision:   precision,
 			Scale:       scale,
 			CCSID:       p.CCSID,
-			ParamType:   0x00,
+			ParamType:   paramType,
 		})
 	}
 	return out, nil

@@ -10,6 +10,59 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Added: OUT/INOUT CALL cache-hit dispatch (v0.7.8)
+
+`package-criteria=extended` plus an OUT-parameter stored procedure
+now dispatches through the cache-hit fast path the same way IN-only
+CALLs do. The cached PMF preserves OUT (`0xF1`) and INOUT (`0xF2`)
+direction bytes through `preparedParamsFromCached`;
+`ExecutePreparedCached` sets `ORSResultData` when the shape carries
+any non-IN slot and decodes the OUT-value row from CP `0x380E` via
+the same `parseOutParameterRow` the regular `ExecutePreparedSQL`
+path uses; `Stmt.Exec`'s cache-hit branch calls `writeBackOutParams`
+into the bound `sql.Out` destinations.
+
+Empirically validated against IBM Cloud V7R6M0 with
+`GOSPROCS.P_LOOKUP(IN VARCHAR, OUT VARCHAR, OUT INTEGER)`:
+post-threshold cache-hit dispatch returns the same OUT values the
+regular path returns, with the wire savings of skipped
+`PREPARE_DESCRIBE`. No JT400 reference exists (JT400 doesn't file
+CALL under any of its criteria) — this is a go-db2i-original
+extension built on top of v0.7.7's `criteria=extended`.
+
+### Removed: v0.7.7 `hasOutDest` refresh-skip gate
+
+The v0.7.7 defensive gate at `driver/stmt.go` that suppressed the
+v0.7.4 auto-populate `RETURN_PACKAGE` refresh for OUT/INOUT
+dispatches is gone. Its premise (the cache-hit path refused
+non-IN direction bytes, so refresh would chase an unreachable
+entry) was empirically wrong — the server honours OUT bytes on
+cache-hit. OUT CALLs now auto-populate and cache-hit-dispatch
+like every other eligible statement.
+
+### Changed: `preparedParamsFromCached` accepts OUT direction bytes
+
+The defensive reject of non-IN direction bytes (in place since
+v0.7.1) is gone. The function now accepts `0x00 / 0xF0 / 0xF1 /
+0xF2` and preserves the byte through to the wire (normalising
+only the `0xF0 → 0x00` IN equivalence). Unknown direction bytes
+still abort with a clear error. The probe in
+`docs/plans/v0.7.8-out-param-cache-hit.md` Part A documents the
+V7R6M0 evidence.
+
+### Tests
+
+- New `TestCacheHit_CriteriaExtended_OutCallDispatches` replaces
+  v0.7.7's `TestCacheHit_CriteriaExtended_OutCallSkipsRefresh`
+  (whose premise — refresh-skip — is gone in v0.7.8).
+- `TestExecutePreparedCached_RejectsOutParameter` renamed to
+  `TestExecutePreparedCached_RejectsUnknownDirection` and now
+  asserts on `0xAB` rather than `0xF1`.
+- `TestPreparedParamsFromCached` extended with OUT (`0xF1`) and
+  INOUT (`0xF2`) preservation cases plus an unknown-byte abort.
+
+## [0.7.7.1] - 2026-05-12
+
 ### Docs: correct `package-criteria=extended` attribution
 
 v0.7.7 shipped with CHANGELOG / docs / source-comment claims that

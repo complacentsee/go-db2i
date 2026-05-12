@@ -218,14 +218,18 @@ Measured on IBM Cloud V7R6M0 (CHANGELOG v0.7.4, commit `7b614b4`):
 **~50% reduction in per-call latency (35 ms vs 71 ms)** after the
 threshold crosses, on the same long-lived `sql.DB` pool.
 
-v0.7.7 refines the refresh trigger: if the dispatch has any
-`sql.Out` destination (stored-procedure OUT/INOUT parameter), the
-refresh is skipped. The cache-hit fast path refuses non-IN
-direction bytes in `preparedParamsFromCached`, so a refreshed
-entry for an OUT CALL is permanently unreachable — chasing it
-would burn round-trips against an unreachable cache slot. Together
-with `package-criteria=extended` this is an intentional improvement
-over JT400, which always refreshes regardless of direction.
+v0.7.7 added a defensive `hasOutDest` gate that skipped the
+refresh for OUT/INOUT dispatches, reasoning that the cache-hit
+path refused non-IN direction bytes. **v0.7.8 removed that gate**
+after empirically confirming the server honours OUT direction
+bytes on cache-hit dispatch (probe against V7R6M0 2026-05-12;
+see `docs/plans/v0.7.8-out-param-cache-hit.md`). OUT CALLs filed
+under `package-criteria=extended` now auto-populate and
+cache-hit-dispatch like every other eligible statement;
+`ExecutePreparedCached` requests `ORSResultData` and decodes
+CP `0x380E` for OUT values when any cached PMF slot carries an
+OUT/INOUT byte. The same ~50% post-threshold latency reduction
+applies to OUT CALLs via this path.
 
 Reference: `docs/package-caching.md` "auto-populate" section and
 `test/conformance/cache_hit_test.go` for the threshold-crossing

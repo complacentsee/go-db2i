@@ -1,17 +1,17 @@
 # go-db2i
 
-> **Current: v0.7.7 (2026-05-12)** — closes two M10/package-caching
-> gaps. `DECLARE PROCEDURE` / `DECLARE CURSOR` / no-args
-> INSERT-subselect / SELECT-FOR-UPDATE now route through the
-> prepared path so the server files them into the `*PGM`
-> (matching JT400). A new go-db2i-original `package-criteria=extended`
-> opt-in adds `CALL` / `VALUES` / `WITH` to the filing matrix on
-> top of `default`, with an intentional improvement over JT400:
-> `Stmt.Exec` skips the v0.7.4 auto-populate refresh when the
-> dispatch has `sql.Out` destinations (the cache-hit fast path
-> refuses non-IN direction bytes, so the refresh would chase an
-> unreachable cache entry). 28 conformance tests green on
-> V7R6M0 (3s) and V7R5M0 (310s via PUB400). See
+> **Current: v0.7.8 (2026-05-12)** — extends the cache-hit fast
+> path to OUT/INOUT stored procedures under
+> `package-criteria=extended`. A V7R6M0 probe confirmed the server
+> honours OUT direction bytes on cache-hit dispatch, so v0.7.8
+> relaxes `preparedParamsFromCached`'s defensive reject, decodes
+> CP `0x380E` for OUT values in `ExecutePreparedCached`, and writes
+> them back into the bound `sql.Out` destinations. v0.7.7's
+> `hasOutDest` refresh-skip gate is gone — OUT CALLs now
+> auto-populate and cache-hit-dispatch like every other eligible
+> statement. Builds on v0.7.7's `DECLARE PROCEDURE` routing fix
+> and `criteria=extended` (CALL / VALUES / WITH filing) +
+> v0.7.7.1 docs corrections. See
 > [`docs/package-caching.md`](./docs/package-caching.md) for the
 > operator's guide and the `Example_packageCache*` godoc snippets.
 
@@ -105,12 +105,17 @@ implemented end-to-end:
   a reconnect to re-download. v0.7.7 routes `DECLARE PROCEDURE` /
   `DECLARE CURSOR` and other no-args eligibles through the prepared
   path, and adds the go-db2i-original `package-criteria=extended`
-  opt-in for `CALL` / `VALUES` / `WITH` filing (with `hasOutDest`
-  refresh-skip — an intentional improvement over JT400). The 10-char
-  wire name is byte-equal to JT400 for the same session options
-  under `default` / `select`, so a Go client and a Java client
-  targeting the same LPAR share one `*PGM`. (`extended` is go-db2i
-  only — JT400 has no equivalent value.)
+  opt-in for `CALL` / `VALUES` / `WITH` filing. v0.7.8 extends the
+  cache-hit fast path to OUT/INOUT CALLs under
+  `criteria=extended`: `preparedParamsFromCached` preserves the
+  cached OUT direction bytes, `ExecutePreparedCached` requests
+  `ORSResultData` and decodes CP `0x380E`, and OUT values flow
+  back through `writeBackOutParams` into the bound `sql.Out`
+  destinations. Empirically validated on V7R6M0 (2026-05-12 probe).
+  The 10-char wire name is byte-equal to JT400 for the same
+  session options under `default` / `select`, so a Go client and a
+  Java client targeting the same LPAR share one `*PGM`. (`extended`
+  is go-db2i only — JT400 has no equivalent value.)
   Operator guide: [`docs/package-caching.md`](./docs/package-caching.md).
   DSN surface: [`docs/configuration.md`](./docs/configuration.md).
 
