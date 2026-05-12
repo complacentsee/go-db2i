@@ -51,6 +51,102 @@ import (
 // default session options.
 const cachePackageName = "GOTCHE"
 
+// TestMain primes the shared *SQLPKG before any cache-hit test runs
+// and wipes it after, so the suite is hermetic regardless of
+// invocation order or prior server state. Cache-hit tests fail
+// silently from a completely empty server: the very first connection
+// with `package-cache=true` issues RETURN_PACKAGE → SQL-204 (object
+// not found), the driver soft-disables the package for that conn,
+// and the per-test fillPackageCache then can't file. By running
+// `wipePackage` + 4 PREPAREs of a filing-eligible SELECT once at
+// suite start, we guarantee the *SQLPKG exists with at least one
+// filed statement before TestCacheHit_* lookups; teardown re-wipes
+// so the next run starts deterministically.
+//
+// Only runs when DB2I_DSN is set AND DB2I_TEST_FILING=1 -- the same
+// gate as requireFiling. Tests that don't need the package primer
+// (everything outside cache_hit_test.go) are unaffected: TestMain
+// just calls m.Run() and returns its exit code regardless of
+// primer success.
+func TestMain(m *testing.M) {
+	dsn := os.Getenv("DB2I_DSN")
+	primeRan := dsn != "" && os.Getenv("DB2I_TEST_FILING") == "1"
+	if primeRan {
+		primeAndWipePackage(dsn, true)
+	}
+	code := m.Run()
+	if primeRan {
+		// Final teardown -- next suite run starts deterministically.
+		// os.Exit doesn't run deferred funcs, so the wipe goes here
+		// rather than via defer.
+		primeAndWipePackage(dsn, false)
+	}
+	os.Exit(code)
+}
+
+// primeAndWipePackage opens a brief connection and either creates +
+// files the shared *SQLPKG (prime=true) or just removes it
+// (prime=false). On the priming pass we file 4 PREPAREs of a
+// SELECT_CAST against SYSIBM.SYSDUMMY1 so the *SQLPKG materialises
+// with NUMBER_STATEMENTS >= 1; the per-test fillPackageCache helpers
+// then file their own test-specific SQL into the now-existing
+// *SQLPKG without hitting the cold-start SQL-204 trap. On teardown
+// we wipe so the next suite run starts from a known empty state.
+func primeAndWipePackage(dsn string, prime bool) {
+	// Use the plain DSN (no extended-dynamic / no package-cache) for
+	// the wipe pass -- DLTOBJ goes through QCMDEXC, not the SQL
+	// package path, so the package-cache wiring would just be noise.
+	wipeDB, err := sql.Open("db2i", dsn)
+	if err != nil {
+		return
+	}
+	defer wipeDB.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := wipeDB.PingContext(ctx); err != nil {
+		return
+	}
+	lib := os.Getenv("DB2I_SCHEMA")
+	if lib == "" {
+		lib = os.Getenv("DB2I_LIBRARY")
+	}
+	if lib == "" {
+		return
+	}
+	cmd := "DLTOBJ OBJ(" + lib + "/" + cachePackageName + "*) OBJTYPE(*SQLPKG)"
+	_, _ = wipeDB.ExecContext(ctx, "CALL QSYS2.QCMDEXC(?)", cmd)
+
+	if !prime {
+		return
+	}
+
+	// Prime: open a package-cache conn and file a filing-eligible
+	// SELECT 4 times so the server's per-job 3-PREPARE threshold is
+	// crossed and the *SQLPKG materialises with one filed statement.
+	pdsn := dsn
+	sep := "?"
+	if strings.Contains(pdsn, "?") {
+		sep = "&"
+	}
+	pdsn += sep + "extended-dynamic=true&package=" + cachePackageName +
+		"&package-library=" + lib + "&package-cache=true&package-error=warning"
+	primeDB, err := sql.Open("db2i", pdsn)
+	if err != nil {
+		return
+	}
+	defer primeDB.Close()
+	conn, err := primeDB.Conn(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	for i := 0; i < filingPrepareCount; i++ {
+		var probe int
+		_ = conn.QueryRowContext(ctx,
+			"SELECT CAST(? AS INTEGER) FROM SYSIBM.SYSDUMMY1", i).Scan(&probe)
+	}
+}
+
 // requireFiling skips a test unless DB2I_TEST_FILING=1 is set in
 // the environment. Cache-hit tests that depend on the server
 // actually filing PREPAREd plans into the *PGM only pass when:
