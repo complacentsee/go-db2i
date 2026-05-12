@@ -3,7 +3,9 @@ package driver
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -822,20 +824,93 @@ func (c *Conn) Close() error {
 	return err
 }
 
-// Begin / BeginTx start a transaction by flipping autocommit off
-// (which also bundles the commitment level + locator persistence
-// per JT400 -- see hostserver.AutocommitOff for the wire details).
+// Begin starts a transaction by flipping autocommit off, using
+// whichever isolation level the DSN set on connect (default *CS).
+// Mirrors database/sql's `db.Begin()` -- isolation defaults are
+// implicit; for explicit isolation control use `db.BeginTx(ctx,
+// &sql.TxOptions{Isolation: ...})` which routes through BeginTx
+// below.
 //
-// Drains the result of any prior session change before returning
-// the Tx wrapper.
+// The wire bundle is documented in hostserver.AutocommitOff.
 func (c *Conn) Begin() (driver.Tx, error) {
 	if c.closed {
 		return nil, driver.ErrBadConn
 	}
-	if err := hostserver.AutocommitOff(c.conn, c.nextCorr()); err != nil {
+	if err := hostserver.AutocommitOffWithIsolation(c.conn, c.nextCorr(), c.cfg.Isolation); err != nil {
 		return nil, c.classifyConnErr(fmt.Errorf("db2i: autocommit off: %w", err))
 	}
 	return &Tx{conn: c}, nil
+}
+
+// BeginTx implements driver.ConnBeginTx. Translates the standard
+// sql.IsolationLevel into the IBM i commitment-control level and
+// sends it on the SET_SQL_ATTRIBUTES bundle that flips autocommit
+// off. `opts.Isolation == sql.LevelDefault` (zero value) honours
+// whatever the DSN set on connect; any other level overrides for
+// the duration of this transaction. `opts.ReadOnly == true` is
+// rejected with a clear error -- IBM i has no session-level
+// read-only flag, and silently dropping it would let SELECT-only
+// callers think they had a guarantee they don't.
+//
+// Isolation mapping mirrors JDBC's IsolationLevel constants on
+// IBM i (see JT400's AS400JDBCConnection.setTransactionIsolation):
+//
+//	sql.LevelDefault         → DSN value (or *CS if DSN unset)
+//	sql.LevelReadUncommitted → *CHG (commitment level 4, "All
+//	                           transactions read", uncommitted)
+//	sql.LevelReadCommitted   → *CS  (cursor stability)
+//	sql.LevelRepeatableRead  → *ALL (read stability)
+//	sql.LevelSerializable    → *RR  (repeatable read; serializable)
+//
+// Other levels (Snapshot, LinearizableRead, etc.) reject with a
+// clear error. Snapshot in particular is a SQL Server concept --
+// IBM i has no analogue.
+//
+// Honours ctx cancellation via SetDeadline on the underlying net
+// conn for the duration of the SET_SQL_ATTRIBUTES round trip.
+func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if c.closed {
+		return nil, driver.ErrBadConn
+	}
+	if opts.ReadOnly {
+		return nil, errors.New("db2i: BeginTx: ReadOnly is not supported (IBM i has no session-level read-only commitment definition; SELECT-only access is enforced via table grants)")
+	}
+	isolation, err := mapSQLIsolation(opts.Isolation)
+	if err != nil {
+		return nil, err
+	}
+	cleanup := withContextDeadline(ctx, c.conn)
+	defer cleanup()
+	if err := hostserver.AutocommitOffWithIsolation(c.conn, c.nextCorr(), isolation); err != nil {
+		return nil, c.classifyConnErr(fmt.Errorf("db2i: BeginTx: autocommit off: %w", err))
+	}
+	return &Tx{conn: c}, nil
+}
+
+// mapSQLIsolation translates a database/sql/driver.IsolationLevel
+// (the int wrapper around sql.IsolationLevel) into the IBM i
+// commitment-control level constant the host server expects on
+// CP 0x380E. sql.LevelDefault returns IsolationDefault so callers
+// can pass it through to AutocommitOffWithIsolation, which falls
+// back to the connection's DSN-set isolation (or *CS).
+func mapSQLIsolation(level driver.IsolationLevel) (int16, error) {
+	switch sql.IsolationLevel(level) {
+	case sql.LevelDefault:
+		return hostserver.IsolationDefault, nil
+	case sql.LevelReadUncommitted:
+		// IBM i *CHG -- commitment level 4 per
+		// DBSQLAttributesDS.setCommitmentControlLevelParserOption.
+		// JT400 maps TRANSACTION_READ_UNCOMMITTED to *CHG too.
+		return 4, nil
+	case sql.LevelReadCommitted:
+		return hostserver.IsolationReadCommitted, nil // *CS
+	case sql.LevelRepeatableRead:
+		return hostserver.IsolationAllCS, nil // *ALL (read stability)
+	case sql.LevelSerializable:
+		return hostserver.IsolationRepeatableRd, nil // *RR
+	default:
+		return 0, fmt.Errorf("db2i: BeginTx: isolation level %v is not supported on IBM i (use Default / ReadUncommitted / ReadCommitted / RepeatableRead / Serializable)", sql.IsolationLevel(level))
+	}
 }
 
 func contextDeadline(ctx context.Context, def time.Duration) (time.Time, bool) {

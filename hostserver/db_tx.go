@@ -107,6 +107,22 @@ func AutocommitOff(conn io.ReadWriter, corr uint32) error {
 	return setSessionMode(conn, corr, 0xD5, 2 /*CS*/, 1 /*scope=tx*/)
 }
 
+// AutocommitOffWithIsolation is the BeginTx-driven sibling of
+// AutocommitOff: same wire shape (CP 0x3824 + 0x380E + 0x3830) but
+// the commitment level (CP 0x380E) is caller-specified instead of
+// hard-coded to *CS. Pass an `Isolation*` constant
+// (IsolationCommitNone / IsolationReadCommitted / IsolationAllCS /
+// IsolationRepeatableRd / IsolationSerializable). IsolationDefault
+// falls back to *CS so a `BeginTx` with `sql.LevelDefault` keeps the
+// historical wire shape.
+func AutocommitOffWithIsolation(conn io.ReadWriter, corr uint32, isolation int16) error {
+	wire := int16(2) // *CS default
+	if isolation != IsolationDefault {
+		wire = isolation
+	}
+	return setSessionMode(conn, corr, 0xD5, wire, 1 /*scope=tx*/)
+}
+
 // AutocommitOn turns autocommit back on. Mirrors AutocommitOff:
 // flips the same three CPs back to JT400's "autocommit, no
 // commitment, no locator persistence" baseline. Used after an

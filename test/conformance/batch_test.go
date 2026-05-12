@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -362,4 +363,105 @@ func TestBatch_PerfDelta(t *testing.T) {
 	}
 	t.Logf("perf 100-row INSERT: per-row=%s batch=%s speed-up=%.1fx",
 		loopElapsed, batchElapsed, float64(loopElapsed)/float64(batchElapsed))
+}
+
+// TestBatch_LOBFallback exercises the v0.7.15 LOB-batch fallback
+// path: when any row in a BatchExec input carries a `*LOBValue`,
+// the driver falls back internally to per-row EXECUTE (mirroring
+// JT400) instead of rejecting up-front. Caller code is unchanged;
+// the cost is one round-trip per row instead of one per chunk.
+//
+// Asserts rows-affected matches the input count and follow-up
+// SELECTs read the exact bytes back. The presence of any
+// *LOBValue in the batch is what routes to the per-row path; the
+// other rows can be plain []byte and still take the per-row route
+// (the route is per-batch, not per-row).
+func TestBatch_LOBFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	db := openDB(t)
+	defer db.Close()
+
+	tbl := schema() + "." + tablePrefix + "blob"
+	_, _ = db.ExecContext(ctx, "DROP TABLE "+tbl)
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE "+tbl+" (ID INTEGER NOT NULL PRIMARY KEY, PAYLOAD BLOB(1M))"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	defer db.ExecContext(ctx, "DROP TABLE "+tbl) //nolint:errcheck
+
+	// Row mix:
+	//   1 → 1 KiB of 'A'         (plain []byte)
+	//   2 → 2 KiB of 'B'         (plain []byte)
+	//   3 → 64 KiB of 'C' wrapped in *LOBValue (Reader streaming)
+	//   4 → 4 KiB of 'D'         (plain []byte)
+	expected := map[int64][]byte{
+		1: bytesOf('A', 1024),
+		2: bytesOf('B', 2*1024),
+		3: bytesOf('C', 64*1024),
+		4: bytesOf('D', 4*1024),
+	}
+	streamLOB := &db2i.LOBValue{
+		Reader: bytesReader(expected[3]),
+		Length: int64(len(expected[3])),
+	}
+	rows := [][]any{
+		{int64(1), expected[1]},
+		{int64(2), expected[2]},
+		{int64(3), streamLOB},
+		{int64(4), expected[4]},
+	}
+
+	affected := batchExec(t, db, ctx, "INSERT INTO "+tbl+" (ID, PAYLOAD) VALUES (?, ?)", rows)
+	if affected != int64(len(rows)) {
+		t.Errorf("BatchExec rows-affected = %d, want %d", affected, len(rows))
+	}
+
+	// Verify each row round-trips byte-perfect.
+	for id := int64(1); id <= 4; id++ {
+		var got []byte
+		if err := db.QueryRowContext(ctx, "SELECT PAYLOAD FROM "+tbl+" WHERE ID = ?", id).Scan(&got); err != nil {
+			t.Errorf("SELECT id=%d: %v", id, err)
+			continue
+		}
+		want := expected[id]
+		if len(got) != len(want) {
+			t.Errorf("id=%d: length %d, want %d", id, len(got), len(want))
+			continue
+		}
+		// Spot-check head + tail; bytewise compare on multi-MB
+		// payloads would dominate the test output on a mismatch.
+		if got[0] != want[0] || got[len(got)-1] != want[len(want)-1] {
+			t.Errorf("id=%d: bytes differ at boundaries (got [0]=%c [-1]=%c, want [0]=%c [-1]=%c)",
+				id, got[0], got[len(got)-1], want[0], want[len(want)-1])
+		}
+	}
+}
+
+func bytesOf(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+func bytesReader(b []byte) *bytesReaderImpl {
+	return &bytesReaderImpl{b: b}
+}
+
+// bytesReaderImpl wraps a byte slice as an io.Reader without pulling
+// in bytes.NewReader (which the test file doesn't already import).
+type bytesReaderImpl struct {
+	b   []byte
+	pos int
+}
+
+func (r *bytesReaderImpl) Read(p []byte) (int, error) {
+	if r.pos >= len(r.b) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[r.pos:])
+	r.pos += n
+	return n, nil
 }

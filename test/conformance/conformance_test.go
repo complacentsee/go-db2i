@@ -2697,3 +2697,238 @@ func TestUserTableLargeScanReturnsAllRows(t *testing.T) {
 		t.Errorf("streamed=%d, expected %d (COUNT reported %d)", streamed, n, c)
 	}
 }
+
+// TestLastInsertId covers the driver.Result.LastInsertId path:
+// INSERT into an IDENTITY-bearing table, follow up with a
+// `VALUES IDENTITY_VAL_LOCAL()` round trip, return the generated
+// value. Tested against three scenarios:
+//
+//  1. INTEGER IDENTITY column -- the canonical case
+//  2. DECIMAL(31,0) IDENTITY column -- exercises the string→int64
+//     decimal-form fallback in result.go:fetchLastInsertId
+//  3. No IDENTITY column -- returns ErrNoLastInsertId so callers
+//     can distinguish "table has no IDENTITY" from "the driver
+//     doesn't support this"
+//
+// Caching is verified by calling LastInsertId twice and asserting
+// the same value; the implementation guards the round-trip behind
+// sync.Once.
+func TestLastInsertId(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	t.Run("INTEGER IDENTITY column", func(t *testing.T) {
+		tbl := schema() + "." + tablePrefix + "lid_int"
+		db.Exec("DROP TABLE " + tbl)
+		if _, err := db.Exec("CREATE TABLE " + tbl +
+			" (ID INTEGER NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY, NAME VARCHAR(20))"); err != nil {
+			t.Fatalf("CREATE: %v", err)
+		}
+		t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+
+		// Two INSERTs so we can compare LastInsertId across calls.
+		r1, err := db.Exec("INSERT INTO "+tbl+" (NAME) VALUES (?)", "first")
+		if err != nil {
+			t.Fatalf("INSERT 1: %v", err)
+		}
+		id1, err := r1.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId 1: %v", err)
+		}
+		// Cached: second call must return the same value without
+		// re-querying. We can't trivially verify "no extra round
+		// trip" without a slog probe, but the same-value contract is
+		// the user-visible part.
+		id1again, err := r1.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId 1 (cached): %v", err)
+		}
+		if id1 != id1again {
+			t.Errorf("cached LastInsertId mismatch: first=%d second=%d", id1, id1again)
+		}
+
+		r2, err := db.Exec("INSERT INTO "+tbl+" (NAME) VALUES (?)", "second")
+		if err != nil {
+			t.Fatalf("INSERT 2: %v", err)
+		}
+		id2, err := r2.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId 2: %v", err)
+		}
+		if id2 <= id1 {
+			t.Errorf("expected id2 > id1, got id1=%d id2=%d", id1, id2)
+		}
+
+		// Cross-check against the row data.
+		var dbID int64
+		if err := db.QueryRow("SELECT ID FROM "+tbl+" WHERE NAME = ?", "second").Scan(&dbID); err != nil {
+			t.Fatalf("SELECT ID: %v", err)
+		}
+		if dbID != id2 {
+			t.Errorf("LastInsertId %d != table ID %d", id2, dbID)
+		}
+	})
+
+	t.Run("DECIMAL(31,0) IDENTITY column", func(t *testing.T) {
+		tbl := schema() + "." + tablePrefix + "lid_dec"
+		db.Exec("DROP TABLE " + tbl)
+		// DECIMAL(31,0) is the widest IDENTITY type IBM i supports
+		// and exercises the string→int64 fallback in fetchLastInsertId.
+		if _, err := db.Exec("CREATE TABLE " + tbl +
+			" (ID DECIMAL(31,0) NOT NULL GENERATED ALWAYS AS IDENTITY PRIMARY KEY, V VARCHAR(20))"); err != nil {
+			t.Skipf("CREATE TABLE DECIMAL(31,0) IDENTITY failed (may need different authority): %v", err)
+		}
+		t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+
+		r, err := db.Exec("INSERT INTO "+tbl+" (V) VALUES (?)", "x")
+		if err != nil {
+			t.Fatalf("INSERT: %v", err)
+		}
+		id, err := r.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId: %v", err)
+		}
+		if id <= 0 {
+			t.Errorf("expected id > 0, got %d", id)
+		}
+
+		// IDENTITY_VAL_LOCAL on DECIMAL(31,0) returns the value as a
+		// decimal string on the wire; verify cross-check works.
+		var dbStr string
+		if err := db.QueryRow("SELECT CAST(ID AS VARCHAR(40)) FROM " + tbl).Scan(&dbStr); err != nil {
+			t.Fatalf("SELECT ID: %v", err)
+		}
+		if strings.TrimSpace(dbStr) == "" {
+			t.Errorf("server returned empty ID string")
+		}
+	})
+
+	t.Run("no IDENTITY column returns ErrNoLastInsertId", func(t *testing.T) {
+		// Fresh connection so IDENTITY_VAL_LOCAL has no session-
+		// scoped value from earlier subtests. IBM i's
+		// IDENTITY_VAL_LOCAL is session-scoped, not statement-scoped,
+		// so without this isolation an earlier subtest's INSERT
+		// would still surface as the "last" identity here.
+		freshDB := openDB(t)
+		defer freshDB.Close()
+
+		tbl := schema() + "." + tablePrefix + "lid_no"
+		freshDB.Exec("DROP TABLE " + tbl)
+		if _, err := freshDB.Exec("CREATE TABLE " + tbl +
+			" (ID INTEGER NOT NULL PRIMARY KEY, V VARCHAR(20))"); err != nil {
+			t.Fatalf("CREATE: %v", err)
+		}
+		t.Cleanup(func() { freshDB.Exec("DROP TABLE " + tbl) })
+
+		r, err := freshDB.Exec("INSERT INTO "+tbl+" VALUES (?, ?)", 1, "x")
+		if err != nil {
+			t.Fatalf("INSERT: %v", err)
+		}
+		_, err = r.LastInsertId()
+		if !errors.Is(err, db2i.ErrNoLastInsertId) {
+			t.Errorf("LastInsertId on no-IDENTITY table: want ErrNoLastInsertId, got %v", err)
+		}
+	})
+}
+
+// TestBeginTxIsolation exercises the v0.7.15 driver.ConnBeginTx
+// path: db.BeginTx(ctx, &sql.TxOptions{Isolation: ...}) flips
+// autocommit off with the caller-specified commitment level on
+// CP 0x380E (rather than the historical hard-coded *CS). Covers:
+//
+//   - LevelDefault → DSN-set isolation (or *CS fallback)
+//   - LevelReadCommitted → *CS
+//   - LevelRepeatableRead → *ALL (read stability)
+//   - LevelSerializable → *RR
+//   - LevelReadUncommitted → *CHG
+//   - Unsupported levels (Snapshot) reject with a clear error
+//   - ReadOnly=true rejects (no IBM i analogue)
+//
+// Each accepted level runs an INSERT + ROLLBACK inside the
+// transaction and asserts the table ends up empty -- the row count
+// is the load-bearing assertion that commitment control actually
+// took effect at the requested level (any level >= *CS makes the
+// INSERT participate in the transaction, so ROLLBACK removes it).
+//
+// Skipped at the environment level when the LPAR's schema isn't
+// journaled: an INSERT-in-tx on a non-journaled table trips
+// SQL-7008 / 55019 regardless of which isolation level we use, so
+// the test can't proceed without journaling. The same skip pattern
+// TestSavepointRoundTrip uses.
+func TestBeginTxIsolation(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	tbl := schema() + "." + tablePrefix + "txiso"
+	db.Exec("DROP TABLE " + tbl)
+	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY)"); err != nil {
+		t.Fatalf("CREATE: %v", err)
+	}
+	t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
+
+	ctx := context.Background()
+
+	rollbackAtLevel := func(t *testing.T, level sql.IsolationLevel) {
+		t.Helper()
+		db.Exec("DELETE FROM " + tbl)
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: level})
+		if err != nil {
+			t.Fatalf("BeginTx(%v): %v", level, err)
+		}
+		_, err = tx.ExecContext(ctx, "INSERT INTO "+tbl+" VALUES (?)", 1)
+		if err != nil {
+			if strings.Contains(err.Error(), "7008") || strings.Contains(err.Error(), "55019") {
+				tx.Rollback()
+				t.Skipf("isolation test requires journaled tables; LPAR rejected INSERT-in-tx with %v", err)
+			}
+			tx.Rollback()
+			t.Fatalf("INSERT at %v: %v", level, err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("Rollback at %v: %v", level, err)
+		}
+		var c int
+		if err := db.QueryRow("SELECT COUNT(*) FROM " + tbl).Scan(&c); err != nil {
+			t.Fatalf("COUNT(*) after rollback at %v: %v", level, err)
+		}
+		if c != 0 {
+			t.Errorf("isolation %v: expected 0 rows after rollback (commitment took effect), got %d", level, c)
+		}
+	}
+
+	t.Run("LevelDefault", func(t *testing.T) {
+		rollbackAtLevel(t, sql.LevelDefault)
+	})
+	t.Run("LevelReadCommitted", func(t *testing.T) {
+		rollbackAtLevel(t, sql.LevelReadCommitted)
+	})
+	t.Run("LevelRepeatableRead", func(t *testing.T) {
+		rollbackAtLevel(t, sql.LevelRepeatableRead)
+	})
+	t.Run("LevelSerializable", func(t *testing.T) {
+		rollbackAtLevel(t, sql.LevelSerializable)
+	})
+	t.Run("LevelReadUncommitted", func(t *testing.T) {
+		rollbackAtLevel(t, sql.LevelReadUncommitted)
+	})
+
+	t.Run("LevelSnapshot rejects", func(t *testing.T) {
+		_, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSnapshot})
+		if err == nil {
+			t.Fatal("expected error for sql.LevelSnapshot on IBM i")
+		}
+		if !strings.Contains(err.Error(), "not supported") && !strings.Contains(err.Error(), "Snapshot") {
+			t.Errorf("Snapshot error should mention level: %v", err)
+		}
+	})
+
+	t.Run("ReadOnly rejects", func(t *testing.T) {
+		_, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err == nil {
+			t.Fatal("expected error for ReadOnly=true on IBM i")
+		}
+		if !strings.Contains(err.Error(), "ReadOnly") {
+			t.Errorf("ReadOnly error should mention ReadOnly: %v", err)
+		}
+	})
+}

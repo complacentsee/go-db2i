@@ -10,6 +10,108 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-05-12
+
+### Fixed: `BatchExec` LOB binds now fall back to per-row EXECUTE
+
+Previously `Conn.BatchExec` rejected any input row that carried a
+`*db2i.LOBValue` with `*LOBValue in a batch is not supported`. JT400
+handles the same case by dropping to a per-row EXECUTE loop
+internally because the block-insert wire shape doesn't thread LOB
+locators across batched rows. v0.7.15 mirrors that: the up-front
+validator detects any `*LOBValue` in the input and routes the
+entire batch to `batchExecPerRow`, which loops `Stmt.ExecContext`
+per row and sums affected counts. Caller code is unchanged; the
+cost is one round-trip per row rather than one per 32 k-row chunk
+(still safer than rolling your own loop -- partial-progress error
+reporting and the aggregate affected count stay consistent with
+the fast path). Live-verified by `TestBatch_LOBFallback` on V7R6M0
+with a 4-row INSERT mixing inline `[]byte` and 64 KiB streamed
+`*LOBValue` payloads; offline `TestBatchExec_LOBRoutesToPerRow`
+pins the validator path so future regressions fail without an
+LPAR.
+
+### Added: `Conn.BeginTx(ctx, sql.TxOptions{Isolation: ...})` plumbing
+
+`driver.Conn` now implements `driver.ConnBeginTx` so the standard
+`db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})`
+form actually honours the requested level. Pre-v0.7.15 only
+`Begin()` was implemented, and even then the wire shape
+hard-coded the commitment level to `*CS` regardless of the DSN
+`?isolation=` setting; the new code threads the configured level
+through `hostserver.AutocommitOffWithIsolation`. Standard mapping:
+
+	sql.LevelDefault         → DSN value (or *CS if DSN unset)
+	sql.LevelReadUncommitted → *CHG (commitment level 4)
+	sql.LevelReadCommitted   → *CS  (cursor stability)
+	sql.LevelRepeatableRead  → *ALL (read stability)
+	sql.LevelSerializable    → *RR  (repeatable read; serializable)
+
+Unsupported levels (Snapshot, LinearizableRead, etc.) and
+`TxOptions.ReadOnly = true` reject up-front with a clear message;
+IBM i has no session-level read-only commitment definition.
+Live-verified by `TestBeginTxIsolation` across all five
+accepted levels plus the rejection cases on V7R6M0.
+
+### Added: conformance coverage for `Result.LastInsertId`
+
+The `IDENTITY_VAL_LOCAL()` round-trip in `driver/result.go` has been
+in place since at least v0.7.x but had zero live-test coverage in
+the conformance suite. v0.7.15 adds `TestLastInsertId` covering
+three scenarios: INTEGER IDENTITY columns (the canonical case),
+DECIMAL(31,0) IDENTITY (exercises the string→int64 fallback in
+`fetchLastInsertId`), and tables without an IDENTITY column
+(returns `ErrNoLastInsertId`). All three pass on V7R6M0.
+
+### Changed: README reframed around remaining gaps
+
+The README banner used to enumerate every supported feature, which
+is fine for marketing but unhelpful for users trying to find out
+whether their workload is covered. v0.7.15 trims the banner to one
+paragraph, points the feature list at `docs/migrating-from-jt400.md`,
+and surfaces the remaining JT400-parity gaps (deferred DSN knobs:
+`query optimize goal`, `socket timeout`, `login timeout` per-op
+override; spec-validated-only auth: password levels 0/1, Kerberos /
+GSSAPI) in their own subsection.
+
+### Added: runnable examples for v0.7.x driver-typed methods
+
+`driver/example_test.go` gained six new godoc Examples covering
+the v0.7.x feature additions that previously had no copy-pasteable
+pattern: `Example_batchExec_insert`,
+`Example_batchExec_lob` (v0.7.15 fallback),
+`Example_beginTxIsolation` (v0.7.15), `Example_savepoint` (v0.7.12),
+`Example_setSchema` (v0.7.12), `Example_libraries_runtime`
+(v0.7.12), `Example_scanAll` (v0.7.12 iter adapter). All eighteen
+Examples in the file compile in CI; godoc renders them via
+pkg.go.dev for any user landing on the package page.
+
+### Cleanup: stale "IUD filing not wired" comment removed
+
+`test/conformance/cache_hit_test.go:1398` carried a v0.7.2-era
+comment claiming the `EXECUTE_IMMEDIATE` path hard-codes
+`CP 0x3808 = 0x00` and defers filing until JT400's
+`nameOverride_` wire dance is implemented. The fix landed in
+v0.7.3+ -- the driver threads `prepareOptionByte(extendedDynamic)`
+through to `CP 0x3808` for IUD the same way it does for SELECT --
+and the four `TestFiling_*Verified` tests (Insert / Update /
+Delete / AllThreeInOnePackage) prove IUD statements file just like
+SELECTs do on V7R6M0. The stale comment is gone.
+
+### Test infrastructure: cache-hit suite TestMain primes + wipes
+
+`test/conformance/cache_hit_test.go` gained a `TestMain` that
+primes the shared `GOTCHE*` *SQLPKG before any `TestCacheHit_*`
+runs and wipes it after. Pre-v0.7.15 the suite failed silently
+from a completely cold server: the very first connection with
+`package-cache=true` issued `RETURN_PACKAGE` → `SQL-204`, the
+driver soft-disabled the package, and the per-test
+`fillPackageCache` then couldn't file. Tests "worked" only when a
+prior run (or `TestFiling_ServerSideStateVerified` running later
+in the same invocation) had created the package. TestMain
+guarantees deterministic setup and cleanup; the conformance run
+now starts from a wiped server and finishes wiped.
+
 ## [0.7.14] - 2026-05-12
 
 ### Fixed: large user-table streaming SELECT delivers all rows (bug #2)

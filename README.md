@@ -1,49 +1,29 @@
 # go-db2i
 
-> **Current: v0.7.14 (2026-05-12)** — closes the v0.7.13
-> known-issue: a streaming `SELECT` over a freshly-inserted
-> 10000-row user table on V7R6M0 used to truncate at 8625 rows.
-> Root cause was `Cursor.Next` discarding the closing batch when
-> the server delivered rows AND the EC=2 RC=700 end-of-data
-> signal in the same reply -- the v0.7.13 bug-#1 fix had already
-> taught `fetchMoreRows` to parse those rows, but the
-> cursor-level discard remained. Continuation FETCH (CP 0x380C
-> `BlockingFactor` + CP 0x380E `FetchScrollOption`) now also
-> matches JT400's wire shape byte-for-byte on V7R6M0; new
-> offline regression test
-> `TestContinuationFetchWireShapeMatchesJT400` pins both halves.
-> Live-validated 10000-of-10000 rows on V7R6M0.
-> See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
-> for the full JT400 URL → go-db2i DSN mapping
-> (28 supported keys).
->
-> Builds on v0.7.12 (M12: savepoints, runtime schema/library
-> mutation, fetch tuning, iter adapter), v0.7.11 (JT400 parity
-> cleanup), v0.7.10 (MERGE batching), v0.7.9 (IUD batching via
-> CP `0x381F`). See
-> [`docs/performance.md`](./docs/performance.md#bulk-iud--merge-via-connbatchexec-v079-v0710)
-> for the batched-IUD/MERGE perf numbers and
-> [`docs/configuration.md`](./docs/configuration.md#driver-typed-methods-sqlconnraw)
-> for the driver-typed-method access pattern.
+> **Current: v0.7.15 (2026-05-12)** — JT400 parity cleanup.
+> `BatchExec` now falls back to per-row EXECUTE when any row in the
+> batch carries a `*LOBValue` (matches JT400; caller code unchanged).
+> `Conn.BeginTx(ctx, &sql.TxOptions{Isolation: ...})` honours the
+> standard `sql.IsolationLevel` constants; `Isolation` translates to
+> the IBM i commitment-control level on CP 0x380E, `ReadOnly`
+> rejects with a clear message (no IBM i analogue). The
+> previously-implemented `Result.LastInsertId` round-trip via
+> `IDENTITY_VAL_LOCAL()` now has live conformance coverage. Builds
+> on v0.7.14 (large user-table streaming SELECT delivers all rows)
+> and v0.7.13 (cursor + race fixes).
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
 sidecar, no IBM client packages — just a Go binary that talks to the
 as-database (8471) and as-signon (8476) services on any IBM i.
 
-> **Scope.** go-db2i aims to be a drop-in replacement for the
-> **JT400 JDBC driver** — the `com.ibm.as400.access.AS400JDBCDriver`
-> half of [IBM Toolbox for Java (JTOpen)](https://github.com/IBM/JTOpen) —
-> not the entire JTOpen toolbox. The dozens of non-JDBC services
-> JTOpen exposes (`AS400` programmatic auth + IFS access,
-> `CommandCall`, `ProgramCall`, `DataQueue`, `IFSFile`, `SystemValue`,
-> print spool, FTP, BiDi, proxy server, etc.) are explicitly out of
-> scope. If your Go service talks to IBM i exclusively through
-> JDBC — `db.Query` / `db.Exec` / `tx.Begin` / `CallableStatement` —
-> this driver replaces the JT400 jar one-for-one. If you need
-> `CommandCall.run("WRKACTJOB")` or `IFSFile`, use the JTOpen jar
-> via a JVM sidecar (or fork go-db2i to add the service you need;
-> the host-server datastream format is the same).
+> **Scope.** go-db2i is a drop-in replacement for the **JT400 JDBC
+> driver** (`com.ibm.as400.access.AS400JDBCDriver`) — not the entire
+> [JTOpen toolbox](https://github.com/IBM/JTOpen). Non-JDBC services
+> (`AS400`-class auth, `CommandCall`, `IFSFile`, `DataQueue`, etc.)
+> stay in the JT400 jar. If your Go service talks to IBM i through
+> `db.Query` / `db.Exec` / `tx.Begin` / `CallableStatement`, this
+> driver replaces the jar one-for-one.
 
 ```go
 import (
@@ -56,97 +36,41 @@ db, err := sql.Open("db2i", "db2i://USER:PWD@host.example.com:8471/?library=MYLI
 
 ## Status
 
-Wire-validated against IBM i 7.6 (V7R6M0) on IBM Cloud Power VS.
-The full `database/sql` JDBC surface that JT400 exposes is
-implemented end-to-end:
+Wire-validated against IBM i 7.6 (V7R6M0) on IBM Cloud Power VS;
+spot-validated on PUB400 V7R5M0. **61 live-conformance tests + 0
+failures** in the latest run from a cold-start server state. The
+full `database/sql` JDBC surface JT400 exposes is implemented;
+documented JDBC-property-to-DSN-key mapping (28 keys, with
+JT400-byte-equal session options for the
+`extended-dynamic + package-cache` flow) lives in
+[`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md).
 
-- Sign-on (password levels 2 / 3 SHA-1, 4 PBKDF2-HMAC-SHA-512)
-- TLS sign-on / database (ports 9476 / 9471)
-- Static and parameterised `SELECT` with lazy `Rows` iteration via
-  continuation FETCH (streamed 86k rows of `QSYS2.SYSCOLUMNS` in
-  testing without buffering)
-- Static and parameterised `INSERT` / `UPDATE` / `DELETE`
-- **Stored procedures** via `db.Exec("CALL ...")` and
-  `db.Query("CALL ...")`: IN parameters through driver.Value, OUT
-  and INOUT parameters via `sql.Out{Dest: &x, In: bool}`, multi-
-  result-set procedures via `Rows.NextResultSet`
-- Transactions (`db.Begin`, `tx.Commit`, `tx.Rollback`) with
-  configurable commitment-control level
-- LOB bind + read: BLOB / CLOB / DBCLOB. Streaming reads via
-  `?lob=stream` opt-in (`*LOBReader` per row); inline materialisation
-  by default. Inline-small-LOB threshold via `?lob-threshold=N`.
-- RLE-compressed `RETRIEVE_LOB_DATA` chunks (5-byte whole-payload
-  wrapper) end-to-end
-- Typed `*hostserver.Db2Error` with `SQLState` / `SQLCode` /
-  `MessageID` / `MessageTokens` + predicate helpers
-  (`IsNotFound` / `IsConstraintViolation` / `IsLockTimeout` /
-  `IsConnectionLost`)
-- `driver.ErrBadConn` on TCP-level failures so the pool auto-recovers
-- `context.Context` propagation including mid-query cancellation
-- `Result.LastInsertId` via `IDENTITY_VAL_LOCAL()`
-- UTF-8 string binds and decode on V7R3+ (CCSID 1208 passthrough),
-  EBCDIC fallback (CCSID 37) on older servers; per-DSN CCSID
-  override via `?ccsid=N`
-- Type round-trip: INTEGER, BIGINT, SMALLINT, DOUBLE, REAL, DECIMAL,
-  NUMERIC, DECFLOAT(16/34), CHAR, VARCHAR (and FOR BIT DATA),
-  BOOLEAN, BINARY, VARBINARY, DATE, TIME, TIMESTAMP, BLOB, CLOB,
-  DBCLOB
-- Extended column metadata
-  (`*sql.ColumnType.ScanType` / `DatabaseTypeName` / `Length` /
-  `Precision` / `Scale` / `Nullable`) including schema / table /
-  base-column-name / label via the V7R3+ extended-metadata reply
-- `log/slog` integration via `Config.Logger`
-- OpenTelemetry spans (`Config.Tracer`) following the May 2025
-  semantic-conventions refresh, with `*Db2Error` attributes for
-  alerting routing
-- Extended-dynamic SQL package caching + client-side cache-hit fast
-  path (`?extended-dynamic=true&package=APP&package-cache=true`).
-  v0.7.0 added the wire shape: `CREATE_PACKAGE` on connect, CP 0x3804
-  on `PREPARE_DESCRIBE`, server-side `*PGM` that accumulates plans.
-  v0.7.1 added the dispatch: on a byte-equal SQL hit against the
-  downloaded cache, `Stmt.Exec` / `Stmt.Query` skip `PREPARE_DESCRIBE`
-  and run via `ExecutePreparedCached` / `OpenSelectPreparedCached`
-  with the cached 18-byte server-assigned statement name in CP 0x3806
-  — one round-trip saved per call. v0.7.4 extends filing to
-  `INSERT` / `UPDATE` / `DELETE`, fixes the cache-hit
-  param-binding regression on SQLDA Precision/Scale, and
-  auto-populates the cache after first-time filing (per-conn retry
-  schedule at PREPARE-counts 3 / 6 / 12, capped to bound work) so
-  same-conn subsequent calls hit the fast path without waiting for
-  a reconnect to re-download. v0.7.7 routes `DECLARE PROCEDURE` /
-  `DECLARE CURSOR` and other no-args eligibles through the prepared
-  path, and adds the go-db2i-original `package-criteria=extended`
-  opt-in for `CALL` / `VALUES` / `WITH` filing. v0.7.8 extends the
-  cache-hit fast path to OUT/INOUT CALLs under
-  `criteria=extended`: `preparedParamsFromCached` preserves the
-  cached OUT direction bytes, `ExecutePreparedCached` requests
-  `ORSResultData` and decodes CP `0x380E`, and OUT values flow
-  back through `writeBackOutParams` into the bound `sql.Out`
-  destinations. Empirically validated on V7R6M0 (2026-05-12 probe).
-  v0.7.9 adds `Conn.BatchExec` for bulk IUD via block insert
-  (CP `0x381F` multi-row with `rowCount=N`): one round-trip per
-  32k-row chunk vs one per row, **~358× speed-up** measured on
-  V7R6M0 via VPC tunnel for a 1000-row INSERT (LPAR-local would
-  be smaller since PREPARE_DESCRIBE plan-compile dominates over
-  RTT there). v0.7.10 extends BatchExec to MERGE on V7R1+ via
-  the same wire shape.
-  The 10-char wire name is byte-equal to JT400 for the same
-  session options under `default` / `select`, so a Go client and a
-  Java client targeting the same LPAR share one `*PGM`. (`extended`
-  is go-db2i only — JT400 has no equivalent value.)
-  Operator guide: [`docs/package-caching.md`](./docs/package-caching.md).
-  DSN surface: [`docs/configuration.md`](./docs/configuration.md).
+### Remaining gaps vs JT400
 
-Out of scope (use the JTOpen Java jar for these):
+A handful of items would benefit a future release but don't block
+production use:
+
+- **`query optimize goal`** — DSN knob not plumbed; falls back to
+  the job default (`*ALLIO` on most V7R5+ systems).
+- **`socket timeout`** (per-op read-timeout default) — today,
+  pass a `ctx` deadline per call.
+- **`login timeout` per-op override** — today, the dial timeout is
+  hardcoded 30 s; pass a deadline-carrying `ctx` to
+  `db.Conn(ctx)` for finer control.
+- **Password levels 0/1 (DES)** — implemented but spec-validated
+  only (every reachable LPAR ships `QPWDLVL ≥ 3`).
+- **Multi-factor auth, Kerberos / GSSAPI signon** — not plumbed;
+  only password auth at the moment.
+
+### Out of scope (use the JTOpen Java jar for these)
 
 - Non-JDBC JTOpen services: `AS400`-class programmatic auth,
   `CommandCall`, `ProgramCall`, `DataQueue`, `IFSFile`, `JobLog`,
   `SystemValue`, print spool, FTP, BiDi reordering, proxy server.
-- JDBC extras that aren't in the database/sql contract: scrollable
-  cursors (forward-only across the board), client reroute /
-  seamless failover, JDBC escape syntax `{call ...}`,
-  named-parameter binding via `sql.Named("p", ...)` for procs
-  (positional only).
+- JDBC extras outside the `database/sql` contract: scrollable
+  cursors (forward-only here), client reroute / seamless failover,
+  JDBC escape syntax `{call ...}`, XA / DTC, named-parameter
+  binding via `sql.Named("p", ...)` for procs (positional only).
 
 ## Install
 

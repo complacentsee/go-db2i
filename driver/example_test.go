@@ -516,3 +516,214 @@ func Example_packageCacheCriteria() {
 	var ts time.Time
 	_ = row.Scan(&ts)
 }
+
+// Example_batchExec_insert demonstrates Conn.BatchExec for bulk
+// INSERT (v0.7.9). N rows pack into one CP 0x381F multi-row
+// EXECUTE per 32k-row chunk -- one round-trip vs N for a per-row
+// loop. Same wire shape works for UPDATE / DELETE / MERGE.
+//
+// Access goes through sql.Conn.Raw because BatchExec is a
+// driver-typed method, not part of the database/sql interface.
+func Example_batchExec_insert() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	rows := make([][]any, 1000)
+	for i := range rows {
+		rows[i] = []any{int64(i + 1), fmt.Sprintf("row-%04d", i)}
+	}
+
+	var affected int64
+	err = conn.Raw(func(driverConn any) error {
+		d := driverConn.(*db2i.Conn)
+		n, err := d.BatchExec(ctx, "INSERT INTO mylib.t (id, label) VALUES (?, ?)", rows)
+		affected = n
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("inserted %d rows in one round-trip\n", affected)
+}
+
+// Example_batchExec_lob shows that BatchExec accepts LOB binds: any
+// row carrying a *db2i.LOBValue routes the whole batch to the
+// per-row EXECUTE path (mirroring JT400's locator rule). Caller
+// code is unchanged; the cost is one round-trip per row rather
+// than one per chunk, but per-row is still safer than rolling your
+// own loop -- the cumulative affected count and the partial-
+// progress error reporting both stay consistent with the fast
+// path. (v0.7.15)
+func Example_batchExec_lob() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+	ctx := context.Background()
+	conn, _ := db.Conn(ctx)
+	defer conn.Close()
+
+	rows := [][]any{
+		{int64(1), []byte("small payload")},
+		{int64(2), &db2i.LOBValue{
+			Reader: bytes.NewReader(bytes.Repeat([]byte{'A'}, 1<<20)), // 1 MiB
+			Length: 1 << 20,
+		}},
+	}
+	conn.Raw(func(driverConn any) error {
+		d := driverConn.(*db2i.Conn)
+		_, err := d.BatchExec(ctx, "INSERT INTO mylib.blobs (id, payload) VALUES (?, ?)", rows)
+		return err
+	})
+}
+
+// Example_beginTxIsolation pins the isolation level for one
+// transaction explicitly (v0.7.15). db.BeginTx routes through
+// driver.ConnBeginTx, which translates the sql.IsolationLevel
+// constant into the IBM i commitment-control level on CP 0x380E.
+//
+// Standard mapping:
+//
+//	sql.LevelDefault         → DSN value (or *CS if DSN unset)
+//	sql.LevelReadUncommitted → *CHG
+//	sql.LevelReadCommitted   → *CS  (cursor stability)
+//	sql.LevelRepeatableRead  → *ALL (read stability)
+//	sql.LevelSerializable    → *RR
+//
+// Unsupported levels (Snapshot, etc.) and TxOptions.ReadOnly
+// reject up-front -- IBM i has no session-level read-only flag.
+func Example_beginTxIsolation() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+	ctx := context.Background()
+
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelSerializable,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO mylib.ledger (acct, delta) VALUES (?, ?)", 42, 100)
+	if err != nil {
+		tx.Rollback()
+		log.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// Example_savepoint shows the three driver-typed savepoint methods
+// added in v0.7.12. Each issues plain SQL through the connection's
+// Exec path -- byte-equal to JT400's Connection.setSavepoint /
+// releaseSavepoint / rollback(Savepoint) wire output. Savepoints
+// require an active unit of work (autocommit off), which BeginTx
+// provides.
+func Example_savepoint() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&isolation=cs")
+	defer db.Close()
+	ctx := context.Background()
+	conn, _ := db.Conn(ctx)
+	defer conn.Close()
+
+	tx, _ := conn.BeginTx(ctx, nil)
+	tx.ExecContext(ctx, "INSERT INTO mylib.audit (msg) VALUES (?)", "phase 1")
+
+	conn.Raw(func(driverConn any) error {
+		d := driverConn.(*db2i.Conn)
+		// Mark a savepoint.
+		if err := d.Savepoint(ctx, "SP1"); err != nil {
+			return err
+		}
+		// Optional work that we may want to undo.
+		if _, err := tx.ExecContext(ctx, "UPDATE mylib.balance SET v = v + ? WHERE id = ?", 100, 1); err != nil {
+			// Rolling back to the savepoint preserves earlier
+			// statements (phase 1) but unwinds everything since.
+			return d.RollbackToSavepoint(ctx, "SP1")
+		}
+		// Drop the savepoint so the work commits with the outer tx.
+		return d.ReleaseSavepoint(ctx, "SP1")
+	})
+	tx.Commit()
+}
+
+// Example_setSchema swaps the default schema mid-session via plain
+// SQL (`SET SCHEMA <name>`) without re-opening the connection.
+// Mirrors JT400's Connection.setSchema. Useful for multi-tenant
+// services that pin a per-tenant schema after auth without
+// thrashing the connection pool. (v0.7.12)
+func Example_setSchema() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/")
+	defer db.Close()
+	ctx := context.Background()
+	conn, _ := db.Conn(ctx)
+	defer conn.Close()
+
+	conn.Raw(func(driverConn any) error {
+		return driverConn.(*db2i.Conn).SetSchema(ctx, "TENANT42")
+	})
+	// Unqualified names now resolve in TENANT42.
+	row := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM widgets")
+	var n int
+	row.Scan(&n)
+}
+
+// Example_libraries_runtime shows mid-session AddLibraries /
+// RemoveLibraries. AddLibraries reuses JT400's NDB
+// ADD_LIBRARY_LIST wire shape (one round-trip for N entries);
+// RemoveLibraries loops `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')`
+// per library, because JT400 doesn't expose a NDB REMOVE either.
+// (v0.7.12)
+func Example_libraries_runtime() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&libraries=APPLIB")
+	defer db.Close()
+	ctx := context.Background()
+	conn, _ := db.Conn(ctx)
+	defer conn.Close()
+
+	conn.Raw(func(driverConn any) error {
+		d := driverConn.(*db2i.Conn)
+		// Add three libraries at the end of *LIBL.
+		if err := d.AddLibraries(ctx, []string{"DATALIB", "WORKLIB", "QGPL"}); err != nil {
+			return err
+		}
+		// ... do work ...
+
+		// Shrink back. CPF2104 / CPF9810 ("not in list") are
+		// downgraded to slog WARN; transient state quirks don't
+		// abort the loop.
+		return d.RemoveLibraries(ctx, []string{"WORKLIB"})
+	})
+}
+
+// Example_scanAll iterates a result set via the v0.7.12 db2iiter
+// adapter and Go 1.23's range-over-func. The yield function
+// receives (T, error) per row; break to stop early. Compared to
+// the manual `for rows.Next() { rows.Scan ... }` loop, ScanAll
+// folds the error-handling into the range expression.
+//
+// (The adapter lives in github.com/complacentsee/go-db2i/db2iiter
+// to keep the core driver import-free of "iter".)
+func Example_scanAll() {
+	// import "github.com/complacentsee/go-db2i/db2iiter"
+	//
+	// db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	// defer db.Close()
+	// rows, _ := db.Query("SELECT id, name FROM mylib.widgets")
+	// defer rows.Close()
+	//
+	// type widget struct{ ID int; Name string }
+	// scan := func(rows *sql.Rows) (widget, error) {
+	//     var w widget
+	//     return w, rows.Scan(&w.ID, &w.Name)
+	// }
+	// for w, err := range db2iiter.ScanAll(rows, scan) {
+	//     if err != nil { log.Fatal(err) }
+	//     use(w)
+	// }
+}

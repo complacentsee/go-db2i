@@ -49,9 +49,11 @@ const MaxBlockedInputRows = 32000
 // out on the wire.
 //
 // Restrictions:
-//   - LOB values (`*db2i.LOBValue`) are rejected. JT400 falls back
-//     to per-row EXECUTE for LOB batches (locator rule);
-//     `BatchExec` rejects with a clear pointer at the per-row path.
+//   - LOB values (`*db2i.LOBValue`) trigger a per-row fallback path.
+//     JT400 does the same: the block-insert wire shape doesn't
+//     carry LOB locators across batched rows, so a batch containing
+//     any LOB drops to one `ExecContext` per row. Caller code is
+//     unchanged; the affected count is summed.
 //   - sql.Out / sql.InOut destinations are rejected: IUD/MERGE
 //     have no OUT params on the wire.
 //   - SELECT / CALL / DECLARE are rejected: BatchExec is for
@@ -98,20 +100,22 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 		return 0, fmt.Errorf("db2i: BatchExec: verb %q not supported (want INSERT / UPDATE / DELETE / MERGE)", verb)
 	}
 
-	// Up-front per-row validation. Uniform arity + LOB / sql.Out
-	// rejection. We pre-validate the entire input so we don't
-	// half-execute on a malformed row N partway through.
+	// Up-front per-row validation. Uniform arity + sql.Out reject
+	// + LOB detection (LOBs trigger per-row fallback). We pre-walk
+	// the input so we don't half-execute on a malformed row N
+	// partway through.
 	if len(rows[0]) == 0 && len(rows) > 0 {
 		return 0, fmt.Errorf("db2i: BatchExec: rows have zero columns; SQL must take at least one parameter")
 	}
 	firstWidth := len(rows[0])
+	hasLOB := false
 	for ri, r := range rows {
 		if len(r) != firstWidth {
 			return 0, fmt.Errorf("db2i: BatchExec: row %d has %d values, want %d (matching row 0)", ri, len(r), firstWidth)
 		}
 		for ci, v := range r {
 			if _, isLOB := v.(*LOBValue); isLOB {
-				return 0, fmt.Errorf("db2i: BatchExec: row %d col %d: *LOBValue in a batch is not supported (JT400 falls back to per-row for LOB binds; use db.ExecContext in a loop)", ri, ci)
+				hasLOB = true
 			}
 			// sql.Out is a value-receiver type; we detect by name to
 			// avoid pulling in database/sql here.
@@ -119,6 +123,16 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 				return 0, fmt.Errorf("db2i: BatchExec: row %d col %d: sql.Out destinations are not supported (IUD has no OUT params; use BatchExec only for INSERT/UPDATE/DELETE without sql.Out)", ri, ci)
 			}
 		}
+	}
+
+	// LOB fallback: JT400 drops to per-row EXECUTE when any row in
+	// the batch carries a LOB binding, because the block-insert
+	// wire shape doesn't thread LOB locators across batched rows.
+	// We mirror by looping ExecContext through Prepare()+Stmt; each
+	// row pays its own round-trip but the caller's return shape
+	// (total affected, single err) is identical to the fast path.
+	if hasLOB {
+		return c.batchExecPerRow(ctx, sql, rows)
 	}
 
 	// 32k-row split. JT400 caps a single block-insert EXECUTE at
@@ -231,6 +245,56 @@ func assertShapesMatch(a, b []hostserver.PreparedParam) error {
 		}
 	}
 	return nil
+}
+
+// batchExecPerRow is the LOB-binding fallback: run `len(rows)`
+// independent ExecContext calls on the connection's own Stmt and
+// sum the row counts. Used when the up-front validator sees any
+// `*LOBValue` in the batch; the block-insert wire shape can't
+// carry per-row LOB locators across one EXECUTE, but per-row
+// EXECUTE works fine because each row gets its own
+// PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE round trip.
+//
+// On the FIRST row error we return (totalSoFar, err); the caller
+// gets the partial progress + the wire error so they can decide
+// between transaction-rollback and retry-the-remainder semantics
+// the same way the block-insert path treats chunk-level failures.
+//
+// We reuse the *Stmt across rows so PREPARE_DESCRIBE runs once
+// and EXECUTE runs N times (caching matches the standard
+// `db.Prepare(sql); for ... { stmt.Exec(args...) }` pattern, just
+// expressed through our internal Stmt rather than database/sql's
+// pooled wrapper).
+func (c *Conn) batchExecPerRow(ctx context.Context, sql string, rows [][]any) (int64, error) {
+	start := time.Now()
+	stmt := &Stmt{conn: c, query: sql}
+
+	totalAffected := int64(0)
+	for ri, r := range rows {
+		args := make([]driver.NamedValue, len(r))
+		for ci, v := range r {
+			args[ci] = driver.NamedValue{
+				Ordinal: ci + 1,
+				Value:   v,
+			}
+		}
+		res, err := stmt.ExecContext(ctx, args)
+		if err != nil {
+			return totalAffected, fmt.Errorf("db2i: BatchExec: row %d: %w", ri, err)
+		}
+		n, _ := res.RowsAffected()
+		totalAffected += n
+	}
+
+	if c.log != nil {
+		c.log.LogAttrs(ctx, slog.LevelDebug, "db2i: batch exec (per-row LOB fallback)",
+			slog.String("op", "EXECUTE_PER_ROW"),
+			slog.Int("rows", len(rows)),
+			slog.Int64("rows_affected", totalAffected),
+			slog.Duration("elapsed", time.Since(start)),
+		)
+	}
+	return totalAffected, nil
 }
 
 // isSQLOut reports whether v is a sql.Out wrapper. We detect by

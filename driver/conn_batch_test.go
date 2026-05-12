@@ -121,20 +121,32 @@ func TestBatchExec_RowWidthMismatch(t *testing.T) {
 	}
 }
 
-// TestBatchExec_RejectsLOBValue confirms the *LOBValue check fires
-// before any wire activity. Documents the v0.7.9 limitation: LOB
-// batches must use the per-row path.
-func TestBatchExec_RejectsLOBValue(t *testing.T) {
+// TestBatchExec_LOBRoutesToPerRow pins the v0.7.15 LOB fallback:
+// a batch containing any *LOBValue should NOT be rejected by the
+// up-front validator; instead it should route to batchExecPerRow,
+// which (in this unit test with no live conn) will trip the same
+// nil-pointer dereference the verb-gate accept cases use to prove
+// the gate passed. The negative observation -- "no validator
+// rejection mentioning *LOBValue" -- is what this test asserts.
+// End-to-end correctness lives in test/conformance/batch_test.go's
+// TestBatch_LOBFallback.
+func TestBatchExec_LOBRoutesToPerRow(t *testing.T) {
 	c := &Conn{cfg: &Config{}, log: silentLogger}
 	rows := [][]any{
 		{int64(1), &LOBValue{Bytes: []byte{0x01, 0x02}}},
 	}
+	defer func() {
+		// Any panic here means the LOB batch made it past the
+		// validator and into the per-row dispatch (which trips on
+		// the nil net.Conn). That's the success condition.
+		if r := recover(); r != nil {
+			return
+		}
+		t.Fatal("expected per-row dispatch to panic on nil conn; got clean return -- did the validator silently swallow the LOB row?")
+	}()
 	_, err := c.BatchExec(context.Background(), "INSERT INTO t VALUES (?, ?)", rows)
-	if err == nil {
-		t.Fatal("expected error for *LOBValue in batch")
-	}
-	if !strings.Contains(err.Error(), "*LOBValue") {
-		t.Errorf("error should mention *LOBValue: %v", err)
+	if err != nil && strings.Contains(err.Error(), "*LOBValue") {
+		t.Errorf("validator should no longer reject *LOBValue (v0.7.15 falls back to per-row); got: %v", err)
 	}
 }
 
