@@ -1,20 +1,18 @@
 # go-db2i
 
-> **Current: v0.7.13 (2026-05-12)** — correctness fixes shaken
-> out by M12's live-test work. (1) `fetchMoreRows` used to
-> early-return on cursor-exhaustion before parsing the row
-> payload, dropping rows the server delivered in the same reply
-> as the end-of-data signal -- canonical case is `FETCH FIRST N
-> ROWS ONLY` queries where the row-cap is hit mid-batch.
-> Regression test `TestFetchFirstNExact` pins the contract.
-> (2) DSN `?block-size=N` range tightened from `1..512` to
-> `8..512` to match JT400-canonical values and avoid sub-8 KiB
-> server-side row-truncation. (3) A pre-existing data race in
-> the `deadlineRecorder` test stub now passes under `go test
-> -race`. One known-issue regression probe (gated on
-> `DB2I_TEST_BUG_LARGE_SCAN=1`) captures a still-investigating
-> case where the server signals premature exhaustion on large
-> user-table scans -- see CHANGELOG.
+> **Current: v0.7.14 (2026-05-12)** — closes the v0.7.13
+> known-issue: a streaming `SELECT` over a freshly-inserted
+> 10000-row user table on V7R6M0 used to truncate at 8625 rows.
+> Root cause was `Cursor.Next` discarding the closing batch when
+> the server delivered rows AND the EC=2 RC=700 end-of-data
+> signal in the same reply -- the v0.7.13 bug-#1 fix had already
+> taught `fetchMoreRows` to parse those rows, but the
+> cursor-level discard remained. Continuation FETCH (CP 0x380C
+> `BlockingFactor` + CP 0x380E `FetchScrollOption`) now also
+> matches JT400's wire shape byte-for-byte on V7R6M0; new
+> offline regression test
+> `TestContinuationFetchWireShapeMatchesJT400` pins both halves.
+> Live-validated 10000-of-10000 rows on V7R6M0.
 > See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md)
 > for the full JT400 URL → go-db2i DSN mapping
 > (28 supported keys).

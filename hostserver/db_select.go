@@ -141,24 +141,34 @@ func interpretFetchReply(rep *DBReply) fetchOutcome {
 // nextCorrelation is the correlation ID to stamp on the request;
 // caller advances its own counter.
 //
-// The blocking factor and buffer size mirror what we requested in
-// the original OPEN: 32 KB buffer, server-chosen blocking factor.
+// Wire shape: JT400-equivalent FetchScrollOption (0x380E) +
+// BlockingFactor (0x380C). Pre-v0.7.14 sent BufferSize-based CPs
+// (0x3834 + 0x3833 + 0x380D) which V7R6M0 honoured for catalog
+// scans but caused premature EC=2 RC=700 ("fetch/close") on large
+// user-table scans -- the server silently capped at ~8625 of
+// 10000 rows. Matching JT400's exact CP shape (verified via
+// select_large_user_table_10k.trace capture) restores correct
+// cursor delivery for both system and user tables.
+//
+// The blocking factor is computed from the column descriptors and
+// the per-cursor blockSizeKiB: bufferBytes / rowWidthEstimate.
+// JT400 uses an analogous per-query computation.
 func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint32, blockSizeKiB int) (rows []SelectRow, outcome fetchOutcome, err error) {
 	tpl := DBRequestTemplate{
-		// 0x86040000: ReturnData + ResultData + SQLCA + RLE.
-		// (Bit 17 = 0x00008000 from OPEN is "cursor attributes"
-		// which only applies on initial open; FETCH leaves it off.)
-		ORSBitmap:                 ORSReturnData | ORSResultData | ORSSQLCA | ORSDataCompression,
+		// 0x84040000: ReturnData + ResultData + RLE. (No SQLCA bit
+		// in the continuation-FETCH ORS -- JT400 doesn't request it
+		// either, matching select_large_user_table_10k.trace.)
+		ORSBitmap:                 ORSReturnData | ORSResultData | ORSDataCompression,
 		ReturnORSHandle:           1,
 		FillORSHandle:             1,
 		BasedOnORSHandle:          0,
 		RPBHandle:                 1,
 		ParameterMarkerDescriptor: 0,
 	}
+	bf := estimateBlockingFactor(cols, blockSizeKiB)
 	params := []DBParam{
-		DBParamShort(cpDBScrollableCursorFlag, 0x0000), // 0x380D
-		bufferSizeParam(blockSizeKiB),                  // 0x3834: kib*1024 (default 32 KiB)
-		DBParamByte(cpDBVariableFieldCompr, 0xE8),      // 0x3833: VLF on
+		DBParamShort(cpDBFetchScrollOption, 0x0000),                                  // 0x380E: FETCH_NEXT
+		{CodePoint: cpDBBlockingFactor, Data: blockingFactorBytes(bf)},               // 0x380C: rows/block
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
 	if err != nil {
@@ -681,6 +691,53 @@ func bufferSizeParam(kib int) DBParam {
 		byte(bytes >> 24), byte(bytes >> 16), byte(bytes >> 8), byte(bytes),
 	}
 	return DBParam{CodePoint: cpDBBufferSize, Data: data}
+}
+
+// blockingFactorBytes encodes a row-count blocking factor as the
+// 4-byte uint32 the CP 0x380C parameter takes on continuation
+// FETCH. JT400 sends this big-endian in
+// select_large_user_table_10k.trace.
+func blockingFactorBytes(rows uint32) []byte {
+	return []byte{
+		byte(rows >> 24), byte(rows >> 16), byte(rows >> 8), byte(rows),
+	}
+}
+
+// estimateBlockingFactor picks a rows-per-batch BlockingFactor for
+// continuation FETCH given the cursor's column descriptors and the
+// configured per-cursor buffer size. The chosen value caps each
+// FETCH reply at approximately one buffer-full of rows; the server
+// then signals "more rows pending" rather than the premature
+// fetch/close path it falls into when no BlockingFactor is supplied.
+//
+// Floor at 64 rows to avoid pathological per-FETCH chattiness on
+// very-wide rows; ceiling at 32767 (max int16) since some V7R6M0
+// paths interpret the field as a signed short on the server side
+// even though the wire encoding is uint32. The exact value the
+// server uses to estimate row width isn't documented; JT400's
+// production behaviour suggests ~bufferSize/sumOfDeclaredColumnLengths
+// is the right ballpark.
+func estimateBlockingFactor(cols []SelectColumn, blockSizeKiB int) uint32 {
+	bufferBytes := uint32(32 * 1024)
+	if blockSizeKiB > 0 {
+		bufferBytes = uint32(blockSizeKiB) * 1024
+	}
+	var rowWidth uint32 = 1
+	for _, c := range cols {
+		// Add the declared column width plus a 2-byte length-or-null
+		// indicator on every column. Coarse estimate; the server's
+		// actual per-row wire size includes additional overhead but
+		// BlockingFactor is a hint not a hard cap on V7R6M0.
+		rowWidth += c.Length + 2
+	}
+	bf := bufferBytes / rowWidth
+	if bf < 64 {
+		bf = 64
+	}
+	if bf > 32767 {
+		bf = 32767
+	}
+	return bf
 }
 
 func resolveSelectOpts(opts []SelectOption) selectOpts {

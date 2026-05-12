@@ -2633,45 +2633,43 @@ func TestFetchFirstNExact(t *testing.T) {
 		})
 	}
 }
-// TestUserTableLargeScan_KnownIssue captures the known bug where
-// a fresh user-table streaming SELECT can stop delivering rows
-// before exhaustion -- the server emits EC=2 RC=700 ("fetch/close,
-// all delivered") after N batches where N×batch-size totals less
-// than the actual row count.
+// TestUserTableLargeScanReturnsAllRows pins the v0.7.14 bug-#2 fix.
+// Pre-fix, a fresh user-table streaming SELECT of 10000 INTEGER +
+// VARCHAR + DECIMAL rows on V7R6M0 returned only 8625 rows -- the
+// server delivered the closing batch carrying EC=2 RC=700 ("fetch/
+// close, all delivered") with the remaining 1375 rows, but
+// Cursor.Next dropped that batch on the exhausted path. The
+// v0.7.13 bug-#1 fix had already taught fetchMoreRows to parse
+// rows before honouring exhausted, but the cursor-level discard
+// remained until v0.7.14. With both fixes in place, streamed
+// equals the inserted count exactly.
 //
-// Reproducible on V7R6M0 with n=10000 of INTEGER+VARCHAR rows
-// inserted via plain Stmt.Exec; scan-forcing COUNT(*) WHERE ID >= 0
-// reports the true 10000 but streaming SELECT delivers only 8625.
-// Not reproducible on catalog reads (TestRowsLazyMemoryBounded
-// streams 49688 rows from QSYS2.SYSCOLUMNS cleanly with the same
-// driver path).
-//
-// Skipped by default; set DB2I_TEST_BUG_LARGE_SCAN=1 to run.
-// Tracked for protocol-level investigation -- likely needs a CP
-// we're not sending on OPEN_DESCRIBE_FETCH that JT400 sends to
-// disable the "fetch/close" optimisation.
-func TestUserTableLargeScan_KnownIssue(t *testing.T) {
-	if os.Getenv("DB2I_TEST_BUG_LARGE_SCAN") == "" {
-		t.Skip("set DB2I_TEST_BUG_LARGE_SCAN=1 to run this regression probe")
-	}
+// Live-test only (gated on DB2I_DSN like the rest of the
+// conformance suite). Offline byte-equality of the continuation
+// FETCH wire shape is covered separately by
+// TestSentBytesMatchSelectLargeUserTableFixture.
+func TestUserTableLargeScanReturnsAllRows(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-	tbl := schema() + "." + tablePrefix + "BUG2_" + suffix
+	// Mirror JT400's select_large_user_table_10k case exactly:
+	// 3-column schema (ID INT, NAME VARCHAR(40), AMT DECIMAL(11,2)),
+	// 10-char system table name "GOJT_T1", 1..N IDs, no ORDER BY.
+	tbl := schema() + ".GOJT_T1"
 	db.Exec("DROP TABLE " + tbl)
-	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL, V VARCHAR(40))"); err != nil {
+	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY, NAME VARCHAR(40) NOT NULL, AMT DECIMAL(11,2) NOT NULL)"); err != nil {
 		t.Fatalf("CREATE: %v", err)
 	}
 	t.Cleanup(func() { db.Exec("DROP TABLE " + tbl) })
 
 	const n = 10000
-	ins, err := db.Prepare("INSERT INTO " + tbl + " VALUES (?, ?)")
+	ins, err := db.Prepare("INSERT INTO " + tbl + " (ID, NAME, AMT) VALUES (?, ?, ?)")
 	if err != nil {
 		t.Fatalf("prepare INSERT: %v", err)
 	}
-	for i := 0; i < n; i++ {
-		if _, err := ins.Exec(i, fmt.Sprintf("row-%05d", i)); err != nil {
+	for i := 1; i <= n; i++ {
+		amt := fmt.Sprintf("%d.23", i)
+		if _, err := ins.Exec(i, fmt.Sprintf("row-%05d", i), amt); err != nil {
 			t.Fatalf("INSERT %d: %v", i, err)
 		}
 	}
@@ -2682,20 +2680,20 @@ func TestUserTableLargeScan_KnownIssue(t *testing.T) {
 		t.Fatalf("COUNT: %v", err)
 	}
 
-	rows, err := db.Query("SELECT ID, V FROM " + tbl)
+	rows, err := db.Query("SELECT ID, NAME, AMT FROM " + tbl)
 	if err != nil {
 		t.Fatalf("SELECT: %v", err)
 	}
 	streamed := 0
 	for rows.Next() {
 		var id int
-		var v string
-		rows.Scan(&id, &v)
+		var name, amt string
+		rows.Scan(&id, &name, &amt)
 		streamed++
 	}
 	rows.Close()
 	t.Logf("inserted=%d  COUNT(*)=%d  streamed=%d", n, c, streamed)
 	if streamed != n {
-		t.Errorf("BUG: streamed=%d, expected %d (COUNT reported %d)", streamed, n, c)
+		t.Errorf("streamed=%d, expected %d (COUNT reported %d)", streamed, n, c)
 	}
 }

@@ -118,17 +118,27 @@ func (c *Cursor) Next() (SelectRow, error) {
 	}
 	if outcome.exhausted {
 		c.exhausted = true
-		c.pending = nil
-		c.pendingIx = 0
-		// fetchMoreRows yields no rows on the exhausted path.
-		return nil, io.EOF
 	}
 	if len(more) == 0 {
-		// Empty batch with exhausted=false shouldn't happen on
-		// PUB400 but some V7R3 servers send a synthetic 0-row reply
-		// between real batches. Loop once.
+		// No rows in this batch. If the server also signaled
+		// end-of-data we're done; otherwise some V7R3 paths emit
+		// a synthetic empty reply between real batches, so loop.
+		if c.exhausted {
+			c.pending = nil
+			c.pendingIx = 0
+			return nil, io.EOF
+		}
 		return c.Next()
 	}
+	// The v0.7.13 bug-1 fix taught fetchMoreRows to parse rows BEFORE
+	// honouring outcome.exhausted -- the server routinely ships the
+	// closing batch's rows AND the EC=2 RC=700 "fetch/close" signal
+	// in the same reply (the JT400 large-table delivery pattern).
+	// Pre-v0.7.14, this path dropped those final rows on the floor,
+	// truncating large user-table scans to ~8625 of 10000 rows on
+	// V7R6M0. We now buffer them in pending the same way as any other
+	// batch; the exhausted flag still ensures we won't issue another
+	// FETCH after this one drains.
 	c.pending = more
 	c.pendingIx = 1
 	return more[0], nil

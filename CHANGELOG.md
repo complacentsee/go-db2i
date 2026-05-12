@@ -10,6 +10,53 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-05-12
+
+### Fixed: large user-table streaming SELECT delivers all rows (bug #2)
+
+The v0.7.13 known-issue (`TestUserTableLargeScan_KnownIssue`, gated
+on `DB2I_TEST_BUG_LARGE_SCAN`) is closed. A streaming
+`SELECT * FROM <user-table>` over a freshly-inserted 10000-row
+table on V7R6M0 used to deliver only 8625 rows -- the server
+correctly shipped the closing batch with its remaining 1375 rows
+AND the EC=2 RC=700 "fetch/close" signal in the same reply, but
+`Cursor.Next` dropped the entire batch on the exhausted path. The
+v0.7.13 bug-#1 fix had already taught `fetchMoreRows` to parse
+rows before honouring `exhausted`; v0.7.14 propagates the same
+invariant up one layer to `Cursor.Next` -- when a continuation
+FETCH carries rows AND an end-of-data signal, the cursor buffers
+them in `pending` like any other batch, and the `exhausted` flag
+only prevents *future* FETCH issuance, not delivery of the current
+batch. Live-verified: 10000 of 10000 rows on V7R6M0.
+
+### Changed: continuation FETCH wire shape matches JT400
+
+`hostserver.fetchMoreRows` now emits the JT400-canonical
+continuation-FETCH parameter set: `FetchScrollOption` (CP 0x380E,
+FETCH_NEXT) + `BlockingFactor` (CP 0x380C, big-endian uint32),
+with `ORSBitmap = 0x84040000` (no SQLCA). Replaces the earlier
+`BufferSize` + `VariableFieldCompr` + `ScrollableCursorFlag` shape
+that V7R6M0 honoured for catalog scans but ambiguously coupled to
+the premature "fetch/close" path on large user-table scans. New
+offline regression test `TestContinuationFetchWireShapeMatchesJT400`
+pins both halves of the contract:
+
+- JT400's wire bytes from `select_large_user_table_10k.trace` (every
+  continuation FETCH) carry exactly `FetchScrollOption` +
+  `BlockingFactor` with ORS `0x84040000`.
+- Our `fetchMoreRows` encoder emits the same CP set and ORS bits.
+
+BlockingFactor is computed from the column descriptors
+(`bufferBytes / sumOfColumnLengths`, clamped to `[64, 32767]`)
+rather than asserted byte-for-byte against JT400's per-query
+value -- BlockingFactor is a server-side hint, not a hard cap, so
+heuristic divergence is safe and the row-delivery behaviour
+asserted by `TestUserTableLargeScanReturnsAllRows` is unchanged.
+
+`?block-size=N` continues to set the buffer-byte input to the
+heuristic; existing block-size variants in `TestBlockSize` and
+`TestFetchFirstNExact` still pass.
+
 ## [0.7.13] - 2026-05-12
 
 ### Fixed: fetchMoreRows dropped rows on cursor-exhausts-mid-batch (bug #1)

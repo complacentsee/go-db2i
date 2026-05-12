@@ -95,6 +95,14 @@ final class Cases {
         // Block fetch — needs a real table.
         cases.add(new MultiRowFetch(schema));
 
+        // Large-result-set block fetch — JT400's reference capture for
+        // bug-#2 fix in v0.7.14. Drives a streaming SELECT over a
+        // 10000-row table and proves JT400 delivers all rows. The
+        // go-db2i v0.7.13 wire bytes truncated at 8625 of 10000 for
+        // the same SQL on V7R6M0; bug-#2 closed by Cursor.Next
+        // row-buffering fix + continuation FETCH wire-shape match.
+        cases.add(new LargeSelectUserTable(schema));
+
         // Transactions.
         cases.add(new TxCommit(schema));
         cases.add(new TxRollback(schema));
@@ -628,6 +636,38 @@ final class Cases {
         @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
             try (Statement st = conn.createStatement();
                  ResultSet rs = st.executeQuery("SELECT ID, NAME, AMT FROM " + table + " ORDER BY ID")) {
+                golden.recordResultSet(rs);
+            }
+        }
+    }
+
+    /**
+     * Bug-#2 reference capture for v0.7.14: streaming SELECT over a
+     * 10000-row user table. go-db2i v0.7.13 returned only 8625 of
+     * 10000 rows on V7R6M0 -- this fixture proves JT400 delivers all
+     * 10000 and pins the wire shape (FetchScrollOption +
+     * BlockingFactor on continuation FETCH) the v0.7.14 fix mirrors.
+     * Used by hostserver/db_select_large_diff_test.go's offline
+     * regression test TestContinuationFetchWireShapeMatchesJT400.
+     */
+    private static final class LargeSelectUserTable extends WithTable {
+        LargeSelectUserTable(String schema) { super("select_large_user_table_10k", schema); }
+        @Override protected void seed(Connection conn) throws SQLException {
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO " + table + " (ID, NAME, AMT) VALUES (?, ?, ?)")) {
+                for (int i = 1; i <= 10_000; i++) {
+                    ps.setInt(1, i);
+                    ps.setString(2, "row-" + String.format("%05d", i));
+                    ps.setBigDecimal(3, new java.math.BigDecimal(i + ".23"));
+                    ps.addBatch();
+                    if (i % 1000 == 0) ps.executeBatch();
+                }
+                ps.executeBatch();
+            }
+        }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT ID, NAME, AMT FROM " + table)) {
                 golden.recordResultSet(rs);
             }
         }
