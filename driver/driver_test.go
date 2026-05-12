@@ -654,7 +654,7 @@ func TestPackageEligibleFor_SelectCriteria(t *testing.T) {
 
 // TestPackageEligibleFor_ExtendedCriteria covers the v0.7.7
 // criteria=extended rule: same as default, PLUS CALL / VALUES /
-// WITH. JT400's third criterion.
+// WITH. go-db2i-original; JT400 has no equivalent criterion value.
 func TestPackageEligibleFor_ExtendedCriteria(t *testing.T) {
 	conn := &Conn{
 		cfg: &Config{
@@ -702,7 +702,8 @@ func TestPackageEligibleFor_ExtendedCriteria(t *testing.T) {
 }
 
 // TestParseDSN_PackageCriteriaExtended pins the v0.7.7 DSN parser
-// acceptance of the third criterion value.
+// acceptance of the `extended` criterion (a go-db2i-original
+// value; JT400 has no equivalent).
 func TestParseDSN_PackageCriteriaExtended(t *testing.T) {
 	cfg, err := parseDSN("db2i://u:p@h/?extended-dynamic=true&package=APP&package-criteria=extended")
 	if err != nil {

@@ -174,7 +174,7 @@ support page:
 |---|---|
 | `default` (default) | Parameterised SELECT / INSERT / UPDATE / DELETE; `INSERT INTO t SELECT ...` (subselect, even without markers); `SELECT ... FOR UPDATE` (positioned cursor); `DECLARE PROCEDURE` / `DECLARE CURSOR`. Excludes `CURRENT OF`, unparameterised plain SELECT, `VALUES`, `WITH`, and `CALL`. |
 | `select` | Same as `default` PLUS unparameterised SELECT statements. (JT400's wider gate; matches `package criteria=select` exactly. Does **not** widen to VALUES / WITH — those remain non-cached under either criterion.) |
-| `extended` (v0.7.7) | Same as `default` PLUS `CALL` / `VALUES` / `WITH`. JT400's third criterion. **Does not** inherit `select`'s unparameterised-SELECT widening — each criterion is a discrete switch, not cumulative. Interop note: a Go and Java client only hash to the same `*PGM` when both pass `package criteria=extended`; the byte-equality guarantee in `default` / `select` does not extend across mismatched criteria. |
+| `extended` (v0.7.7) | Same as `default` PLUS `CALL` / `VALUES` / `WITH`. **go-db2i-original** — JT400 has no equivalent value (its [`JDProperties.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java) `PACKAGE_CRITERIA_*` enumeration is exactly two values: `default` and `select`; verified against JTOpen 2026-05-12). **Does not** inherit `select`'s unparameterised-SELECT widening — each criterion is a discrete switch, not cumulative. Interop note: a Go client passing `extended` will not share a `*PGM` with a JT400 client at all — JT400 rejects the unknown criterion value during DSN parse. The byte-equality guarantee for `default` / `select` is unaffected. |
 
 `select` previously also accepted VALUES / WITH in go-db2i
 v0.7.0–v0.7.2; v0.7.3 narrowed it to match JT400's wire-equivalent
@@ -182,15 +182,16 @@ gate so Go and Java clients hash to the same `*PGM` for the same
 session options.
 
 `extended` and OUT/INOUT CALL: a CALL with `sql.Out` destinations
-files into the `*PGM` (matching JT400's wire-side behaviour) but
-the cache-hit fast path refuses it — `preparedParamsFromCached`
-rejects non-IN direction bytes, so the cache entry is permanently
-unreachable for that SQL. go-db2i skips the v0.7.4 auto-populate
-`RETURN_PACKAGE` refresh when any OUT destination is present so we
-don't burn round-trips chasing an unreachable cache entry. This is
-an intentional improvement over JT400, which always refreshes;
-flagged in the v0.7.7 CHANGELOG so a future reviewer doesn't
-mistake it for a parity regression.
+files into the `*PGM` but the cache-hit fast path refuses it —
+`preparedParamsFromCached` rejects non-IN direction bytes, so the
+cache entry is permanently unreachable for that SQL. go-db2i skips
+the v0.7.4 auto-populate `RETURN_PACKAGE` refresh when any OUT
+destination is present so we don't burn round-trips chasing an
+unreachable cache entry. Whether OUT-CALL cache-hit could be made
+to work is an open question tracked in
+[`docs/plans/v0.7.8-out-param-cache-hit.md`](./plans/v0.7.8-out-param-cache-hit.md);
+no JT400 reference exists for this path since JT400 doesn't file
+CALL under any of its criteria.
 
 Examples:
 

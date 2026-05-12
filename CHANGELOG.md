@@ -10,18 +10,36 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+### Docs: correct `package-criteria=extended` attribution
+
+v0.7.7 shipped with CHANGELOG / docs / source-comment claims that
+`extended` is "JT400's third criterion." That's factually wrong:
+JT400's [`JDProperties.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
+enumerates exactly two criteria (`default`, `select`), and
+[`JDSQLStatement.java:950-959`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java)'s
+`isPackaged_` gate has matching arms only. `extended` is a
+**go-db2i-original** opt-in. The feature itself works as designed
+(CALL / VALUES / WITH filing) and remains in v0.7.7; this is a
+labels-only correction across CHANGELOG, `docs/package-caching.md`,
+`docs/migrating-from-jt400.md`, `driver/conn.go`'s package comment,
+and the v0.7.7 test names. README's "Current" stamp bumped to
+v0.7.7.
+
+No code-behaviour change. Verified locally with the unit + cross-
+LPAR conformance suites unchanged.
+
+## [0.7.7] - 2026-05-12
+
 ### Added: `package-criteria=extended` for CALL / VALUES / WITH
 
-JT400's third filing criterion. `?package-criteria=extended` files
-`CALL`, `VALUES`, and `WITH` statements into the `*PGM` on top of
-the `default` matrix. Mirrors JT400's
-[`JDSQLStatement.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java)
-third-criterion behaviour.
+A **go-db2i-original** filing criterion — JT400 has no equivalent
+value. `?package-criteria=extended` files `CALL`, `VALUES`, and
+`WITH` statements into the `*PGM` on top of the `default` matrix.
 
-Interop caveat: a Go and Java client only hash to the same `*PGM`
-when both pass `package-criteria=extended`. The byte-equality
-guarantee on `default` / `select` does not extend across mismatched
-criteria. Flagged in `docs/package-caching.md`.
+Interop note: a Go client passing `extended` does not share a
+`*PGM` with a JT400 client — JT400 rejects the unknown criterion
+value at DSN parse. The byte-equality guarantee for
+`default` / `select` is unaffected.
 
 ### Fixed: DECLARE PROCEDURE files into the `*PGM`
 
@@ -67,6 +85,21 @@ whether the cache-hit fast path can be extended to dispatch
 OUT/INOUT stored procedures, which would obsolete v0.7.7's
 `hasOutDest` refresh-skip. Status: speculative — investigation
 not yet started.
+
+## [0.7.6] - deferred (2026-05-12)
+
+LOB-bind cache-hit fast path. Deferred after the live test against
+V7R6M0 returned `SQL-814` on the first `WRITE_LOB_DATA` frame
+against a client-synthesised LOB locator handle — the server
+requires `PREPARE_DESCRIBE`-allocated locators and there's no
+separate allocate-locator wire request. JT400 doesn't take the
+path either (every iter of `prepared_package_filing_lob_cache_hit`
+has `PREPARE_DESCRIBE`). Part A fixture shipped (commit `ede0dc9`);
+Part B implementation rolled back. v0.7.5's graceful encoder-gap
+fallback remains in production. See
+`docs/plans/v0.7.6-lob-bind-cache-hit.md` and
+`memory/project_db2i_v076_lob_cache_hit_blocker.md` for the
+finding.
 
 ## [0.7.5] - 2026-05-11
 

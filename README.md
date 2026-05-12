@@ -1,15 +1,19 @@
 # go-db2i
 
-> **Current: v0.7.5 (2026-05-11)** — adds DDL cache invalidation
-> (cache-hit dispatch catches SQL-204 / SQL-805 and re-routes
-> through plain PREPARE_DESCRIBE), graceful fallback on
-> LOB-bind cache-hit (the *PGM stores raw-LOB SQL types our
-> cache-hit encoder doesn't handle; v0.7.5 falls through cleanly
-> instead of erroring), cross-LPAR validation against PUB400
-> V7R5M0, and a forward-commit password scrub for the auth-test
-> fixtures. See [`docs/package-caching.md`](./docs/package-caching.md)
-> for the operator's guide and the `Example_packageCache*` godoc
-> snippets.
+> **Current: v0.7.7 (2026-05-12)** — closes two M10/package-caching
+> gaps. `DECLARE PROCEDURE` / `DECLARE CURSOR` / no-args
+> INSERT-subselect / SELECT-FOR-UPDATE now route through the
+> prepared path so the server files them into the `*PGM`
+> (matching JT400). A new go-db2i-original `package-criteria=extended`
+> opt-in adds `CALL` / `VALUES` / `WITH` to the filing matrix on
+> top of `default`, with an intentional improvement over JT400:
+> `Stmt.Exec` skips the v0.7.4 auto-populate refresh when the
+> dispatch has `sql.Out` destinations (the cache-hit fast path
+> refuses non-IN direction bytes, so the refresh would chase an
+> unreachable cache entry). 28 conformance tests green on
+> V7R6M0 (3s) and V7R5M0 (310s via PUB400). See
+> [`docs/package-caching.md`](./docs/package-caching.md) for the
+> operator's guide and the `Example_packageCache*` godoc snippets.
 
 A pure-Go `database/sql` driver for IBM i (DB2 for i), speaking the IBM
 host-server datastream protocol directly over TCP. No CGo, no Java
@@ -98,9 +102,15 @@ implemented end-to-end:
   auto-populates the cache after first-time filing (per-conn retry
   schedule at PREPARE-counts 3 / 6 / 12, capped to bound work) so
   same-conn subsequent calls hit the fast path without waiting for
-  a reconnect to re-download. The 10-char wire name is byte-equal
-  to JT400 for the same session options, so a Go client and a Java
-  client targeting the same LPAR share one `*PGM`.
+  a reconnect to re-download. v0.7.7 routes `DECLARE PROCEDURE` /
+  `DECLARE CURSOR` and other no-args eligibles through the prepared
+  path, and adds the go-db2i-original `package-criteria=extended`
+  opt-in for `CALL` / `VALUES` / `WITH` filing (with `hasOutDest`
+  refresh-skip — an intentional improvement over JT400). The 10-char
+  wire name is byte-equal to JT400 for the same session options
+  under `default` / `select`, so a Go client and a Java client
+  targeting the same LPAR share one `*PGM`. (`extended` is go-db2i
+  only — JT400 has no equivalent value.)
   Operator guide: [`docs/package-caching.md`](./docs/package-caching.md).
   DSN surface: [`docs/configuration.md`](./docs/configuration.md).
 

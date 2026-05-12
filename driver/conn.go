@@ -410,7 +410,8 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 //	  || isDeclare_                         // DECLARE CURSOR / PROCEDURE
 //	"select" (JDSQLStatement.java:81-84):
 //	  default rules || isSelect_            // any classified SELECT
-//	"extended" (v0.7.7 — JT400's third criterion):
+//	"extended" (v0.7.7 — go-db2i-original; JT400 has no
+//	equivalent value, see JDProperties.java:429-430):
 //	  default rules || isCall || isValues || isWith
 //
 // See /home/complacentsee/godb2/JT400-EXTENDED-DYNAMIC-FILING.md
@@ -455,15 +456,20 @@ func (c *Conn) packageEligibleFor(sql string, hasParams bool) bool {
 		// non-SELECT under this criterion.
 		packaged = packaged || isSelect
 	case "extended":
-		// JT400's third criterion files CALL / VALUES / WITH on
-		// top of default. CALL filing is best-effort: cache-hit
-		// dispatch refuses non-IN direction bytes in
-		// preparedParamsFromCached, so an OUT/INOUT CALL files
-		// into the *PGM but can never cache-hit. The auto-populate
-		// refresh in Stmt.Exec is gated on !hasOutDest precisely
-		// to avoid burning RETURN_PACKAGE round-trips for those
-		// unreachable cache entries -- an intentional improvement
-		// over JT400's wire behaviour.
+		// go-db2i-original criterion: files CALL / VALUES / WITH on
+		// top of default. JT400 has no equivalent value (its
+		// JDProperties.java enumerates only "default" and "select" --
+		// verified against JTOpen 2026-05-12); a JT400 client passing
+		// "extended" rejects the URL at parse time.
+		//
+		// CALL filing is best-effort: cache-hit dispatch refuses
+		// non-IN direction bytes in preparedParamsFromCached, so an
+		// OUT/INOUT CALL files into the *PGM but can never cache-hit.
+		// The auto-populate refresh in Stmt.Exec is gated on
+		// !hasOutDest precisely to avoid burning RETURN_PACKAGE
+		// round-trips for those unreachable cache entries. Whether
+		// OUT-CALL cache-hit could be made to work is tracked as
+		// the v0.7.8 plan.
 		packaged = packaged || isCall(sql) || isValues || isWith
 	}
 	return packaged
