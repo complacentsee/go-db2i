@@ -1,14 +1,14 @@
-package hostserver // import "github.com/complacentsee/goJTOpen/hostserver"
+package hostserver // import "github.com/complacentsee/go-db2i/hostserver"
 
 Package hostserver implements the IBM i host-server datastream protocol that
 JT400 speaks on TCP ports 8470-8476 (TLS variants 9470-9476).
 
 This package is the wire-format layer underneath the database/sql driver in
-github.com/complacentsee/goJTOpen/driver. Most application code should import
-the driver package and use the standard database/sql APIs instead of calling
-into hostserver directly. The types and functions exposed here are public so
-advanced callers can build connection-pooling shims, custom request flows,
-or wire-level debug tools without forking the driver.
+github.com/complacentsee/go-db2i/driver. Most application code should import the
+driver package and use the standard database/sql APIs instead of calling into
+hostserver directly. The types and functions exposed here are public so advanced
+callers can build connection-pooling shims, custom request flows, or wire-level
+debug tools without forking the driver.
 
 # Wire format
 
@@ -155,7 +155,7 @@ const (
     0x7001/0xF001 swaps random seeds, then 0x7002/0xF002 starts the server
     prestart job for this user. Both of these are also used by the other
     host-server services (rmtcmd, dtaq, file, etc.) -- the constants live here
-    because as-database is the first service in goJTOpen that drives them.
+    because as-database is the first service in go-db2i that drives them.
 
 const (
 	DateFormatJOB byte = 0xF0 // server default -- CP 0x3807 not sent
@@ -188,6 +188,30 @@ const (
     DBSQLAttributesDS.setCommitmentControlLevelParserOption.
 
 const (
+	QueryOptimizeUnset   byte = 0x00
+	QueryOptimizeFirstIO byte = 0xC6 // EBCDIC 'F'
+	QueryOptimizeAllIO   byte = 0xC1 // EBCDIC 'A'
+)
+    QueryOptimizeGoal values for DBAttributesOptions.QueryOptimizeGoal. Sent on
+    CP 0x3833 in SET_SQL_ATTRIBUTES as a single EBCDIC byte matching JT400's
+    `query optimize goal` JDBC URL property:
+
+        'F' (0xC6) → *FIRSTIO -- optimize for time-to-first-row (good
+                     for streaming reads, OLTP, ResultSet.next() loops)
+        'A' (0xC1) → *ALLIO   -- optimize for total throughput (good
+                     for reports / analytics that drain whole result sets)
+
+    Note CP 0x3833 is context-sensitive in the host-server protocol:
+    in SET_SQL_ATTRIBUTES it's QueryOptimizeGoal (this constant);
+    in OPEN_DESCRIBE_FETCH it's VariableFieldCompr (cpDBVariableFieldCompr in
+    db_select.go). The constants live in separate files to make the dual use
+    unambiguous.
+
+    QueryOptimizeUnset (0) is the wire-equivalence sentinel: when the field
+    stays at its zero value, the CP is omitted entirely from SET_SQL_ATTRIBUTES,
+    matching the existing select_dummy fixture byte-for-byte.
+
+const (
 	SQLTypeVarChar         uint16 = 448
 	SQLTypeChar            uint16 = 452
 	SQLTypeVarCharNonBlank uint16 = 456 // VARCHAR with NULL indicator pre-fixed
@@ -211,6 +235,38 @@ const (
 )
     SQL type codes from JTOpen's SQLData / DBSQLDescriptorDS. Only the types we
     actually decode in M2 are listed; more land as M3+.
+
+const (
+	// ReqDBSQLCreatePackage builds a brand-new package on the server.
+	// JTOpen sends this on connect when `extended dynamic=true` and
+	// the named package doesn't yet exist.
+	ReqDBSQLCreatePackage uint16 = 0x180F
+
+	// ReqDBSQLReturnPackage asks the server to ship the current
+	// contents of the named package back to the client. JTOpen sends
+	// this on connect when `package cache=true` -- the reply
+	// carries a CP 0x380B (cpPackageReplyInfo) payload with N
+	// statement entries the client cache will be primed with.
+	ReqDBSQLReturnPackage uint16 = 0x1815
+
+	// ReqDBSQLDeletePackage drops the named package and every
+	// statement entry in it. Not wired into the driver yet -- here
+	// for symmetry with the JT400 surface and so future tooling
+	// (e.g. a "warm fresh" CLI) has a constant to refer to.
+	ReqDBSQLDeletePackage uint16 = 0x1811
+
+	// ReqDBSQLClearPackage empties the named package's statement
+	// entries without destroying the *PGM. Same status as
+	// ReqDBSQLDeletePackage -- constant defined for completeness.
+	ReqDBSQLClearPackage uint16 = 0x1810
+)
+    Extended-dynamic package operations on the database host server.
+
+    JT400 calls these "SQL Package" function codes. A package is a server-side
+    *PGM object that caches PREPAREd statements across connections so a
+    re-connecting client (or a co-tenant Go client) skips the PREPARE
+    round-trip. See `plans/m10-package-caching.md` for the wire-level
+    walkthrough.
 
 const (
 	ReqDBSQLChangeDescriptor uint16 = 0x1E00
@@ -253,6 +309,8 @@ const (
 	ORSServerAttributes     uint32 = 0x01000000
 	ORSParameterMarkerFmt   uint32 = 0x00800000
 	ORSPackageInfo          uint32 = 0x00100000
+	ORSCursorAttributes     uint32 = 0x00008000 // CursorAttributes in EXECUTE / OPEN
+	ORSDataCompression      uint32 = 0x00040000 // RLE compression on result-data CPs
 	ORSExtendedColumnDescrs uint32 = 0x00020000
 
 	// ORSVarFieldComp asks the server to use variable-length-field
@@ -280,6 +338,7 @@ const (
 
 const (
 	ReqDBSQLPrepareDescribe   uint16 = 0x1803 // PREPARE + DESCRIBE in one shot
+	ReqDBSQLOpenDescribe      uint16 = 0x1804 // OPEN + DESCRIBE (no inline FETCH)
 	ReqDBSQLFetch             uint16 = 0x180B // continuation FETCH from existing cursor
 	ReqDBSQLOpenDescribeFetch uint16 = 0x180E // OPEN + DESCRIBE + FETCH
 	ReqDBSQLClose             uint16 = 0x180A // CLOSE cursor
@@ -349,6 +408,16 @@ const LOBStreamChunkSize = 32 * 1024
     LOBStream. 32 KB matches the read-side DefaultLOBChunkSize and is well below
     the wire-format int32 cap.
 
+const MaxFilingRefreshAttempts = 3
+    MaxFilingRefreshAttempts caps the number of RETURN_PACKAGE refreshes a
+    connection will issue to learn a single SQL's server-assigned filed name.
+    Refreshes fire at LocalPrepareCount values 3, 6, 12 (one per attempt;
+    the threshold-crossing prepare plus exponential backoff). After three
+    unsuccessful refreshes the conn gives up and stays on the regular
+    PREPARE+EXECUTE path for this SQL, logging a one-time WARN. Mirrors the cost
+    ceiling the v0.7.4 plan committed to: ~3 wasted refreshes maximum (~210ms
+    total on a typical LPAR).
+
 const (
 	ReqDBNDBAddLibraryList uint16 = 0x180C
 )
@@ -412,6 +481,22 @@ var ErrShortFrame = errors.New("hostserver: short DSS frame")
     ErrShortFrame is returned when a frame's Length field promises more bytes
     than are available on the wire.
 
+var ErrUnsupportedCachedParamType = errors.New("hostserver: cached-param SQL type has no encoder branch")
+    ErrUnsupportedCachedParamType is wrapped by EncodeDBExtendedData when the
+    SQL type of a parameter has no encoder branch. Surfaced as a sentinel so the
+    driver-layer cache-hit dispatch can detect the encoder gap via errors.Is and
+    fall through to plain PREPARE_DESCRIBE rather than propagating the failure.
+
+    The regular prepared path computes parameter shapes from the live
+    PREPARE_DESCRIBE reply (which uses LOB-locator types 960/961/etc that
+    this encoder DOES support); the cache-hit path reads shapes from the
+    *PGM-stored ParameterMarkerFormat, which can carry the raw-LOB SQL types
+    405/409/etc that this encoder has no branch for. Sentinel-driven fallback
+    to PREPARE_DESCRIBE keeps cached LOB-bind statements working at the cost of
+    one extra round-trip per call (the original v0.7.1 cache-miss behaviour for
+    LOB binds, now triggered by an empirical signal instead of an upfront syntax
+    filter).
+
 
 FUNCTIONS
 
@@ -435,6 +520,15 @@ func AutocommitOff(conn io.ReadWriter, corr uint32) error
     Validated live against AFTRAEGE11.DCLVRP02 on PUB400 (journaled). JT400's
     tx_commit fixture sent #8 has the exact byte layout this builds.
 
+func AutocommitOffWithIsolation(conn io.ReadWriter, corr uint32, isolation int16) error
+    AutocommitOffWithIsolation is the BeginTx-driven sibling of AutocommitOff:
+    same wire shape (CP 0x3824 + 0x380E + 0x3830) but the commitment
+    level (CP 0x380E) is caller-specified instead of hard-coded to *CS.
+    Pass an `Isolation*` constant (IsolationCommitNone / IsolationReadCommitted
+    / IsolationAllCS / IsolationRepeatableRd / IsolationSerializable).
+    IsolationDefault falls back to *CS so a `BeginTx` with `sql.LevelDefault`
+    keeps the historical wire shape.
+
 func AutocommitOn(conn io.ReadWriter, corr uint32) error
     AutocommitOn turns autocommit back on. Mirrors AutocommitOff: flips the
     same three CPs back to JT400's "autocommit, no commitment, no locator
@@ -448,6 +542,17 @@ func BuildDBRequest(reqRepID uint16, tpl DBRequestTemplate, params []DBParam) (H
     SQL, TemplateLength = 20, ReqRepID set) and the payload bytes. CorrelationID
     is the caller's responsibility to set on hdr before writing -- JTOpen uses
     an incrementing per-connection sequence.
+
+func BuildPackageName(base string, opts PackageOptions) string
+    BuildPackageName takes the user-provided 1..6-char base (DSN `package=...`
+    property) and the active session options and returns the 10-char on-wire
+    package name. The base is upper-cased, space→underscore, and padded with
+    spaces to 6 chars (matching JT400 `JDPackageManager.java:466`). The 4-char
+    suffix follows.
+
+    The 6+4 split is invariant -- JT400 always sends exactly 10 chars (with
+    trailing spaces from short bases). Anything > 6 chars in the base is
+    truncated; callers should validate at DSN parse time.
 
 func ChangeDescriptorRequest(params []PreparedParam) (Header, []byte, error)
     ChangeDescriptorRequest builds the 0x1E00 frame body that uploads the
@@ -466,25 +571,67 @@ func Commit(conn io.ReadWriter, nextCorrelation uint32) error
     nextCorrelation is the request correlation ID; caller advances its own
     counter.
 
+func DecodeDBRequest(payload []byte) (DBRequestTemplate, []DBParam, error)
+    DecodeDBRequest is the inverse of BuildDBRequest. It splits a DB- service
+    request payload (everything after the 20-byte DSS header) into the 20-byte
+    template plus an ordered list of variable-length parameters. Parameter order
+    is preserved -- the caller can rely on it for byte-equivalence comparisons
+    against JT400 trace fixtures where param order is part of the wire shape.
+
+    Returns an error if the payload is truncated or a parameter's LL runs past
+    the end of the buffer. Trailing bytes that aren't a complete LL/CP/Data
+    header are an error rather than silently dropped; the wire spec requires the
+    parameter table to end on a param boundary.
+
+func DecodeDBRequestFrame(frame []byte) (Header, DBRequestTemplate, []DBParam, error)
+    DecodeDBRequestFrame parses a single complete DSS request frame (header
+    + payload) and returns the header, template, and ordered parameter list.
+    Convenience wrapper for callers walking a trace stream where each frame
+    arrives as a single byte slice.
+
+    The DSS header is parsed via Header.UnmarshalBinary, which validates the
+    0xE0 sanity byte; a malformed header returns the header-level error without
+    attempting to decode the body.
+
 func EncodeDBExtendedData(params []PreparedParam, values []any) ([]byte, error)
     EncodeDBExtendedData builds the CP 0x381F payload (parameter values for
-    one or more bound rows). For M3 we only emit a single row of values,
-    since database/sql QueryContext binds one tuple per call.
+    a single bound row). Thin wrapper around EncodeDBExtendedDataBatch that
+    supplies the one-row slice; kept as a separate symbol so existing single-row
+    callers (ExecutePreparedSQL, OpenSelectPrepared, ExecutePreparedCached,
+    the wire-equivalence tests, etc.) need no changes.
+
+    For v0.7.9 batched IUD callers, use EncodeDBExtendedDataBatch directly with
+    N rows -- the wire layout is byte-identical at N=1 so this wrapper produces
+    the same bytes the previous single-row implementation did.
+
+func EncodeDBExtendedDataBatch(params []PreparedParam, rows [][]any) ([]byte, error)
+    EncodeDBExtendedDataBatch builds the CP 0x381F payload for one
+    or more bound rows. JT400 packs N rows of parameter values into
+    a single EXECUTE request via the IBM i "block insert" wire shape
+    (AS400JDBCPreparedStatementImpl.java:944-948); we mirror that here for
+    v0.7.9's BatchExec entry point.
 
         header (20 bytes):
           0..3   consistency token (always 1)
-          4..7   row count (always 1 for M3)
+          4..7   row count (len(rows); 1 for the legacy single-row path)
           8..9   column count
           10..11 indicator size (always 2)
           12..15 reserved (compression flag in JTOpen; 0 here)
           16..19 row size (sum of FieldLength across columns)
         indicator block (rowCount * colCount * indicatorSize bytes):
-          one int16 per column-per-row; 0 = not-null, -1 = null
+          one int16 per column-per-row, grouped row-major
+          (row 0's indicators first, then row 1's, ...);
+          0 = not-null, 0xFFFF = null per JT400.
         data block (rowCount * rowSize bytes):
-          fields packed in declaration order
+          fields packed in declaration order, grouped row-major.
 
-    values must have the same length as params and supply one Go value per
-    parameter slot (currently int32 only).
+    Each rows[r] must have len == len(params). At least one row is required;
+    a zero-row encoding is rejected up front rather than silently emitting a
+    header-only payload the server might interpret incorrectly.
+
+    Error messages for malformed values inside the data block carry a "row %d "
+    prefix only when rowCount > 1 so the single-row wrapper preserves the legacy
+    "param %d: ..." error format existing tests assert against.
 
 func EncodeDBExtendedDataFormat(params []PreparedParam) []byte
     EncodeDBExtendedDataFormat builds the CP 0x381E payload (parameter shape
@@ -545,14 +692,29 @@ func IsLOBSQLType(sqlType uint16) bool
     forms route through the locator path.
 
 func NDBAddLibraryList(conn io.ReadWriter, library string, correlationID uint32) error
-    NDBAddLibraryList sends one NDB-service ADD_LIBRARY_LIST frame to conn.
-    library is one EBCDIC library name (10 chars max, space-padded by JTOpen but
-    the NDB protocol just takes the declared length).
+    NDBAddLibraryList sends one NDB-service ADD_LIBRARY_LIST frame to
+    conn for a single library. Thin wrapper around NDBAddLibraryListMulti
+    preserved for callers that only need one library; equivalent to
+    NDBAddLibraryListMulti(conn, []string{library}, correlationID).
 
-    JTOpen hardcodes the indicator byte to ASCII 'C' (0x43), converted to EBCDIC
-    0xC3, with no public name for the meaning. We pass the same byte; if any
-    future caller needs a different indicator (e.g. 'F' for front-of-list,
-    'B' for back), generalise this helper then.
+func NDBAddLibraryListMulti(conn io.ReadWriter, libraries []string, correlationID uint32) error
+    NDBAddLibraryListMulti sends one NDB-service ADD_LIBRARY_LIST frame carrying
+    N libraries. The first library is tagged with indicator 'C' (EBCDIC 0xC3,
+    "current SQL schema") and the rest with 'L' (EBCDIC 0xD3, "append to back of
+    *LIBL"). This matches JT400's JDLibraryList behaviour when the user supplies
+    a comma-separated libraries= list without an explicit *LIBL token and the
+    default schema is the first item -- the common migration shape.
+
+    The CP 0x3813 layout mirrors JT400's DBBaseRequestDS.addParameter(int,
+    ConvTable, char[], String[]):
+
+        CCSID(2) + numLibraries(2) +
+        per library: indicator(1) + length(2) + name bytes
+
+    JTOpen tolerates errorClass=5 returnCode=1301 ("library not added; already
+    in *LIBL or doesn't exist") and treats it as a warning. We do the same --
+    the goal is to flip the SQL service's session state, not to actually mutate
+    *LIBL.
 
 func ReadDBReplyMatching(r io.Reader, wantCorrelation uint32, maxDrain int) (Header, []byte, error)
     ReadDBReplyMatching reads frames from r and returns the first one whose
@@ -577,6 +739,20 @@ func Rollback(conn io.ReadWriter, nextCorrelation uint32) error
     Rollback sends a SQL service ROLLBACK (0x1808) on conn. Same autocommit-off
     prerequisite as Commit.
 
+func SendCreatePackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) error
+    SendCreatePackage issues a CREATE_PACKAGE (0x180F) request on conn and
+    reads the matching reply. JT400 sends this on connect when extended-dynamic
+    is on and the named *PGM doesn't yet exist on the server. The server is
+    idempotent: if the *PGM already exists, it returns success without changes.
+
+    nextCorr is the connection's correlation-ID counter. The reply is consumed
+    (and any error decoded) inside this call.
+
+func SetReadHook(fn func(hdr Header, full []byte))
+    SetReadHook installs a callback fired on every successful ReadFrame, with
+    the parsed reply header + the full reply bytes. Symmetric to SetWireHook;
+    same caveats.
+
 func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error)
     SetSQLAttributesRequest builds a 0x1F80 SET_SQL_ATTRIBUTES request payload
     (without the DSS header). The request asks the server to (a) accept the
@@ -591,6 +767,12 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error)
                             on uncompressed replies (server ignores)
 
     This matches what JTOpen sends in our captured fixture.
+
+func SetWireHook(fn func(hdr Header, full []byte))
+    SetWireHook installs a callback fired on every WriteFrame, with the request
+    header + the full frame bytes (header + payload). Pass nil to remove.
+    Intended for live-test debugging of new wire shapes; do not call from
+    concurrent goroutines.
 
 func SignOn(conn io.ReadWriter, userID, password string) (
 	*ExchangeAttributesReply,
@@ -702,9 +884,43 @@ func StartServerRequest(server ServerID, scheme AuthScheme, userID string, authB
     production target don't require them. They land when M3+ drags a real
     authentication-token path through the codebase.
 
+func SuffixFromOptions(opts PackageOptions) string
+    SuffixFromOptions returns the 4-char package-name suffix JT400 computes for
+    opts. Mirrors JDPackageManager.java:442-522 byte-for- byte; any divergence
+    breaks the cross-driver shared-cache rule.
+
+    The formula:
+
+        char1 = suffixInvariant[translateHex]
+        char2 = suffixInvariant[(commitMode<<3) | dateFormat]      // with RR overflow handling
+        char3 = suffixInvariant[(decimalSep<<4) | (naming<<3) | dateSep]
+        char4 = suffixInvariant[(timeFormat<<2) | timeSep]
+
+    The RR overflow re-uses dateSep bits to encode commitMode==4 (RR), because
+    the 2-bit commit field can only express 0..3.
+
+func SwapWireHook(fn func(hdr Header, full []byte)) func(hdr Header, full []byte)
+    SwapWireHook atomically (modulo no-concurrent-call constraint) installs
+    fn as the new wire hook and returns the previous one. Tests that need to
+    restore the prior state on defer use this -- e.g. a SetWireHook(nil) defer
+    would clobber an outer hook installed by a parent test or shared fixture.
+
 func WriteFrame(w io.Writer, hdr Header, payload []byte) error
     WriteFrame writes hdr followed by payload to w. hdr.Length is overwritten
     with HeaderLength + len(payload).
+
+func WriteFrames(w io.Writer, frames ...Frame) error
+    WriteFrames concatenates multiple DSS frames into a single io.Writer call.
+    Used by paths that need to match JT400's TCP framing for the server to
+    behave correctly -- specifically CREATE_RPB + PREPARE_DESCRIBE in the
+    package-filing path, where the server only files PREPAREd statements into
+    the extended-dynamic *PGM when both frames arrive in one TCP segment (v0.7.2
+    live testing against IBM Cloud V7R6M0 confirmed this). The DSS protocol
+    allows concatenated frames -- each one carries its own length header -- so
+    the server reads them sequentially.
+
+    Each frame's hdr.Length is overwritten with HeaderLength + len(payload),
+    same as WriteFrame.
 
 func WriteLOBData(conn io.ReadWriter, handle uint32, offset int64, requestedSize uint32, data []byte, truncate, compressed bool, nextCorr uint32) error
     WriteLOBData uploads a slice of LOB content tied to handle. Mirrors JT400's
@@ -762,7 +978,7 @@ func XChgRandSeedRequest(server ServerID, clientSeed []byte) (Header, []byte, er
     used by the other services too.
 
     clientSeed must be exactly 8 bytes. JTOpen uses the current-millis low/high
-    split as its source of "random"; goJTOpen callers should pass crypto/rand
+    split as its source of "random"; go-db2i callers should pass crypto/rand
     bytes via the orchestrator in StartDatabaseService.
 
 
@@ -825,6 +1041,17 @@ func OpenSelectPrepared(conn io.ReadWriter, sql string, paramShapes []PreparedPa
     Same shape as OpenSelectStatic, plus the CHANGE_DESCRIPTOR + bound-value
     frames between PREPARE and OPEN.
 
+func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16, opts ...SelectOption) (*Cursor, error)
+    OpenSelectPreparedCached is the Query-path companion to
+    ExecutePreparedCached. CREATE_RPB + CHANGE_DESCRIPTOR + OPEN_DESCRIBE_FETCH
+    (with statement-name override) -- no PREPARE_DESCRIBE round-trip. The
+    returned *Cursor owns the RPB and supports continuation FETCH the same way
+    the non-cached path does, so multi-block result sets just work.
+
+    packageLibrary is the on-wire EBCDIC library name; it's attached to
+    CREATE_RPB so the server can resolve the package-named statement on the
+    RPB's bind side.
+
 func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, opts ...SelectOption) (*Cursor, error)
     OpenSelectStatic opens a streaming cursor for a static (no-param) SELECT.
     Mirrors the SelectStaticSQL bytes through the initial PREPARE_DESCRIBE +
@@ -834,6 +1061,22 @@ func OpenSelectStatic(conn io.ReadWriter, sql string, nextCorr func() uint32, op
     nextCorr supplies fresh correlation IDs on demand; the cursor holds onto it
     so continuation FETCH (issued lazily from Next) and RPB DELETE (from Close)
     keep advancing the same counter the driver Conn uses.
+
+func (c *Cursor) AdvanceResultSet() ([]SelectColumn, error)
+    AdvanceResultSet closes the current cursor with REUSE_RESULT_SET (preserving
+    the prepared statement on the RPB), issues a fresh OPEN_DESCRIBE (0x1804)
+    on the same statement to attach to the next dynamic result set the proc
+    declared, parses the new column descriptors out of the reply, and prefetches
+    the first row batch via continuation FETCH (0x180B). Mirrors JT400's
+    getMoreResults flow at AS400JDBCStatement.java:3406-3470.
+
+    Returns the new column descriptors so the driver-level Rows can refresh
+    its ColumnTypes / Columns view. The cursor's internal pending row buffer is
+    replaced; subsequent Next() calls drain the next set.
+
+    Caller must check MoreResultSets() before calling. AdvanceResultSet on a
+    cursor with no remaining sets returns io.EOF -- safer than a silent no-op
+    since the caller's intent was to advance.
 
 func (c *Cursor) Close() error
     Close releases server-side resources. When the server already auto-closed
@@ -861,10 +1104,30 @@ func (c *Cursor) Columns() []SelectColumn
     Columns returns the result-set descriptor list. Stable for the lifetime of
     the cursor (server cannot change column shape mid- iteration).
 
+func (c *Cursor) CurrentResultSet() int
+    CurrentResultSet reports which result set (1-indexed) the cursor is
+    currently positioned on. Zero when numberOfResults is 0.
+
+func (c *Cursor) MoreResultSets() bool
+    MoreResultSets reports whether the proc that this cursor was opened against
+    has at least one more dynamic result set to drain. For a plain SELECT (or
+    a CALL with DYNAMIC RESULT SETS 0) the server returns 0 in SQLERRD(2),
+    so MoreResultSets always reports false.
+
+    Implements the conceptual sibling of database/sql/driver.RowsNextResultSet's
+    HasNextResultSet (the driver wrapper in driver/rows.go calls this).
+    JT400 mirrors this state via numberOfResults_ + getMoreResults() in
+    AS400JDBCStatement.java:3406.
+
 func (c *Cursor) Next() (SelectRow, error)
     Next returns the next row. Returns io.EOF when the cursor is drained. Errors
     from continuation FETCH are surfaced verbatim (typically *Db2Error with the
     OP="FETCH" tag); the cursor remains open so the caller can still Close it.
+
+func (c *Cursor) NumberOfResults() int
+    NumberOfResults exposes the total result-set count for callers (the driver
+    wrapper) that want to surface metadata before iteration finishes. Returns 0
+    for plain SELECT.
 
 type DBAttributesOptions struct {
 	// ClientCCSID is the CCSID we want the server to use when
@@ -893,7 +1156,7 @@ type DBAttributesOptions struct {
 	// the decoder; or to DateFormatJOB to keep the fixture-
 	// compatible default.
 	//
-	// NOTE: pre-2026-05-08 builds of goJTOpen pumped this byte into
+	// NOTE: pre-2026-05-08 builds of go-db2i pumped this byte into
 	// CP 0x3805, which is actually the TranslateIndicator (per
 	// JTOpen's DBSQLAttributesDS.setTranslateIndicator). DateFormatJOB
 	// happened to coincide with the only valid TranslateIndicator
@@ -916,14 +1179,79 @@ type DBAttributesOptions struct {
 	// JDProperties.LOB_THRESHOLD ("lob threshold" JDBC URL knob).
 	//
 	// 0 = use the wire-default 32768 (the historical hard-coded
-	// value goJTOpen has always sent). Set to a smaller value to
+	// value go-db2i has always sent). Set to a smaller value to
 	// keep large CLOBs out of the row-data buffer; set to a larger
 	// value (up to 15728640, the server's documented cap) to inline
 	// bigger LOBs and skip the RETRIEVE_LOB_DATA round trip for
 	// repetitive small-LOB workloads.
 	LOBThreshold uint32
+
+	// ExtendedDynamic tells SET_SQL_ATTRIBUTES to emit the full
+	// JT400 wire shape that JT400's AS400JDBCConnectionImpl uses
+	// when the JDBC URL set "extended dynamic=true". JT400 emits 5
+	// additional date/time/separator CPs (0x3807-0x380B) with the
+	// session's defaults so the server has a definite value to feed
+	// into the package-suffix derivation, instead of relying on the
+	// job-default fallback. v0.7.2 live testing against IBM Cloud
+	// V7R6M0 confirmed: without these 5 extras the server doesn't
+	// file PREPAREd statements into the *PGM even with otherwise
+	// byte-identical wire shape.
+	ExtendedDynamic bool
+
+	// Naming selects the SQL naming convention the server applies
+	// when parsing unqualified identifiers. 0 = "sql" (period-
+	// qualified, MYLIB.TABLE; the JT400 NAMING_SQL value and the
+	// go-db2i historical default); 1 = "system" (slash-qualified,
+	// MYLIB/TABLE; the JT400 NAMING_SYSTEM value and JT400's
+	// default for migrating RPG/CL shops). Sent as CP 0x380C
+	// (NamingConventionParserOption) in SET_SQL_ATTRIBUTES; mirrors
+	// JT400's setNamingConventionParserOption per JDProperties.NAMING.
+	Naming int16
+
+	// TimeFormat overrides CP 0x3809 (TimeFormatParserOption).
+	// Values mirror JT400's TIME_FORMAT choice index:
+	//   0=hms 1=usa 2=iso 3=eur 4=jis
+	// -1 (default) = omit the CP so the server falls back to the
+	// job-default time format. JT400 NOTSET behaves identically.
+	TimeFormat int8
+
+	// DateSeparator overrides CP 0x3808 (DateSeparatorParserOption).
+	// Values mirror JT400's DATE_SEPARATOR choice index:
+	//   0='/' 1='-' 2='.' 3=',' 4=' '
+	// -1 (default) = let the date-format-inferred separator (or the
+	// job default) win. Explicit setting takes precedence over the
+	// DateFormat-derived value emitted by the dateSeparatorParserIndex
+	// helper.
+	DateSeparator int8
+
+	// TimeSeparator overrides CP 0x380A (TimeSeparatorParserOption).
+	// Values mirror JT400's TIME_SEPARATOR choice index:
+	//   0=':' 1='.' 2=',' 3=' '
+	// -1 (default) = omit the CP (job default).
+	TimeSeparator int8
+
+	// DecimalSeparator overrides CP 0x380B (DecimalSeparatorParserOption).
+	// Values mirror JT400's DECIMAL_SEPARATOR choice index:
+	//   0='.' 1=','
+	// -1 (default) = omit the CP (job default).
+	DecimalSeparator int8
+
+	// QueryOptimizeGoal sets the server-side optimizer goal byte on
+	// CP 0x3833 in SET_SQL_ATTRIBUTES. Mirrors JT400's
+	// "query optimize goal" JDBC URL property:
+	//
+	//   QueryOptimizeFirstIO (0xC6, 'F') -- optimize for time-to-
+	//                                       first-row (streaming, OLTP)
+	//   QueryOptimizeAllIO   (0xC1, 'A') -- optimize for total
+	//                                       throughput (reports / analytics)
+	//   QueryOptimizeUnset   (0)         -- omit the CP entirely;
+	//                                       server uses its job default
+	//                                       (typically *ALLIO on V7R5+)
+	//
+	// Default 0 preserves byte-equality with pre-v0.7.17 fixtures.
+	QueryOptimizeGoal byte
 }
-    DBAttributesOptions is the subset of DBSQLAttributesDS knobs that goJTOpen
+    DBAttributesOptions is the subset of DBSQLAttributesDS knobs that go-db2i
     sets on every database connection. The defaults match what JTOpen sends when
     the JDBC driver is opened with no extra URL properties:
 
@@ -954,6 +1282,22 @@ type DBParam struct {
     wire-encoded as LL(4) + CP(2) + Data, where LL includes its own 4 bytes
     (i.e. LL = 6 + len(Data)). Helpers below build the flavours JTOpen uses
     (CCSID-prefixed strings, UCS-2 strings, raw bytes, etc.).
+
+func BuildCreatePackageParams(name, library string, ccsid uint16) ([]DBParam, error)
+    BuildCreatePackageParams builds the parameter list for a CREATE_PACKAGE
+    (0x180F) request. The caller assembles the surrounding DBRequestTemplate and
+    adds the result via BuildDBRequest.
+
+    Wire shape (from fixture prepared_package_first_use.trace frame #5):
+    2 params -- CP 0x3804 (package name, CCSID-tagged var-string) + CP 0x3801
+    (library, CCSID-tagged var-string).
+
+func BuildReturnPackageParams(name, library string, ccsid uint16) ([]DBParam, error)
+    BuildReturnPackageParams builds the parameter list for a RETURN_PACKAGE
+    (0x1815) request -- the connect-time download path when `package
+    cache=true`. Wire shape from fixture prepared_package_cache_download.trace
+    frame #6: 3 params, name + library + an option DWORD (0 = "return ALL
+    statements").
 
 func DBParamByte(cp uint16, v byte) DBParam
     DBParamByte packs a 1-byte param -- e.g. autocommit (0x3824),
@@ -1037,6 +1381,16 @@ func (r *DBReply) FindServerAttributes() (*ServerAttributes, error)
     traces) which we skip before handing the bytes to ParseServerAttributes.
 
     Returns nil, nil if the reply doesn't include the CP.
+
+func (r *DBReply) RowsAffected() int64
+    RowsAffected reads the rows-affected count from the reply's CP 0x3807
+    SQLCA. SQLERRD is six int32 BE starting at offset 96 of the SQLCA data;
+    rows-affected sits at SQLERRD(3) in SQL- standard 1-indexed terms
+    (sqlerrd_[2] in JT400's 0-indexed Java array), which is byte offset 104.
+
+    Returns 0 when no SQLCA is present, the SQLCA is too short, or the value
+    is sentinel-negative (IBM i uses negative SQLERRD fields for "info not
+    available"; JDBC's getUpdateCount mirrors the same fallback).
 
 func (r *DBReply) VLFCompressed() bool
     VLFCompressed reports whether the server set the variable-length-
@@ -1204,9 +1558,42 @@ func ParseExchangeAttributesReply(payload []byte) (*ExchangeAttributesReply, err
 
 type ExecResult struct {
 	RowsAffected int64
+	OutValues    []any
 }
-    ExecResult is what ExecuteImmediate returns -- just a rows-affected count
-    for now (decoded from SQLCA when present; 0 if the SQLCA didn't carry one).
+    ExecResult is what ExecuteImmediate / ExecutePreparedSQL returns.
+    RowsAffected is decoded from SQLCA when present (0 if absent or for
+    statement kinds that don't carry it like DDL).
+
+    OutValues is populated when the statement carried OUT or INOUT parameters
+    (stored-procedure CALLs via M9-2's sql.Out path) and the server returned a
+    synthetic single-row result-data CP in the EXECUTE reply. Each entry is the
+    typed decoded value from the corresponding parameter slot's PreparedParam
+    shape; slots whose PreparedParam.ParamType was 0xF0 (IN-only) are left nil
+    since the reply row still includes them (IN values echoed back) but the
+    caller has no destination to write to. OutValues is nil for any EXECUTE
+    whose paramShapes had no OUT/INOUT direction byte.
+
+func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, rows [][]any, nextCorrelation uint32, opts ...SelectOption) (*ExecResult, error)
+    ExecuteBatch is the v0.7.9 block-insert wire dispatch: same
+    CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE sequence
+    as ExecutePreparedSQL but the EXECUTE payload packs N rows of bind
+    values into a single CP 0x381F block via EncodeDBExtendedDataBatch.
+    The server returns one SQLCA whose SQLERRD[3] is the total rows affected
+    across all rows of the batch -- JT400 cannot report per-row counts either
+    (AS400JDBCPreparedStatementImpl.java line 1701 comment).
+
+    Caller responsibilities:
+      - SQL verb is INSERT / UPDATE / DELETE (validated upstream in
+        driver.Conn.BatchExec); this function does not classify.
+      - rows is non-empty and every row has the same len as paramShapes
+        (validated again inside EncodeDBExtendedDataBatch).
+      - No LOB parameters (locator-allocate would need WRITE_LOB_DATA
+        before EXECUTE, which doesn't compose with the multi-row CP 0x381F
+        shape -- JT400 falls back to per-row EXECUTE in this case via
+        JDSQLStatement.canBatch returning false).
+      - No OUT/INOUT parameters (IUD never has them; the driver layer rejects).
+
+    Returns ExecResult.RowsAffected = server's total. OutValues is always nil.
 
 func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*ExecResult, error)
     ExecuteImmediate runs INSERT / UPDATE / DELETE / DDL against conn using
@@ -1222,7 +1609,16 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
     Returns ExecResult with rows-affected when the SQLCA carries it, or zero
     when the server didn't (e.g. DDL).
 
-func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32) (*ExecResult, error)
+func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramValues []any, nextCorr func() uint32, packageName, packageLibrary string, packageCCSID uint16) (*ExecResult, error)
+    ExecutePreparedCached runs an INSERT / UPDATE / DELETE against conn using
+    the cached PackageStatement metadata. Skips PREPARE_ DESCRIBE; still does
+    CREATE_RPB + CHANGE_DESCRIPTOR + EXECUTE + DELETE_RPB to keep the server's
+    handle state happy.
+
+    nextCorr is the connection's per-call correlation-ID closure -- each frame
+    consumes one ID.
+
+func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedParam, paramValues []any, nextCorrelation uint32, opts ...SelectOption) (*ExecResult, error)
     ExecutePreparedSQL runs a parameterised INSERT / UPDATE / DELETE against
     conn. Mirrors the JT400 prepared-DML flow:
 
@@ -1241,6 +1637,12 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
     Caller is responsible for ensuring the SQL text starts with INSERT, UPDATE,
     or DELETE -- the function does not validate the verb, since callers (the
     driver) already classify with isSelect().
+
+type Frame struct {
+	Hdr     Header
+	Payload []byte
+}
+    Frame pairs a Header with its payload for WriteFrames batching.
 
 type Header struct {
 	Length         uint32
@@ -1361,6 +1763,165 @@ func (e *NonBMPRuneError) Error() string
     Error formats the offending rune, its index in the source string, and the
     CCSID that rejected it. Implements the error interface.
 
+type PackageManager struct {
+	// Name is the resolved 10-char package name on the wire
+	// (BuildPackageName output).
+	Name string
+	// Library is the package library (DSN `package-library`,
+	// default "QGPL").
+	Library string
+	// CCSID is the package-CCSID (DSN `package-ccsid`); JT400
+	// defaults to 13488 (UCS-2 BE).
+	CCSID uint16
+	// Cached holds the in-memory view of the server-side *PGM.
+	// Populated on connect from the RETURN_PACKAGE reply and
+	// refreshed mid-session by the v0.7.4 auto-populate path
+	// after a SQL crosses IBM's 3-PREPARE threshold.
+	//
+	// Map keyed on SQLText so packageLookup is O(1) instead of
+	// linear over the slice. Entries with NameBytes populated
+	// are eligible for cache-hit dispatch; entries we've inserted
+	// to track LocalPrepareCount but haven't yet seen filed
+	// (NameBytes empty) only contribute to the threshold count.
+	Cached map[string]*PackageStatement
+}
+    PackageManager holds the per-connection package state. M10-1 ships only the
+    scaffolding; M10-3 wires it into the connect-time RETURN_PACKAGE round trip
+    and the per-statement cache lookup.
+
+type PackageOptions struct {
+	// TranslateHex: 0 = binary (default), 1 = character.
+	TranslateHex int
+	// CommitMode: 0 = NONE, 1 = CHG (UR), 2 = CS, 3 = ALL (RS), 4 = RR.
+	// JT400 special-cases the 4=RR value because it overflows the
+	// 3-bit field; see overflow handling in SuffixFromOptions.
+	CommitMode int
+	// DateFormat: 0 = julian, 1 = mdy, 2 = dmy, 3 = ymd,
+	// 4 = usa, 5 = iso, 6 = eur, 7 = jis.
+	DateFormat int
+	// DateSeparator: 0 = slash, 1 = dash, 2 = period, 3 = comma,
+	// 4 = blank.
+	DateSeparator int
+	// DecimalSeparator: 0 = period, 1 = comma.
+	DecimalSeparator int
+	// Naming: 0 = sql, 1 = system.
+	Naming int
+	// TimeFormat: 0 = hms, 1 = usa, 2 = iso, 3 = eur, 4 = jis.
+	TimeFormat int
+	// TimeSeparator: 0 = colon, 1 = period, 2 = comma, 3 = blank.
+	TimeSeparator int
+}
+    PackageOptions is the subset of session options the package-name suffix
+    derivation reads. Each field maps to a JT400 JDProperties entry;
+    the integer values MUST match JT400's enum positions (JDProperties.java)
+    for the byte-for-byte interop rule to hold. See memory file
+    `project_db2i_m10_jt400_interop.md`.
+
+type PackageStatement struct {
+	// Name is the 18-char server-assigned statement name decoded
+	// from EBCDIC (e.g. "QZAF481815E802E001"). Useful for logs and
+	// QSYS2.SYSPACKAGE.STATEMENT_NAME cross-checks. The on-wire
+	// EXECUTE uses NameBytes (verbatim EBCDIC).
+	Name string
+
+	// NameBytes is the raw 18-byte EBCDIC statement name as it sat
+	// inside the CP 0x380B payload. Sent verbatim in CP 0x3806 on
+	// cache-hit EXECUTEs so the server-side byte equality holds
+	// even if the name contains characters that would normalise
+	// across CCSIDs.
+	NameBytes []byte
+
+	// StatementType is JT400's statement-type code stored inside
+	// the package (2 = SELECT, 3 = INSERT, 4 = UPDATE, 5 = DELETE
+	// in our wire usage). Useful for an early "is this cacheable
+	// from this caller's verb" cross-check.
+	StatementType uint16
+
+	// NeedsDefaultCollection is the byte at entry+0; nonzero means
+	// the server will look up unqualified names against the package
+	// header's default-collection field. Mirrors JT400's
+	// DBReplyPackageInfo.getStatementNeedsDefaultCollection.
+	NeedsDefaultCollection byte
+
+	// SQLText is the SQL string JT400 prepared, decoded from the
+	// package header's CCSID (UCS-2 BE in our V7R6 fixtures).
+	// Used as the lookup key for `PackageManager.Lookup`.
+	SQLText string
+
+	// DataFormat is the per-column result-set descriptor the server
+	// returned at original PREPARE time, decoded from the SQLDA
+	// region inside the entry. Empty for non-SELECT statements.
+	DataFormat []SelectColumn
+
+	// ParameterMarkerFormat is the per-marker input descriptor the
+	// server returned at original PREPARE time, decoded from the
+	// pm-format SQLDA region. Empty for marker-less statements.
+	ParameterMarkerFormat []ParameterMarkerField
+
+	// RawDataFormat is the raw bytes of the data-format SQLDA
+	// region (or nil if length was 0/6, the "no format" sentinels).
+	// Retained so a future EXECUTE/OPEN-by-name path can re-send
+	// them on the wire byte-equal to what the server stored.
+	RawDataFormat []byte
+
+	// RawParameterMarkerFormat is the raw bytes of the
+	// parameter-marker-format SQLDA region (or nil if absent).
+	RawParameterMarkerFormat []byte
+
+	// LocalPrepareCount tracks how many filing-eligible PREPARE_DESCRIBE
+	// requests the current connection has sent for this SQL. Used by
+	// the v0.7.4 auto-populate path: once the count reaches IBM's
+	// SI30855 threshold (3), the conn issues one RETURN_PACKAGE refresh
+	// to learn the server-assigned name so subsequent calls dispatch
+	// via the cache-hit fast path. Not persisted across reconnects --
+	// each conn tracks its own count, and connect-time RETURN_PACKAGE
+	// absorbs filings caused by other conns.
+	LocalPrepareCount uint8
+
+	// RefreshAttempts counts how many RETURN_PACKAGE refreshes this
+	// conn has issued for this SQL that came back without a populated
+	// NameBytes (i.e. filing didn't materialize). Used to cap retry
+	// cost when filing fails persistently (package full, server
+	// transient state, etc.) so we don't burn a refresh per call
+	// forever. After hostserver.MaxFilingRefreshAttempts unsuccessful
+	// attempts, the conn stays on the regular path for this SQL.
+	RefreshAttempts uint8
+}
+    PackageStatement is one cached PREPARE entry inside a package. We store
+    enough state to replay an EXECUTE (or OPEN_DESCRIBE_FETCH) without
+    re-issuing PREPARE_DESCRIBE: the server-assigned 18-byte statement name,
+    the original SQL text JT400 used as the cache key, and the data +
+    parameter-marker descriptors the server already produced.
+
+func ParsePackageInfo(body []byte) ([]PackageStatement, error)
+    ParsePackageInfo decodes the CP 0x380B (package info) reply body into
+    a slice of PackageStatement values. The body is what SendReturnPackage
+    receives as the cpPackageReplyInfo CP's payload.
+
+    Layout (from JT400 DBReplyPackageInfo.java):
+
+        +0..3   total length      (uint32 BE; matches len(body))
+        +4..5   CCSID             (uint16 BE; 13488 in our fixtures)
+        +6..23  default collection (18 bytes, EBCDIC blank-padded)
+        +24..25 statement count   (uint16 BE)
+        +26..41 reserved          (16 bytes, all zero in fixtures)
+        +42..   per-statement entries, fixed 64-byte stride
+
+    Each entry's variable-length SQL text + SQLDA format regions live past
+    the last entry record; offsets are written assuming a 6-byte LL/CP wrapper
+    precedes the body.
+
+    Returns an error if the body is shorter than the declared total length or
+    the statement count cannot be reconciled with the entry records present.
+
+func SendReturnPackage(conn io.ReadWriter, name, library string, ccsid uint16, nextCorr func() uint32) ([]PackageStatement, error)
+    SendReturnPackage issues a RETURN_PACKAGE (0x1815) request on conn and reads
+    the matching reply. JT400 sends this on connect when package-cache=true;
+    the reply carries CP 0x380B with the server-cached statement entries, which
+    we parse into PackageStatement values so the driver can drive the cache-hit
+    fast path. Returns nil/nil when the package exists but holds zero statements
+    (fresh *PGM).
+
 type ParameterMarkerField struct {
 	SQLType     uint16
 	FieldLength uint32
@@ -1467,6 +2028,33 @@ type SelectOption func(*selectOpts)
 
     Zero options reproduces the historical behaviour byte-for-byte.
 
+func WithBlockSize(kib int) SelectOption
+    WithBlockSize sets the continuation-FETCH buffer size in KiB. Default (zero
+    or omit) is 32 KiB, byte-identical to the pre-M12 hardcoded 0x00008000.
+    Accepted range 8..512 KiB to match JT400's canonical BLOCK_SIZE values
+    (8/16/32/64/128/256/512); buffers below 8 KiB trigger server-side
+    row-truncation under `FETCH FIRST N` on some V7R6 paths even after the
+    v0.7.13 fetchMoreRows fix, so they're rejected at the boundary. Out-of-range
+    values silently fall back to 32 KiB on the SelectOption path (validation
+    lives at the driver/Config boundary so callers passing through SelectOption
+    directly aren't penalised by panic-on-zero behaviour).
+
+    Maps to CP 0x3834 (BufferSize) on PREPARE_DESCRIBE OPEN / continuation FETCH
+    frames. Mirrors JT400's BLOCK_SIZE connection property.
+
+func WithExtendedDynamic(b bool) SelectOption
+    WithExtendedDynamic asks the server to file every PREPAREd statement into
+    the SQL package the connection registered at connect time. The on-wire
+    change is a CP 0x3804 parameter on PREPARE_DESCRIBE carrying the 10-char
+    EBCDIC package name as a CCSID-tagged var-string; the server-side effect is
+    that repeated PREPAREs of the same SQL (across this and other connections
+    targeting the same *PGM) re-use the cached parse plan instead of re-parsing.
+    Mirrors JT400's "extended dynamic=true" JDBC URL knob.
+
+    Callers MUST also call WithPackageName -- without a package name the option
+    has no effect (the wire CP requires the bytes to point the server at the
+    right *PGM).
+
 func WithExtendedMetadata(b bool) SelectOption
     WithExtendedMetadata asks the server to ship per-column schema, table,
     base column name, and label in the PREPARE_DESCRIBE reply. Mirrors JT400's
@@ -1476,6 +2064,29 @@ func WithExtendedMetadata(b bool) SelectOption
     pre-M4-deferred captures so existing fixtures still replay cleanly;
     callers opt in per-statement when they need `Rows.ColumnTypeSchemaName` /
     `Rows.ColumnTypeTableName`.
+
+func WithPackageLibrary(lib string) SelectOption
+    WithPackageLibrary supplies the package library name (CP 0x3801) that
+    CREATE_RPB attaches to the request parameter block when extended-dynamic
+    is on. JT400 sends this so the server knows which library to look in for
+    the *PGM when the per-statement CP 0x3804 arrives on PREPARE_DESCRIBE.
+    Without it the server returns SQL-112 errorClass=2 on PREPARE_DESCRIBE even
+    when the package name CP is correct.
+
+    Encoded the same way as the package name: ASCII bytes lifted through
+    asciiToEBCDIC37. Most callers pass the connection's Config.PackageLibrary
+    (default "QGPL").
+
+func WithPackageName(name string, ccsid uint16) SelectOption
+    WithPackageName supplies the 10-char EBCDIC package name + CCSID the CP
+    0x3804 parameter carries on PREPARE_DESCRIBE when WithExtendedDynamic is on.
+    ccsid=37 matches JT400's V7R6M0 wire (US EBCDIC); other SBCS EBCDIC pages
+    work because the package-name charset (A-Z + 0-9 + _#@$) round-trips
+    identically.
+
+    Pass-through: the wire encoder lifts `name` via asciiToEBCDIC37 (the same
+    helper CREATE_PACKAGE uses), so the caller passes the same ASCII / Go string
+    that BuildPackageName produced.
 
 type SelectResult struct {
 	Columns []SelectColumn
@@ -1563,7 +2174,7 @@ type ServerAttributes struct {
     ServerAttributes is the parsed form of a 0x3804 CP payload -- the result
     of a 0x1F80 SET_SQL_ATTRIBUTES request. Field offsets mirror JTOpen's
     DBReplyServerAttributes (which indexes off the CP data start, i.e. after the
-    2 reserved bytes that follow LL/CP). We only surface fields that goJTOpen
+    2 reserved bytes that follow LL/CP). We only surface fields that go-db2i
     actually consumes; the rest land if/when needed.
 
     EBCDIC strings come back as raw bytes -- caller decodes through the

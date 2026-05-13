@@ -1,9 +1,9 @@
-package ebcdic // import "github.com/complacentsee/goJTOpen/ebcdic"
+package ebcdic // import "github.com/complacentsee/go-db2i/ebcdic"
 
 Package ebcdic converts between Unicode strings and IBM CCSID byte encodings.
 
 IBM i values nearly all character data under a Coded Character Set Identifier
-(CCSID); the wire protocol is full of EBCDIC strings the goJTOpen driver has to
+(CCSID); the wire protocol is full of EBCDIC strings the go-db2i driver has to
 read and write. JTOpen carries a per-CCSID lookup table for each (~186 of them);
 this package starts smaller -- it leans on golang.org/x/text/encoding/charmap
 for the codepages that ship with the standard text/encoding library and adds the
@@ -40,11 +40,11 @@ var CCSID273 Codec = charmapCodec{
     LIMITATION: golang.org/x/text/encoding/charmap doesn't ship a dedicated
     CodePage273, so this wraps CodePage037 (US English). For the ASCII printable
     subset (digits, A-Z, a-z, common punctuation) the two CCSIDs produce
-    identical bytes, which is enough for current goJTOpen tests + PUB400
-    metadata strings. Characters that diverge between the two pages -- e.g.
-    '@' (0x7C in 37 vs 0xB5 in 273) and accented vowels -- will round-trip
-    incorrectly. A proper 273 mapping table lands with M4 when non-ASCII binding
-    becomes a hard requirement.
+    identical bytes, which is enough for current go-db2i tests + PUB400 metadata
+    strings. Characters that diverge between the two pages -- e.g. '@' (0x7C
+    in 37 vs 0xB5 in 273) and accented vowels -- will round-trip incorrectly.
+    A proper 273 mapping table lands with M4 when non-ASCII binding becomes a
+    hard requirement.
 
 var CCSID37 Codec = charmapCodec{
 	name:  "CCSID 37",

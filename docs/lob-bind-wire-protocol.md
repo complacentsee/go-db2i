@@ -326,7 +326,7 @@ RPB; there is no explicit FREE_LOB on the bind side.
 
 ## Plan deltas
 
-The original plan (`~/.claude/plans/gojtopen-lob-bind.md`) listed two
+The original LOB-bind plan (pre-rename, pre-v0.7.0) listed two
 CPs incorrectly and one open question that this trace closes:
 
 | Plan said | Reality |

@@ -947,6 +947,111 @@ validated on V7R6M0 and PUB400 V7R5M0. Public API additions
 (`Config.BlockSizeKiB`, six `Conn.*` methods, the `db2iiter`
 sub-package) are purely additive; no breaking changes vs v0.7.11.
 
+## CCSID coverage roadmap
+
+Driver-side CCSID coverage is narrower than JT400's (6 in v0.7.21
+vs ~50 SBCS + DBCS in JT400). Expansion is split into phases by
+both effort cost and source-authority quality. User-facing
+reference: [`docs/ccsid-support.md`](./ccsid-support.md) (shipped
+2026-05-13).
+
+### Phase A — Documentation (complete 2026-05-13)
+
+Ship `docs/ccsid-support.md` documenting v0.7.21's supported set
+(37, 273-as-037-stand-in, 1208, 13488, 1200, 65535), unsupported
+fallback behaviour (silent decode as CCSID 37), and three
+workarounds: `?ccsid=` override, server-side
+`CAST AS VARGRAPHIC CCSID 13488`, and `FOR BIT DATA`. Links from
+`docs/configuration.md` and `docs/migrating-from-jt400.md`.
+Single commit on `origin/main`; no code changes.
+
+### Phase 1 — SBCS European EBCDIC (planned, target v0.7.22)
+
+Adds 18 SBCS EBCDIC CCSIDs and upgrades CCSID 273 from the
+037-stand-in to a real CDRA-sourced table. Adds opt-in
+`?charset-strict=true` DSN knob promoting unknown-CCSID
+fallback from silent to a hard error.
+
+- **Stdlib-backed** (no table data — comes from
+  `golang.org/x/text/encoding/charmap`): 1047, 1140.
+- **Hand-tabled via ICU UCM → Go generator**: 273 (upgrade),
+  277, 278, 280, 284, 285, 297, 500, 871, 1141, 1142, 1143,
+  1144, 1145, 1146, 1147, 1148, 1149.
+
+New tooling: `/cmd/gen-ebcdic/main.go` reads ICU UCM files
+committed at `/ebcdic/testdata/cdra-ucm/ibm-NNN.ucm` and emits
+`/ebcdic/ccsidNNN.go` files matching the existing
+`ccsid273Forward` `[256]rune` pattern.
+
+Vetting strategy: ICU UCM mappings are CDRA-authoritative;
+the generator cross-checks its 037 and 1140 outputs against
+`charmap.CodePage037` / `charmap.CodePage1140` (two stdlib
+oracles) and round-trips every byte 0x00..0xFF per page.
+Hand-verify the ~17-20 divergent positions per page where
+each diverges from CCSID 37.
+
+Effort: ~2.5 days (½ generator, 1 day codecs + tests, ½ day
+dispatch + strict knob, ½ day docs + live validation).
+
+### Phase 2 — Remaining SBCS (demand-driven)
+
+Cyrillic (1025), Greek (875), Turkish (1026), Hebrew (424),
+Arabic (420), plus legacy EBCDIC pages (256, 290, 423, 833,
+836, 838, 870, 880, 905, 918, 920, 1097, 1112, 1122, 1123,
+1153 through 1158, 1160, 1164, 1166). Effort per page is
+identical to Phase 1; held back by demand, not complexity.
+
+**Bidi caveat (Hebrew 424, Arabic 420).** Byte → codepoint
+mapping is straightforward (256-entry CDRA-authoritative
+tables). JT400's full bidi stack — string-type model,
+shaping, numeric ordering, symmetric swapping — is
+intentionally out of scope per `docs/migrating-from-jt400.md`.
+We'd ship Hebrew / Arabic codecs as "logical-order Unicode
+codepoints; visual reordering and Arabic shaping are the
+caller's problem." `golang.org/x/text/unicode/bidi`
+implements UAX #9 logical-to-visual reordering but covers
+neither IBM's bidi-string-type model nor Arabic shaping
+(positional forms, lam-alef ligatures). Full JT400 parity
+would require porting `com.ibm.as400.access.AS400BidiTransform`,
+`BidiOrder`, and `BidiShape` to Go (~3 weeks); not on the
+roadmap without explicit customer demand.
+
+### Phase 3 — DBCS / mixed encodings (customer-driven, deferred)
+
+Japanese (930, 933, 939), Korean (933, 1364), Simplified
+Chinese (935, 1388), Traditional Chinese (937, 1371). Pure
+DBCS (300, 835, 837, 1390, 1399, 4396, 16684, 28709) only
+follows if mixed-DBCS lands.
+
+Effort: ~1-2 weeks for the full set. Vetting is qualitatively
+harder than Phase 1/2:
+
+- Stateful encoding (SO 0x0E / SI 0x0F shift transitions).
+- No stdlib oracle — `golang.org/x/text` has zero EBCDIC-DBCS
+  support, so cross-checking is against JT400 directly.
+- Mapping revision ambiguity (e.g., CCSID 935 has multiple
+  CDRA-published variants; ICU labels them
+  `ibm-935_P110-1999` vs `ibm-935_P110_P110-2009_U2`).
+- PUA codepoint usage for vendor-specific glyphs.
+- Han unification edge cases where IBM's hand-tuned choices
+  aren't fully spec'd in CDRA — they accumulated from
+  JT400 bug fixes.
+
+Not started without a concrete deployment that needs it.
+Vetting backstop would be JT400 byte-for-byte comparison
+tests against staged columns, not CDRA alone.
+
+### Out of scope (intentional)
+
+- **Strict-by-default fallback** — requires a major version
+  bump per semver. Reconsider for v1.0.
+- **ICU via cgo** — the no-cgo property is a load-bearing
+  project tenet.
+- **Full JT400 bidi parity** — see Phase 2 bidi caveat.
+- **JT400 `translate boolean` / `translate hex` /
+  `translate binary`** — already declared out of scope in
+  `docs/migrating-from-jt400.md`.
+
 ## Working rhythm
 
 The pattern that worked for M1 should keep working:

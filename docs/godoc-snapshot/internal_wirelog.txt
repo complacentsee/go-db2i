@@ -1,7 +1,7 @@
-package wirelog // import "github.com/complacentsee/goJTOpen/internal/wirelog"
+package wirelog // import "github.com/complacentsee/go-db2i/internal/wirelog"
 
 Package wirelog parses captured wire-protocol logs into a sequence of
-direction-tagged frames the rest of goJTOpen can replay.
+direction-tagged frames the rest of go-db2i can replay.
 
 JTOpen's [com.ibm.as400.access.Trace] DATASTREAM category emits one header line
 per frame --
@@ -66,7 +66,7 @@ func ParseJTOpenTrace(r io.Reader) ([]Frame, error)
     a frame header are decoded. Hex tokens must be exactly two characters;
     anything else terminates the current frame.
 
-    The function is tolerant of the trace categories that goJTOpen's fixture
+    The function is tolerant of the trace categories that go-db2i's fixture
     harness leaves enabled (DATASTREAM + ERROR + WARNING) and the fuller
     diagnostic dumps from running with DIAGNOSTIC enabled.
 

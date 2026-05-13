@@ -1,24 +1,24 @@
-package driver // import "github.com/complacentsee/goJTOpen/driver"
+package driver // import "github.com/complacentsee/go-db2i/driver"
 
-Package driver registers goJTOpen as a database/sql driver under the name
-"gojtopen", letting Go applications talk to IBM i (Db2 for i) over the
-host-server datastream protocol on ports 8471 (as-database) and 8476 (as-signon)
--- no CGo, no Java sidecar, no IBM client libraries.
+Package driver registers go-db2i as a database/sql driver under the name "db2i",
+letting Go applications talk to IBM i (Db2 for i) over the host-server
+datastream protocol on ports 8471 (as-database) and 8476 (as-signon) -- no CGo,
+no Java sidecar, no IBM client libraries.
 
 # Quick start
 
 Anonymous import wires up the registration:
 
-    import _ "github.com/complacentsee/goJTOpen/driver"
+    import _ "github.com/complacentsee/go-db2i/driver"
 
 Then use the standard database/sql APIs:
 
-    db, err := sql.Open("gojtopen", "gojtopen://USER:PWD@host:8471/?library=MYLIB&date=iso")
+    db, err := sql.Open("db2i", "db2i://USER:PWD@host:8471/?library=MYLIB&date=iso")
     rows, err := db.Query("SELECT id, name FROM mylib.mytable WHERE status = ?", "OPEN")
 
 # DSN syntax
 
-    gojtopen://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
+    db2i://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
 
 PORT defaults to 8471 (as-database). Recognised query-string keys:
 
@@ -37,7 +37,7 @@ PORT defaults to 8471 (as-database). Recognised query-string keys:
     lob          BLOB / CLOB / DBCLOB scan mode. One of materialise
                  (default; full content into []byte / string at Scan
                  time, fits the small-to-medium LOB common case) or
-                 stream (returns *gojtopen.LOBReader -- an io.Reader
+                 stream (returns *db2i.LOBReader -- an io.Reader
                  + io.Closer the caller drives via successive
                  RETRIEVE_LOB_DATA chunks). Stream mode is the only
                  way to handle multi-GB LOBs without exhausting Go
@@ -129,10 +129,16 @@ const DefaultLOBChunkSize = 32 * 1024
     default block-fetch buffer used elsewhere in the driver and is well below
     the IBM i wire-format int32 cap.
 
+const MaxBlockedInputRows = 32000
+    MaxBlockedInputRows mirrors JT400's `maximumBlockedInputRows` cap
+    (`AS400JDBCPreparedStatementImpl.java:1636-1677`). Larger `BatchExec` inputs
+    are split client-side into chunks of this size and executed sequentially --
+    each chunk pays one round-trip, total rows-affected is summed across chunks.
+
 
 VARIABLES
 
-var ErrNoLastInsertId = errors.New("gojtopen: INSERT did not generate an IDENTITY value (table has no IDENTITY column)")
+var ErrNoLastInsertId = errors.New("db2i: INSERT did not generate an IDENTITY value (table has no IDENTITY column)")
     ErrNoLastInsertId is returned by Result.LastInsertId when the underlying
     INSERT did not generate an IDENTITY value -- typically because the target
     table has no IDENTITY column. Distinct from a generic "not supported" error
@@ -149,8 +155,76 @@ type Config struct {
 	DBPort     int    // as-database service (default 8471)
 	SignonPort int    // as-signon service  (default 8476)
 	Library    string // default SQL schema; empty = no override
-	DateFormat byte   // hostserver.DateFormat* constant; 0 = JOB
-	Isolation  int16  // hostserver.Isolation* constant; -1 = default (CS)
+
+	// Libraries is the full ordered list of libraries to add to the
+	// job's library list at connect time, mirroring JT400's
+	// `libraries=A,B,C` JDBC URL knob. The first library is tagged on
+	// the wire with EBCDIC indicator 'C' (current SQL schema); the
+	// rest with 'L' (append to back of *LIBL).
+	//
+	// Composition with Library:
+	//   - Libraries empty + Library set:   wire = [Library]
+	//   - Libraries set + Library empty:   wire = Libraries (Library
+	//                                      becomes Libraries[0] after
+	//                                      parse so db.namespace is set)
+	//   - Both set:                        Library is prepended to
+	//                                      Libraries unless already
+	//                                      present (matches JT400's
+	//                                      JDLibraryList prepend rule)
+	//
+	// DSN value accepts comma / space / colon / semicolon as
+	// separators (JT400-compatible): `?libraries=LIBA,LIBB LIBC`.
+	Libraries []string
+
+	// Naming selects the SQL naming convention the server applies
+	// when parsing unqualified identifiers. "sql" (default) parses
+	// MYLIB.TABLE; "system" parses MYLIB/TABLE. Mirrors JT400's
+	// `naming=sql|system` JDBC URL knob; the go-db2i default is
+	// "sql" (JT400 default is "system"). Set to "system" for
+	// migrations from RPG/CL apps whose SQL embeds slash
+	// qualifiers. Wire mapping: CP 0x380C value 0 vs 1.
+	Naming string
+
+	// TimeFormat overrides the server-side time-output format for
+	// TIME columns and TIME literal parsing. Mirrors JT400's
+	// `time format` JDBC URL knob. Values:
+	//   ""    job-default (CP 0x3809 omitted)
+	//   hms   24-hour HH.MM.SS (the historical IBM i default)
+	//   usa   HH:MM AM|PM
+	//   iso   HH.MM.SS
+	//   eur   HH.MM.SS
+	//   jis   HH:MM:SS
+	TimeFormat string
+
+	// DateSeparator overrides the date-string separator the server
+	// uses when formatting DATE columns and parsing DATE literals.
+	// Mirrors JT400's `date separator` JDBC URL knob. Values:
+	//   ""   default (driven by DateFormat or job)
+	//   /    slash       (DATE_SEPARATOR index 0)
+	//   -    dash        (index 1)
+	//   .    period      (index 2)
+	//   ,    comma       (index 3)
+	//   " "  space       (index 4)
+	DateSeparator string
+
+	// TimeSeparator overrides the time-string separator. Mirrors
+	// JT400's `time separator`. Values:
+	//   ""   default (job)
+	//   :    colon   (TIME_SEPARATOR index 0)
+	//   .    period  (index 1)
+	//   ,    comma   (index 2)
+	//   " "  space   (index 3)
+	TimeSeparator string
+
+	// DecimalSeparator overrides the decimal point character used
+	// in decimal-literal parsing and output. Mirrors JT400's
+	// `decimal separator`. Values:
+	//   ""   default (job)
+	//   .    period  (DECIMAL_SEPARATOR index 0)
+	//   ,    comma   (index 1)
+	DecimalSeparator string
+	DateFormat       byte  // hostserver.DateFormat* constant; 0 = JOB
+	Isolation        int16 // hostserver.Isolation* constant; -1 = default (CS)
 
 	// TLS controls whether the driver wraps the as-signon and
 	// as-database sockets in crypto/tls. When true, the dial uses
@@ -176,7 +250,7 @@ type Config struct {
 	// default "materialise on Scan" behaviour to the streaming
 	// LOBReader API. When true, Rows.Next writes a *LOBReader into
 	// the destination slot for LOB columns; callers must scan into
-	// **gojtopen.LOBReader and Read / Close it before advancing
+	// **db2i.LOBReader and Read / Close it before advancing
 	// the row. The materialise default keeps existing callers
 	// working unchanged.
 	LOBStream bool
@@ -221,19 +295,178 @@ type Config struct {
 	// chosen threshold.
 	LOBThreshold uint32
 
+	// ExtendedDynamic switches the connection on to JT400's
+	// extended-dynamic SQL package caching. When true and PackageName
+	// is non-empty, the driver instructs the server to maintain a
+	// persistent *PGM that accumulates PREPAREd statements across
+	// connections so a co-tenant reconnect skips the PREPARE round-
+	// trip. Mirrors JT400's "extended dynamic" JDBC URL knob;
+	// configured via the DSN "extended-dynamic=true" query key.
+	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	ExtendedDynamic bool
+
+	// PackageName is the user-chosen base for the on-wire package
+	// name (1-6 chars from the IBM-i object-name charset:
+	// A-Z 0-9 _ # @ $). The 10-char wire name is base + a 4-char
+	// suffix derived from session options; see
+	// hostserver.BuildPackageName.
+	PackageName string
+
+	// PackageLibrary is the library the package object lives in.
+	// Default "QGPL". Up to 10 chars from the IBM-i object-name
+	// charset.
+	PackageLibrary string
+
+	// PackageCache enables the client-side fast path. When true the
+	// driver issues a RETURN_PACKAGE on connect to download the
+	// server's cached statement entries, then bypasses PREPARE for
+	// any cache-hit SQL on subsequent Stmt.Exec / Query calls.
+	// Default false (statements still get added to the server-side
+	// package via CP 0x3804 on PREPARE, but every Stmt.Prepare on
+	// the client still round-trips).
+	PackageCache bool
+
+	// PackageError selects how the driver handles errors from the
+	// CREATE_PACKAGE / RETURN_PACKAGE / CP 0x3804 paths. Mirrors
+	// JT400's "package error" JDBC URL knob; configured via the DSN
+	// "package-error=warning|exception|none" query key.
+	//   "warning"   (default) slog.Warn + continue without package
+	//   "exception" return the error to the database/sql caller
+	//   "none"      silent drop + continue without package
+	PackageError string
+
+	// PackageCriteria filters which SQL strings the driver considers
+	// for cache insertion / lookup. Mirrors JT400's
+	// "package criteria" JDBC URL knob.
+	//   "default" (default) only parameterised statements (the JT400
+	//             rule: marker count > 0 && !isCurrentOf && various
+	//             special-case shapes)
+	//   "select"  default rules plus all SELECTs (broader cache)
+	PackageCriteria string
+
+	// PackageCCSID is the CCSID the server uses to write package-
+	// stored SQL text on disk. JT400's default is 13488 (UCS-2 BE);
+	// a value of 0 means "system default" (the connection's job
+	// CCSID). The driver accepts 13488 and 1200 (UTF-16 LE); other
+	// values must wait for the M11+ broader package-CCSID work.
+	PackageCCSID int
+
 	// ExtendedMetadata, when true, asks the server to include CP
 	// 0x3811 (extended column descriptors) in every PREPARE_DESCRIBE
 	// reply by ORing the ORSExtendedColumnDescrs (0x00020000) bit
 	// into the request ORS bitmap. The driver then surfaces the
 	// per-column schema name, base table name, base column name,
-	// and column label through goJTOpen-specific Rows methods
+	// and column label through go-db2i-specific Rows methods
 	// (Rows.ColumnTypeSchemaName / Rows.ColumnTypeTableName etc.).
 	// Mirrors JT400's "extended metadata=true" JDBC URL knob;
 	// configured via the DSN "extended-metadata=true" query key.
 	// Default false to preserve the pre-flag wire shape byte-for-byte.
 	ExtendedMetadata bool
+
+	// BlockSizeKiB sets the continuation-FETCH BufferSize (CP
+	// 0x3834) the driver emits on PREPARE_DESCRIBE OPEN and every
+	// subsequent FETCH. Zero (the default) preserves the historical
+	// 32 KiB shape byte-for-byte. Valid range 1..512 KiB; out-of-
+	// range DSN values reject at parse time so users don't
+	// accidentally request a 16 GiB buffer through a typo. Mirrors
+	// JT400's `block size` JDBC URL knob (configured via DSN
+	// `block-size=N`).
+	BlockSizeKiB int
+
+	// Logger is the *slog.Logger callers want the driver to emit
+	// diagnostic events through. Nil (the default) silences all
+	// driver-side logging; the driver internally substitutes a
+	// no-op handler so call sites never have to nil-check.
+	//
+	// At connect time the driver derives a child logger that carries
+	// the attrs `driver=db2i`, `conn_id=<corr-base>`, and
+	// `dsn_host=<host>`, so every line a single connection emits is
+	// pre-tagged. Levels used:
+	//   DEBUG  Per wire-level operation (PREPARE+EXECUTE,
+	//          continuation FETCH boundary, RETRIEVE_LOB_DATA chunk
+	//          boundary, WRITE_LOB_DATA frame boundary). Costs one
+	//          line per operation -- enable for diagnosis, leave off
+	//          in production.
+	//   INFO   Connect success, Close.
+	//   WARN   Retried-on-ErrBadConn classification.
+	//   ERROR  Fatal classification before the error returns to the
+	//          database/sql caller.
+	//
+	// SQL text is never logged unless LogSQL is also true; parameter
+	// counts are logged, parameter values never are.
+	Logger *slog.Logger
+
+	// LogSQL gates whether the driver attaches the SQL text as an
+	// attribute on Stmt.Exec / Stmt.Query DEBUG lines AND the
+	// db.statement OpenTelemetry span attribute. Off by default
+	// because SQL text often carries customer identifiers or other
+	// data callers wouldn't want flowing through their log /
+	// trace pipeline. Set true when actively debugging a specific
+	// query.
+	LogSQL bool
+
+	// Tracer is the OpenTelemetry trace.Tracer the driver uses to
+	// emit spans on Stmt.ExecContext / Stmt.QueryContext. Nil (the
+	// default) disables span emission via an internal noop-tracer
+	// fallback so call sites never have to nil-check.
+	//
+	// The driver follows the OpenTelemetry database semantic
+	// conventions. Span names are the operation kind ("EXEC",
+	// "QUERY"), and attributes include `db.system.name`,
+	// `db.namespace` (Library), `db.user`, `server.address`,
+	// `server.port`, `db.statement.parameters.count`, and for Exec
+	// `db.response.returned_rows`. SQL text rides on `db.statement`
+	// when LogSQL is also true. Errors set the span status to Error
+	// and record the *Db2Error sqlstate / sqlcode / message-id when
+	// the underlying error is a typed Db2Error.
+	//
+	// Use the API package (`go.opentelemetry.io/otel/trace`), not
+	// the SDK, so callers can plug in any OTel SDK / exporter.
+	Tracer trace.Tracer
+
+	// LoginTimeout caps the dial-plus-handshake time when the caller
+	// passes a context without a deadline (typically `sql.Open` /
+	// `db.Ping` / first-use `db.Query`). Default is 30s. Overriding
+	// to a smaller value makes a flaky-host connect fail fast; an
+	// explicit ctx deadline still wins over this knob.
+	//
+	// Mirrors JT400's `login timeout` JDBC URL property. Set via
+	// DSN `?login-timeout=N` (N in seconds; e.g. `?login-timeout=5`).
+	LoginTimeout time.Duration
+
+	// QueryOptimizeGoal sets the server-side query optimizer's
+	// objective. Mirrors JT400's `query optimize goal` JDBC URL
+	// property and translates to CP 0x3833 in SET_SQL_ATTRIBUTES.
+	// Use the hostserver.QueryOptimize* constants:
+	//
+	//   QueryOptimizeFirstIO (0xC6) -- time-to-first-row (streaming,
+	//                                   OLTP, cursor.Next loops)
+	//   QueryOptimizeAllIO   (0xC1) -- total throughput (reports,
+	//                                   bulk extracts)
+	//   QueryOptimizeUnset   (0)    -- omit the CP, server uses its
+	//                                   job default (typically *ALLIO
+	//                                   on V7R5+). Default; preserves
+	//                                   byte-equality with pre-v0.7.17
+	//                                   fixtures.
+	//
+	// DSN form: `?query-optimize-goal=firstio` or `=allio`.
+	QueryOptimizeGoal byte
+
+	// SocketTimeout caps the read-deadline on every Exec / Query /
+	// BatchExec round trip when the caller's context has no
+	// deadline. Without this, an LPAR that goes unresponsive but
+	// doesn't drop the TCP connection blocks the in-flight op until
+	// the OS-level TCP timeout (typically hours) -- a real
+	// production-reliability hazard. A 30-60s default is a safe
+	// belt-and-suspenders bound; an explicit ctx deadline still
+	// wins.
+	//
+	// Mirrors JT400's `socket timeout` JDBC URL property. Set via
+	// DSN `?socket-timeout=N` (N in seconds). Default 0 = no
+	// driver-level timeout; rely on caller-supplied ctx.
+	SocketTimeout time.Duration
 }
-    Config is the parsed form of a gojtopen DSN. Public so tests can build
+    Config is the parsed form of a go-db2i DSN. Public so tests can build
     connections without round-tripping through the URL parser.
 
 func DefaultConfig() Config
@@ -258,21 +491,157 @@ type Conn struct {
     one as-database socket plus the per-connection correlation-ID counter the
     host-server protocol requires.
 
-func (c *Conn) Begin() (driver.Tx, error)
-    Begin / BeginTx start a transaction by flipping autocommit off (which
-    also bundles the commitment level + locator persistence per JT400 -- see
-    hostserver.AutocommitOff for the wire details).
+func (c *Conn) AddLibraries(ctx context.Context, libs []string) error
+    AddLibraries appends `libs` to the connection's library list (*LIBL) via one
+    NDB ADD_LIBRARY_LIST round-trip. The first entry is tagged with indicator
+    'C' (current schema = libs[0]) and the rest with 'L' (append to back of
+    *LIBL), matching the connect- time `libraries=A,B,C` semantics.
 
-    Drains the result of any prior session change before returning the Tx
-    wrapper.
+    Each library must satisfy the IBM-i object-name rules (1-10 chars from
+    [A-Z0-9_#@$]); names are canonicalised to uppercase before sending.
+    Duplicate / already-on-list entries return errorClass=5 RC=1301 from the
+    server, which the underlying hostserver helper tolerates as a warning (no
+    error returned).
+
+    Use SetSchema for the simpler "just change the default schema" case --
+    AddLibraries is for callers who need multi-library resolution (RPG-shop
+    migrations, environment mirroring).
+
+func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, error)
+    BatchExec packs `rows` into one EXECUTE per 32k-row chunk via the CP 0x381F
+    multi-row block-insert wire shape and returns the total rows affected
+    across all chunks. The SQL text must begin with INSERT, UPDATE, DELETE,
+    or MERGE; each row's len(args) must match the SQL's parameter-marker count
+    and supply values of types the driver's default bind path accepts (int64 /
+    float64 / bool / string / []byte / time.Time / nil; `database/sql/driver`'s
+    DefaultParameterConverter normalises int / int32 / etc).
+
+    MERGE batching (v0.7.10): MERGE batches share the same CP 0x381F multi-row
+    shape as IUD on V7R1+ (JT400 sets the same `canBeBatched_` flag for both;
+    see `JDSQLStatement.java:644-648`). The typical pattern uses a `USING
+    (VALUES (?, ?))` source clause so each row supplies the match/insert values;
+    parameter markers inside the USING-VALUES clause MUST be wrapped in explicit
+    `CAST(? AS <type>)` so IBM i's parser can determine the source column types
+    (otherwise PREPARE_DESCRIBE fails with SQL-584 / QSQRCHK):
+
+        MERGE INTO target t USING (VALUES (
+            CAST(? AS INTEGER), CAST(? AS VARCHAR(32))
+        )) AS s(id, val)
+            ON (t.id = s.id)
+            WHEN MATCHED THEN UPDATE SET t.val = s.val
+            WHEN NOT MATCHED THEN INSERT (id, val) VALUES (s.id, s.val)
+
+    Returns the server's combined affected count (matched-updates +
+    not-matched-inserts); MERGE's per-clause counts aren't broken out on the
+    wire.
+
+    Restrictions:
+      - LOB values (`*db2i.LOBValue`) trigger a per-row fallback path.
+        JT400 does the same: the block-insert wire shape doesn't carry LOB
+        locators across batched rows, so a batch containing any LOB drops to one
+        `ExecContext` per row. Caller code is unchanged; the affected count is
+        summed.
+      - sql.Out / sql.InOut destinations are rejected: IUD/MERGE have no OUT
+        params on the wire.
+      - SELECT / CALL / DECLARE are rejected: BatchExec is for IUD+MERGE verbs
+        only.
+
+    Access pattern via database/sql:
+
+        conn, _ := db.Conn(ctx); defer conn.Close()
+        var affected int64
+        err := conn.Raw(func(driverConn any) error {
+            d := driverConn.(*db2i.Conn)
+            n, err := d.BatchExec(ctx, "INSERT INTO t VALUES (?, ?)", rows)
+            affected = n
+            return err
+        })
+
+    Returns total rows-affected and any wire / validation error. On error the
+    partial-progress count from completed chunks is returned alongside the error
+    so callers can decide between "retry the remaining chunks" vs "roll back via
+    a transaction".
+
+func (c *Conn) Begin() (driver.Tx, error)
+    Begin starts a transaction by flipping autocommit off, using whichever
+    isolation level the DSN set on connect (default *CS). Mirrors database/sql's
+    `db.Begin()` -- isolation defaults are implicit; for explicit isolation
+    control use `db.BeginTx(ctx, &sql.TxOptions{Isolation: ...})` which routes
+    through BeginTx below.
+
+    The wire bundle is documented in hostserver.AutocommitOff.
+
+func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error)
+    BeginTx implements driver.ConnBeginTx. Translates the standard
+    sql.IsolationLevel into the IBM i commitment-control level and sends it on
+    the SET_SQL_ATTRIBUTES bundle that flips autocommit off. `opts.Isolation ==
+    sql.LevelDefault` (zero value) honours whatever the DSN set on connect; any
+    other level overrides for the duration of this transaction. `opts.ReadOnly
+    == true` is rejected with a clear error -- IBM i has no session-level
+    read-only flag, and silently dropping it would let SELECT-only callers think
+    they had a guarantee they don't.
+
+    Isolation mapping mirrors JDBC's IsolationLevel constants on IBM i (see
+    JT400's AS400JDBCConnection.setTransactionIsolation):
+
+        sql.LevelDefault         → DSN value (or *CS if DSN unset)
+        sql.LevelReadUncommitted → *CHG (commitment level 4, "All
+                                   transactions read", uncommitted)
+        sql.LevelReadCommitted   → *CS  (cursor stability)
+        sql.LevelRepeatableRead  → *ALL (read stability)
+        sql.LevelSerializable    → *RR  (repeatable read; serializable)
+
+    Other levels (Snapshot, LinearizableRead, etc.) reject with a clear error.
+    Snapshot in particular is a SQL Server concept -- IBM i has no analogue.
+
+    Honours ctx cancellation via SetDeadline on the underlying net conn for the
+    duration of the SET_SQL_ATTRIBUTES round trip.
+
+func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error
+    CheckNamedValue implements driver.NamedValueChecker on *Conn so the v0.7.20
+    ExecerContext / QueryerContext shortcut path admits the same custom value
+    types as the Stmt-routed path: *LOBValue and stdlib sql.Out. database/sql
+    consults the Conn-level NamedValueChecker BEFORE falling back to the
+    Stmt-level one -- without this, sql.Out args go through database/sql's
+    default converter, which rejects them as "unsupported type ...struct" and
+    breaks every db.Exec("CALL ...", sql.Out{...}) call that previously worked
+    via Stmt.
+
+    Delegates to the shared checkNamedValue helper in stmt.go so the two
+    surfaces stay in sync.
 
 func (c *Conn) Close() error
     Close releases the as-database socket.
+
+func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error)
+    ExecContext implements driver.ExecerContext. When a driver exposes this
+    method, database/sql skips the Conn.Prepare → Stmt.ExecContext → Stmt.Close
+    dance and calls straight through for one-shot `db.Exec` / `tx.Exec` paths.
+
+    The wire flow is identical to going through Stmt.ExecContext
+    (PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + EXECUTE for prepared,
+    EXECUTE_IMMEDIATE for arg-less); the saving is one Stmt struct allocation
+    per call and the call-stack indirection through Conn.Prepare. Useful for
+    high-throughput paths where the allocation cost matters; behaviourally
+    indistinguishable from the Prepare-then-Exec form for everything else.
+
+    Stmt-bound features that DON'T survive the one-shot path:
+      - The v0.7.18 paramNames cache on Stmt. A `db.Exec` with sql.Named() args
+        pays the QSYS2.SYSPARMS catalog lookup every call. Callers issuing
+        the same named-CALL repeatedly should use `db.Prepare` and reuse the
+        *sql.Stmt to amortise the lookup; the cache lives there.
+
+    Added in v0.7.20.
 
 func (c *Conn) IsValid() bool
     IsValid implements driver.Validator. database/sql calls this before handing
     the conn to a caller; returning false makes the pool discard the conn
     without using it. Cheap (just a flag check); does not touch the wire.
+
+func (c *Conn) Logger() *slog.Logger
+    Logger returns the per-connection slog.Logger. Always non-nil -- when
+    Config.Logger was nil at connect time this returns a no-op logger so callers
+    can use it without nil-checking.
 
 func (c *Conn) Prepare(query string) (driver.Stmt, error)
     Prepare returns a Stmt that buffers the SQL string. Real PREPARE-on-the-wire
@@ -282,22 +651,128 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error)
     (M3 deferred: a true PREPARE that returns a server-side handle to reuse
     across executions. Lands when we add prepared-bind I/U/D.)
 
+func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error)
+    QueryContext implements driver.QueryerContext. Mirror of ExecContext above
+    for db.Query / tx.Query / db.QueryRow paths. Same allocation-saving and same
+    paramNames caching caveat.
+
+    Added in v0.7.20.
+
+func (c *Conn) ReleaseSavepoint(ctx context.Context, name string) error
+    ReleaseSavepoint issues `RELEASE SAVEPOINT <name>`. Matches JT400's
+    AS400JDBCConnection.releaseSavepoint output.
+
+func (c *Conn) RemoveLibraries(ctx context.Context, libs []string) error
+    RemoveLibraries removes each entry in `libs` from the connection's library
+    list, looping `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')` once per library.
+    JT400 doesn't expose a NDB REMOVE wire either -- mid-session library-list
+    shrinking is a CL operation on both sides.
+
+    CPF-2104 ("library not in list") is downgraded to a slog WARN log line and
+    the loop continues -- callers that want strict behaviour should pre-check
+    the list. Other CPF / SQL errors abort the loop and return the wrapped
+    error from the failing library; libraries earlier in the slice were removed
+    successfully and are not rolled back.
+
+    CPF-9810 ("library not found") is also tolerated -- the typed- wrong-name
+    case is benign for our purposes since the library can't have been on the
+    list if it doesn't exist.
+
 func (c *Conn) ResetSession(ctx context.Context) error
     ResetSession implements driver.SessionResetter. database/sql calls this
     before reusing a connection from the pool. We use it as the "is this conn
     still alive?" gate -- returning driver.ErrBadConn here makes the pool
     discard the conn and create a fresh one, without the caller having to retry.
 
-    We currently don't reset any session-level state on this hook (no
-    temporary tables, no SET-options that survive across requests in the
-    labelverification-gw use case). If that changes, this is the place to send
-    the cleanup frames.
+    Discards on two conditions:
+
+      - c.closed: the conn died on a prior op (classifyConnErr set the flag).
+        Discard so the pool dials a fresh one.
+      - c.sessionDirty: a stateful mutator (SetSchema, AddLibraries,
+        RemoveLibraries) was called. v0.7.19 adopts the "discard and re-dial"
+        path so multi-tenant services calling SetSchema(tenantID) per request
+        don't leak the schema to the next pool checkout. A future release may
+        switch to "active restore" -- re-issue SetSchema(cfg.Library), restore
+        libraries -- once we've measured the re-dial cost in real workloads.
+        For now the conservative path is the one with obvious correctness.
+
+    BeginTx is NOT marked dirty: Tx.Commit / Tx.Rollback already fire
+    AutocommitOn before the conn returns to the pool, and a failed
+    Commit/Rollback runs through classifyConnErr which marks the conn closed
+    (caught by the c.closed branch above).
+
+func (c *Conn) RollbackToSavepoint(ctx context.Context, name string) error
+    RollbackToSavepoint issues `ROLLBACK TO SAVEPOINT <name>`. Matches JT400's
+    AS400JDBCConnection.rollback(Savepoint) output.
+
+func (c *Conn) Savepoint(ctx context.Context, name string) error
+    Savepoint issues `SAVEPOINT <name> ON ROLLBACK RETAIN CURSORS` against the
+    connection. Matches JT400's AS400JDBCConnection.setSavepoint wire output
+    (plain SQL, no special wire CP).
+
+    IBM i auto-starts a unit of work on the first SAVEPOINT when autocommit is
+    on, but the savepoint then scopes nothing useful -- best practice is to call
+    this from inside an explicit `db.BeginTx` block.
+
+    Access pattern via database/sql:
+
+        conn, _ := db.Conn(ctx); defer conn.Close()
+        err := conn.Raw(func(driverConn any) error {
+            return driverConn.(*Conn).Savepoint(ctx, "SP1")
+        })
+
+    Name rules (mirrors IBM i SQL identifier syntax + JT400 byte shape):
+    1-128 chars, must start with a letter, remaining chars are letters / digits
+    / underscore. The server folds names to uppercase, matching JT400's unquoted
+    emission.
+
+func (c *Conn) SetSchema(ctx context.Context, name string) error
+    SetSchema issues `SET SCHEMA <name>` against the connection, changing the
+    default schema for unqualified table / view / procedure references on this
+    connection.
+
+    Matches JT400's AS400JDBCConnection.setSchema wire output -- plain SQL
+    through the existing Exec path, no special wire CP.
+
+    The name is sanitised against the IBM-i library-identifier rules (1-10 chars
+    from [A-Z0-9_#@$]) before assembly; the server folds to uppercase on its
+    own, but we canonicalise client-side so callers can pass mixed-case names.
+    Names that contain quote/semicolon characters are rejected before they reach
+    the wire (defence-in-depth against SQL injection through the schema-change
+    path).
+
+    Access pattern via database/sql:
+
+        conn, _ := db.Conn(ctx); defer conn.Close()
+        err := conn.Raw(func(driverConn any) error {
+            return driverConn.(*Conn).SetSchema(ctx, "MYLIB")
+        })
+
+    Concurrency: the database/sql pool serialises operations on a single
+    sql.Conn, so SetSchema is safe to call from one goroutine while another
+    holds the same conn via Raw; mixing across pool- returned conns is undefined
+    (use one sql.Conn per goroutine if it matters).
 
 type Connector struct {
 	// Has unexported fields.
 }
     Connector lets database/sql open multiple connections from one parsed DSN.
     Implements driver.Connector.
+
+func NewConnector(cfg *Config) (*Connector, error)
+    NewConnector builds a Connector from a programmatically-assembled Config.
+    Use this when you need to set fields that can't be expressed in a DSN
+    string -- Config.Logger and Config.LogSQL are the main ones today. Pass the
+    returned Connector to sql.OpenDB to get a *sql.DB:
+
+        cfg := db2i.DefaultConfig()
+        cfg.User, cfg.Password, cfg.Host = "USR", "PWD", "host.example.com"
+        cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+        connector, err := db2i.NewConnector(&cfg)
+        db := sql.OpenDB(connector)
+
+    Returns an error if cfg lacks the minimum required fields (User, Host,
+    DBPort, SignonPort).
 
 func (c *Connector) Connect(ctx context.Context) (driver.Conn, error)
     Connect implements driver.Connector. Opens both as-signon (8476) and
@@ -311,9 +786,12 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error)
     underlying net.Conn deadline).
 
 func (c *Connector) Driver() driver.Driver
+    Driver returns the *Driver that produced this Connector.
+    Used by database/sql for some pool-management decisions. Implements
+    database/sql/driver.Connector.Driver.
 
 type Driver struct{}
-    Driver registered as "gojtopen" via sql.Register at init time.
+    Driver registered as "db2i" via sql.Register at init time.
 
 func (d *Driver) Open(dsn string) (driver.Conn, error)
     Open implements driver.Driver. database/sql calls it with the DSN the caller
@@ -338,7 +816,7 @@ type LOBReader struct {
 
         rows, err := db.Query("SELECT B FROM T WHERE ID = ?", id)
         for rows.Next() {
-            var r *gojtopen.LOBReader
+            var r *db2i.LOBReader
             rows.Scan(&r)
             defer r.Close()
             io.Copy(dst, r)
@@ -425,7 +903,7 @@ type LOBValue struct {
         // frame. Equivalent to passing []byte directly except that
         // LOBValue makes the LOB intent explicit at the call site.
         db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
-            &gojtopen.LOBValue{Bytes: payload})
+            &db2i.LOBValue{Bytes: payload})
 
         // Streamed — driver chunks the Reader into LOBStreamChunkSize
         // (32 KiB by default) frames at advancing offsets. Length is
@@ -436,7 +914,7 @@ type LOBValue struct {
         f, _ := os.Open("video.mp4")
         stat, _ := f.Stat()
         db.Exec("INSERT INTO t (id, b) VALUES (?, ?)", 1,
-            &gojtopen.LOBValue{Reader: f, Length: stat.Size()})
+            &db2i.LOBValue{Reader: f, Length: stat.Size()})
 
     Bytes and Reader are mutually exclusive. If both are set Bytes wins (the
     streamed path is opt-in).
@@ -597,6 +1075,12 @@ func (r *Rows) Columns() []string
     Columns returns the per-column names parsed from the PREPARE_DESCRIBE reply,
     in SELECT order. Implements database/sql/driver.Rows.Columns.
 
+func (r *Rows) HasNextResultSet() bool
+    HasNextResultSet reports whether the cursor has another dynamic result set
+    to drain (typically a stored-procedure CALL with `DYNAMIC RESULT SETS N`
+    declared cursors). For plain SELECT this always returns false. Implements
+    database/sql/driver.RowsNextResultSet's HasNextResultSet method.
+
 func (r *Rows) Next(dest []driver.Value) error
     Next copies the next row into dest. Returns io.EOF when exhausted (the
     database/sql convention).
@@ -608,6 +1092,16 @@ func (r *Rows) Next(dest []driver.Value) error
     into *string instead, since time.Time is convertible both ways through
     database/sql's convertAssign.
 
+func (r *Rows) NextResultSet() error
+    NextResultSet advances to the next result set. Closes the current
+    server-side cursor with REUSE_RESULT_SET (preserving the prepared
+    statement so the next OPEN_DESCRIBE attaches cleanly to the proc's next
+    pre-opened cursor), issues OPEN_DESCRIBE (0x1804) + FETCH (0x180B),
+    and replaces the cursor's column descriptors + pending row buffer
+    with the new set. Returns io.EOF when no more sets remain, matching
+    database/sql's expected sentinel; other errors surface verbatim. Implements
+    database/sql/driver.RowsNextResultSet.NextResultSet.
+
 type Stmt struct {
 	// Has unexported fields.
 }
@@ -617,15 +1111,26 @@ type Stmt struct {
     count parameter markers itself; the bind path validates count when it builds
     the wire format.
 
+    For parameterised CALLs (v0.7.18): when args contain sql.Named("p", val)
+    wrappers, the driver does a one-shot QSYS2.SYSPARMS catalog lookup to map
+    parameter names to ordinal positions and reorders the args before the wire
+    flow. The lookup result caches on the Stmt so subsequent calls don't repeat
+    it.
+
 func (s *Stmt) CheckNamedValue(nv *driver.NamedValue) error
-    CheckNamedValue lets database/sql forward our LOB bind type (*LOBValue)
+    CheckNamedValue lets database/sql forward our LOB bind type (*LOBValue) AND
+    the stdlib sql.Out wrapper (for stored-procedure OUT / INOUT parameters)
     through the driver boundary without the default parameter converter
-    rejecting it for not being one of the six driver.Value flavours. Returning
+    rejecting them for not being one of the six driver.Value flavours. Returning
     nil tells database/sql "leave the value alone, the driver knows what to do
     with it"; returning driver.ErrSkip tells it to fall back to its default
     conversion (int -> int64, etc.).
 
-    Implements database/sql/driver.NamedValueChecker.
+    Implements database/sql/driver.NamedValueChecker. Mirrored on *Conn
+    (in conn.go) because database/sql consults the Conn-level checker when
+    dispatching through the v0.7.20 driver.ExecerContext / QueryerContext
+    shortcuts -- the Stmt- level checker only fires when the call goes through
+    Conn.Prepare → Stmt.ExecContext.
 
 func (s *Stmt) Close() error
     Close releases any client-side resources tied to the prepared statement.
@@ -658,11 +1163,17 @@ func (s *Stmt) NumInput() int
     parameters via this path (M3 deferred work).
 
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error)
-    Query runs a SELECT (or VALUES / WITH). With no args it opens a streaming
-    cursor via OpenSelectStatic; with args it opens via OpenSelectPrepared. The
-    cursor pulls subsequent batches lazily as the caller's Rows.Next iterates
-    -- a million-row SELECT pays one 32 KB-buffer FETCH round-trip per batch
-    instead of one per row.
+    Query runs a SELECT (or VALUES / WITH / CALL). With no args it opens
+    a streaming cursor via OpenSelectStatic; with args it opens via
+    OpenSelectPrepared. The cursor pulls subsequent batches lazily as the
+    caller's Rows.Next iterates -- a million-row SELECT pays one 32 KB-buffer
+    FETCH round-trip per batch instead of one per row.
+
+    CALL routing: stored procedures that DECLARE cursors WITH RETURN surface
+    their result sets through Query + Rows.Next; the PREPARE+OPEN+FETCH dance is
+    identical to a SELECT once the server has dispatched on the CALL statement
+    type (M9-1). Procedures that return multiple result sets advance through
+    Rows.NextResultSet (M9-3 -- pending).
 
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error)
     QueryContext implements driver.StmtQueryContext. Same plumbing as
