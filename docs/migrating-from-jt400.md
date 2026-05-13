@@ -73,9 +73,16 @@ the *Notes* column says why.
 
 ### CCSID & translation
 
+JT400 ships ~50 SBCS EBCDIC CCSIDs plus DBCS coverage for
+Japanese, Korean, and Chinese. go-db2i covers a smaller subset
+today (6 CCSIDs in v0.7.21, expanding to ~24 in v0.7.22). See
+[`ccsid-support.md`](./ccsid-support.md) for the full supported /
+unsupported matrix and migration workarounds; the table below is
+only the DSN-knob parity view.
+
 | JT400 | go-db2i | Notes |
 |---|---|---|
-| `ccsid` | `ccsid` | Same semantics: overrides the application-data CCSID (`SET_SQL_ATTRIBUTES` ClientCCSID). 0 = auto (1208 / UTF-8 on V7R3+, falls back to 37 / US English EBCDIC on older). |
+| `ccsid` | `ccsid` | Same semantics: overrides the application-data CCSID (`SET_SQL_ATTRIBUTES` ClientCCSID). 0 = auto (1208 / UTF-8 on V7R3+, falls back to 37 / US English EBCDIC on older). Driver-side decode coverage is narrower than JT400's -- see [`ccsid-support.md`](./ccsid-support.md). |
 | `translate binary` | — | We always treat CCSID 65535 columns as raw `[]byte`; JT400's "interpret as character data" path is intentionally not mirrored. |
 | `translate boolean` | — | Native BOOLEAN columns decode to Go `bool`; "Y"/"N" CHAR(1) columns stay strings. |
 | `translate hex` | — | Binary columns decode as `[]byte`; callers can `hex.EncodeToString` them if they want the JT400 "interpret as hex" rendering. |

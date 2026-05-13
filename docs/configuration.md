@@ -27,7 +27,7 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `decimal-separator`          | (job)        | v0.7.11. One of `job`, `.`, `,` (or `period`/`comma`). Maps to CP `0x380B`. |
 | `isolation`                  | `none`       | One of `none`, `cs`, `all`, `rs`, `rr`. `db.Begin()` flips to `cs`.   |
 | `lob`                        | `materialise`| Or `stream` to get `*db2i.LOBReader`.                             |
-| `ccsid`                      | `0` (auto)   | Override the connection-level application-data CCSID.                 |
+| `ccsid`                      | `0` (auto)   | Override the connection-level application-data CCSID. See [`ccsid-support.md`](./ccsid-support.md) for the supported list and workarounds for unsupported CCSIDs. |
 | `tls`                        | `false`      | Wraps both sockets in `crypto/tls`. Flips default ports to 9471/9476. |
 | `tls-insecure-skip-verify`   | `false`      | Disable cert verification (self-signed certs without SANs).           |
 | `tls-server-name`            | `host`       | Override the SNI / cert-verify hostname.                              |
