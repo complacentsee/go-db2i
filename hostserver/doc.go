@@ -1,6 +1,6 @@
 // Package hostserver implements the IBM i host-server datastream
-// protocol that JT400 speaks on TCP ports 8470-8476 (TLS variants
-// 9470-9476).
+// protocol on TCP 8471 (as-database) and 8476 (as-signon), and
+// their TLS variants 9471 / 9476.
 //
 // This package is the wire-format layer underneath the database/sql
 // driver in github.com/complacentsee/go-db2i/driver. Most application
@@ -84,9 +84,9 @@
 // V7R6 servers respond to RetrieveLOBData with a whole-datastream
 // RLE-wrapped reply when the request asks for it (the bit is on by
 // default). [ParseDBReply] detects the compression marker (high bit
-// of the 32-bit word at template offset 4, matching JT400's
-// DBBaseReplyDS.parse) and inflates the CP 0x3832 wrapper via
-// [decompressDataStreamRLE] before returning. Highly compressible
+// of the 32-bit word at template offset 4) and inflates the CP
+// 0x3832 wrapper via [decompressDataStreamRLE] before returning.
+// Highly compressible
 // LOBs (constant-content BLOBs, JSON/XML with repeating structure)
 // shrink to a handful of wire bytes for an arbitrary-sized payload;
 // mixed-entropy LOBs pay no per-byte cost because the server skips
@@ -107,10 +107,9 @@
 // on PREPARE_DESCRIBE: the ORS bit ORSExtendedColumnDescrs
 // (0x00020000) AND the per-statement CP 0x3829 = 0xF1
 // (ExtendedColumnDescriptorOption). With only the ORS bit the
-// server ships CP 0x3811 with zero data (JT400 source calls this
-// out as "Received empty extended column descriptor"); both knobs
-// are needed for the payload to actually arrive. The fields land
-// on [SelectColumn] as Schema, Table, BaseColumnName, Label.
+// server ships CP 0x3811 with zero data; both knobs are needed for
+// the payload to actually arrive. The fields land on
+// [SelectColumn] as Schema, Table, BaseColumnName, Label.
 //
 // # Cursor lifecycle
 //
@@ -140,14 +139,9 @@
 //
 // Wire-format references for contributors:
 //
-//   - docs/lob-bind-wire-protocol.md      LOB binds (CP 0x381D, 0x381E,
-//                                          0x381F, 0x3813, WRITE_LOB_DATA)
-//   - docs/lob-known-gaps.md              LOB SELECT quirks + closure log
-//   - docs/configuration.md               Driver DSN reference
-//   - docs/PLAN.md                        Milestone history + risks
-//
-// JT400 sources to cross-reference when adding new wire flows live
-// in /home/complacentsee/JTOpen/src/main/java/com/ibm/as400/access/
-// on a typical dev box; the canonical map is in docs/PLAN.md
-// "Cross-reference: JTOpen sources by topic".
+//   - internal/docs/lob-bind-wire-protocol.md  LOB binds (CP 0x381D, 0x381E,
+//                                              0x381F, 0x3813, WRITE_LOB_DATA)
+//   - docs/lob-known-gaps.md                   LOB SELECT current behavior
+//   - docs/configuration.md                    Driver DSN reference
+//   - internal/PLAN.md                         Roadmap and design notes
 package hostserver

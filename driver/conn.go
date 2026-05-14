@@ -187,8 +187,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 }
 
 // initPackage runs the per-connection package setup when
-// Config.ExtendedDynamic is true. Mirrors JT400's connect-time
-// JDPackageManager flow:
+// Config.ExtendedDynamic is true. Three steps:
 //
 //  1. Derive the 10-char on-wire package name from cfg.PackageName +
 //     active session options.
@@ -196,9 +195,8 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 //     server is idempotent: a re-create of an existing *PGM
 //     returns success.
 //  3. If cfg.PackageCache, RETURN_PACKAGE to download the cached
-//     statement list. The raw bytes are captured for follow-up
-//     parsing; the cache-hit fast path itself lands in a follow-up
-//     to M10-3.
+//     statement list so subsequent client-side cache hits can
+//     bypass PREPARE.
 //
 // Returns an error on hard failure; the caller folds it through
 // Config.PackageError to decide whether to fail the connect or
@@ -206,10 +204,11 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 func (c *Conn) initPackage(ctx context.Context) error {
 	opts := c.packageOptions()
 	wireName := hostserver.BuildPackageName(c.cfg.PackageName, opts)
-	ccsid := uint16(37) // CCSID 37 is what JT400 uses on the wire for
-	// the package-name/library var-strings (the JOB CCSID); the
-	// `package-ccsid` DSN knob is for the per-statement SQL text
-	// stored inside the *PGM, not these envelope fields.
+	ccsid := uint16(37) // CCSID 37 (US English EBCDIC) is the JOB
+	// CCSID used to encode the package-name and library var-strings
+	// in the envelope. The `package-ccsid` DSN knob covers the
+	// per-statement SQL text stored inside the *PGM, not these
+	// envelope fields.
 
 	mgr := &hostserver.PackageManager{
 		Name:    wireName,
@@ -430,8 +429,7 @@ func (c *Conn) selectOptions() []hostserver.SelectOption {
 // to emit the extended-dynamic CP 0x3804 marker for THIS sql --
 // statements that don't pass the criteria (e.g. a non-parameterised
 // SELECT under criteria=default) get a plain PREPARE_DESCRIBE on
-// the wire and stay out of the *PGM. Mirrors JT400's
-// JDSQLStatement.canHaveExtendedDynamic logic.
+// the wire and stay out of the *PGM.
 //
 // When called with sql="" / hasParams=false the criteria filter is
 // bypassed -- selectOptions() takes this shortcut for the common
@@ -478,8 +476,8 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 //	equivalent value, see JDProperties.java:429-430):
 //	  default rules || isCall || isValues || isWith
 //
-// See /home/complacentsee/godb2/JT400-EXTENDED-DYNAMIC-FILING.md
-// for the wire-shape derivation and the gate-history rationale.
+// See docs/package-caching.md for the operator's guide; the
+// extended-criteria derivation lives in the wire-protocol notes.
 //
 // Empty sql (the selectOptions() shortcut) returns true so callers
 // that don't have SQL context yet still see the package flag.

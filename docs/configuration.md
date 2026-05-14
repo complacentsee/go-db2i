@@ -17,10 +17,10 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | Key                          | Default      | Notes                                                                 |
 |------------------------------|--------------|-----------------------------------------------------------------------|
 | `library`                    | (none)       | Default schema. Sent via `SET_SQL_ATTRIBUTES` CP `0x380F`. Upper-cased.|
-| `libraries`                  | (none)       | v0.7.11. Comma- or space-separated list of libraries to add to the job's library list at connect. First entry tagged indicator `'C'`, the rest `'L'`. Composes with `library=` via the JT400 prepend-default-schema rule. Each entry must be 1-10 chars from `[A-Z 0-9 _ # @ $]`. |
-| `naming`                     | `sql`        | v0.7.11. One of `sql` (period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`; the JT400 default). Maps to CP `0x380C` (NamingConventionParserOption). |
+| `libraries`                  | (none)       | v0.7.11. Comma- or space-separated list of libraries to add to the job's library list at connect. First entry tagged indicator `'C'`, the rest `'L'`. Composes with `library=`: if both are set, `library` is prepended to `libraries` unless already present. Each entry must be 1-10 chars from `[A-Z 0-9 _ # @ $]`. |
+| `naming`                     | `sql`        | v0.7.11. One of `sql` (period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`). Maps to CP `0x380C` (NamingConventionParserOption). |
 | `signon-port`                | 8476 / 9476  | Override the as-signon port.                                          |
-| `date`                       | `job`        | One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. **Scope:** affects (a) how the server renders dates when explicitly cast to string (`CHAR(CURRENT_DATE)`, `VARCHAR_FORMAT`, etc.) and (b) how it parses date string literals in SQL text. **Does NOT affect typed `DATE` columns delivered over the wire** -- those arrive as packed binary and the driver promotes them to `time.Time`, which `Scan(*string)` renders as RFC3339 regardless of this setting. Mirrors JT400's `java.sql.Date.toString()` always-ISO contract. |
+| `date`                       | `job`        | One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. **Scope:** affects (a) how the server renders dates when explicitly cast to string (`CHAR(CURRENT_DATE)`, `VARCHAR_FORMAT`, etc.) and (b) how it parses date string literals in SQL text. **Does NOT affect typed `DATE` columns delivered over the wire** -- those arrive as packed binary and the driver promotes them to `time.Time`, which `Scan(*string)` renders as RFC3339 regardless of this setting. |
 | `time-format`                | `job`        | v0.7.11. One of `job`, `hms`, `usa`, `iso`, `eur`, `jis`. Maps to CP `0x3809` (TimeFormatParserOption). `usa` renders TIME values as 12-hour clock with AM/PM. *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string`. |
 | `date-separator`             | (job)        | v0.7.11. One of `job`, `/`, `-`, `.`, `,`, `space` (or named aliases `slash`/`dash`/`period`/`comma`/`space`). Maps to CP `0x3808` (DateSeparatorParserOption); overrides the date-format-inferred default. |
 | `time-separator`             | (job)        | v0.7.11. One of `job`, `:`, `.`, `,`, `space` (or `colon`/`period`/`comma`/`space`). Maps to CP `0x380A`. |
@@ -38,12 +38,12 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `package-error`              | `warning`    | One of `warning`, `exception`, `none`. Policy for `CREATE_PACKAGE` / `RETURN_PACKAGE` failures. |
 | `package-criteria`           | `default`    | One of `default`, `select`, `extended`. `select` adds unparameterised SELECT statements; `extended` (v0.7.7) adds `CALL` / `VALUES` / `WITH` instead. See [`package-caching.md`](./package-caching.md#eligibility--package-criteria) for the full matrix. |
 | `package-ccsid`              | `13488`      | CCSID for package-stored SQL text. Accepts `13488` (UCS-2 BE), `1200` (UTF-16 LE), or `0` (job default). |
-| `package-add`                | (ignored)    | JT400-compatibility key. Accepted but no-op; the driver always adds. |
-| `package-clear`              | (warn)       | JT400-compatibility key. Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. |
-| `block-size`                 | `32`         | v0.7.12 (range tightened in v0.7.13). KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 8-512 (matches JT400-canonical values 8/16/32/64/128/256/512). Default (or unset) is byte-identical to pre-v0.7.12. Mirrors JT400's `block size` JDBC URL property. |
-| `query-optimize-goal`        | (unset)      | v0.7.17. Server-side optimizer goal on CP 0x3833 in SET_SQL_ATTRIBUTES. One of `firstio` (= `first`; EBCDIC 'F') for time-to-first-row, `allio` (= `all`; EBCDIC 'A') for total throughput. Unset omits the CP -- server uses its job default. Mirrors JT400's `query optimize goal`. |
-| `login-timeout`              | `30s`        | v0.7.16. Dial-plus-handshake timeout when `db.Conn(ctx)` is called without a deadline in `ctx`. Accepts integer seconds (JT400-style: `?login-timeout=5`) or Go duration form (`?login-timeout=2m500ms`). Negatives reject. An explicit `ctx` deadline still wins. Mirrors JT400's `login timeout`. |
-| `socket-timeout`             | `0`          | v0.7.16. Per-op read-deadline default applied to every `Exec` / `Query` / `BatchExec` / `BeginTx` when the caller's `ctx` has no deadline. Same value-parsing as `login-timeout`. `0` (the default) = no automatic timeout (caller's `ctx` alone drives cancellation). Mirrors JT400's `socket timeout`. |
+| `package-add`                | (ignored)    | Accepted but no-op (driver always adds). Present for JT400 DSN compatibility so a migrated URL can be re-used verbatim. |
+| `package-clear`              | (warn)       | Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. Present for JT400 DSN compatibility. |
+| `block-size`                 | `32`         | v0.7.12 (range tightened in v0.7.13). KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 8-512 KiB; canonical values are 8/16/32/64/128/256/512. |
+| `query-optimize-goal`        | (unset)      | v0.7.17. Server-side optimizer goal on CP 0x3833 in SET_SQL_ATTRIBUTES. One of `firstio` (= `first`; EBCDIC 'F') for time-to-first-row, `allio` (= `all`; EBCDIC 'A') for total throughput. Unset omits the CP -- server uses its job default. |
+| `login-timeout`              | `30s`        | v0.7.16. Dial-plus-handshake timeout when `db.Conn(ctx)` is called without a deadline in `ctx`. Accepts integer seconds (`?login-timeout=5`) or Go duration form (`?login-timeout=2m500ms`). Negatives reject. An explicit `ctx` deadline still wins. |
+| `socket-timeout`             | `0`          | v0.7.16. Per-op read-deadline default applied to every `Exec` / `Query` / `BatchExec` / `BeginTx` when the caller's `ctx` has no deadline. Same value-parsing as `login-timeout`. `0` (the default) = no automatic timeout (caller's `ctx` alone drives cancellation). |
 
 ## Driver-typed methods (`sql.Conn.Raw`)
 
@@ -53,12 +53,12 @@ interface; reach them via `sql.Conn.Raw`:
 | Method | Purpose | Since |
 |---|---|---|
 | `BatchExec(ctx, sql, rows [][]any) (int64, error)` | Bulk INSERT / UPDATE / DELETE / MERGE via the IBM i block-insert wire shape (CP `0x381F` multi-row). One round-trip per 32k-row chunk vs N for a per-row loop. See [`performance.md`](./performance.md). | v0.7.9 (IUD); v0.7.10 (MERGE) |
-| `Savepoint(ctx, name) error` | Issue `SAVEPOINT <name> ON ROLLBACK RETAIN CURSORS`. Matches JT400's `Connection.setSavepoint` wire output (plain SQL, no special CP). Name rules: 1-128 chars, leading letter, body letters/digits/underscore. | v0.7.12 |
+| `Savepoint(ctx, name) error` | Issue `SAVEPOINT <name> ON ROLLBACK RETAIN CURSORS` (plain SQL, no special CP). Name rules: 1-128 chars, leading letter, body letters/digits/underscore. | v0.7.12 |
 | `ReleaseSavepoint(ctx, name) error` | Issue `RELEASE SAVEPOINT <name>`. | v0.7.12 |
 | `RollbackToSavepoint(ctx, name) error` | Issue `ROLLBACK TO SAVEPOINT <name>`. | v0.7.12 |
-| `SetSchema(ctx, name) error` | Issue `SET SCHEMA <name>` to change the connection's default schema mid-session. Matches JT400's `Connection.setSchema`. Library-name rules (1-10 chars `[A-Z0-9_#@$]`); canonicalised to uppercase. | v0.7.12 |
+| `SetSchema(ctx, name) error` | Issue `SET SCHEMA <name>` to change the connection's default schema mid-session. Library-name rules (1-10 chars `[A-Z0-9_#@$]`); canonicalised to uppercase. | v0.7.12 |
 | `AddLibraries(ctx, libs []string) error` | Append libraries to the connection's *LIBL via one NDB ADD_LIBRARY_LIST round-trip. First entry tagged `'C'` (current schema), rest `'L'`. Same wire helper as the connect-time `?libraries=` knob. | v0.7.12 |
-| `RemoveLibraries(ctx, libs []string) error` | Loop `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')` per library. JT400 doesn't expose a NDB REMOVE wire either -- mid-session shrinking goes through CL on both sides. CPF2104 / CPF9810 downgraded to slog WARN. | v0.7.12 |
+| `RemoveLibraries(ctx, libs []string) error` | Loop `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')` per library — the host server has no NDB REMOVE wire, so mid-session shrinking goes through CL. CPF2104 / CPF9810 downgraded to slog WARN. | v0.7.12 |
 
 Example:
 

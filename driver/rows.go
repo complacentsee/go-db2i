@@ -320,16 +320,14 @@ func (r *Rows) ColumnTypeTableName(index int) string {
 // ColumnTypeBaseColumnName returns the underlying base column name
 // for an aliased SELECT column, or empty when extended metadata
 // wasn't requested or the column isn't a direct projection of a
-// base column. Mirrors JT400's DBColumnDescriptorsDataFormat
-// .getBaseColumnName.
+// base column.
 func (r *Rows) ColumnTypeBaseColumnName(index int) string {
 	return r.cursor.Columns()[index].BaseColumnName
 }
 
 // ColumnTypeLabel returns the column label (SQL `AS` alias) the
 // server reports, or empty when extended metadata wasn't requested
-// or the server didn't include a label. Mirrors JT400's
-// DBColumnDescriptorsDataFormat.getColumnLabel.
+// or the server didn't include a label.
 func (r *Rows) ColumnTypeLabel(index int) string {
 	return r.cursor.Columns()[index].Label
 }

@@ -36,8 +36,8 @@ import (
 
 // runTraceStdout exercises a single round-trip Query through the
 // database/sql driver layer with an OTel stdout exporter attached.
-// Used by the -trace-stdout flag to demonstrate the M8-4 OTel
-// plumbing -- the resulting span JSON lands on stderr and shows
+// Used by the -trace-stdout flag to demonstrate the OTel plumbing
+// -- the resulting span JSON lands on stderr and shows
 // the db.system.name / db.namespace / db.operation.name / etc.
 // attributes the convention specifies. Reads the same env vars
 // as runLogDebug.
@@ -103,7 +103,7 @@ func runTraceStdout() {
 
 // runLogDebug exercises a single round-trip Query through the
 // database/sql driver layer with a slog text handler attached.
-// Used by the -log-debug flag to demonstrate the M8-3 logger
+// Used by the -log-debug flag to demonstrate the slog logger
 // plumbing without disturbing the rest of the smoketest's
 // host-server-level harness. Reads the same env vars: PUB400_HOST,
 // PUB400_PORT (signon), PUB400_DBPORT, PUB400_USER, PUB400_PWD.
@@ -154,8 +154,8 @@ func runLogDebug() {
 }
 
 func main() {
-	logDebug := flag.Bool("log-debug", false, "exercise the database/sql driver with slog DEBUG attached to stderr (M8-3 demo); skips the host-server smoketest")
-	traceStdout := flag.Bool("trace-stdout", false, "exercise the database/sql driver with the OTel stdout span exporter (M8-4 demo); skips the host-server smoketest")
+	logDebug := flag.Bool("log-debug", false, "exercise the database/sql driver with slog DEBUG attached to stderr; skips the host-server smoketest")
+	traceStdout := flag.Bool("trace-stdout", false, "exercise the database/sql driver with the OTel stdout span exporter; skips the host-server smoketest")
 	flag.Parse()
 	if *traceStdout {
 		runTraceStdout()

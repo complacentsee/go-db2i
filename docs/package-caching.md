@@ -29,12 +29,10 @@ Turn this on if **any** of the following apply:
   Saving a round-trip per call is ~5-50ms depending on network
   topology — see [`performance.md`](./performance.md).
 - You operate a polyglot environment where Go and Java clients hit
-  the same LPAR. The 10-char on-wire package name is byte-equal to
-  JT400 for the same session options, so both runtimes share one
-  `*PGM` on disk.
-- You want JT400-equivalent runtime characteristics so a migration
-  from a Java service to a Go service doesn't change the LPAR's
-  plan cache footprint.
+  the same LPAR. The 10-char on-wire package name is computed
+  identically to JT400 from the same session options, so both
+  runtimes share one `*PGM` on disk and a migration from Java to
+  Go doesn't change the LPAR's plan-cache footprint.
 
 Leave it off when:
 
@@ -67,12 +65,9 @@ hit (v0.7.1 cache-hit):
 On a cache-hit, the EXECUTE / OPEN frame carries the cached 18-byte
 server-assigned statement name (e.g. `QZAF488C43A7873001`) in code
 point `0x3806`. The server looks the plan up in the `*PGM` and runs
-it directly without re-preparing. JT400's
-`AS400JDBCStatement.commonExecute` internally tracks the same name
-in its `nameOverride_` field, but on the wire the dispatch is
-package marker + RPB handle + CP 0x3806 — no reply-side rename
-capture is required (verified against `prepared_package_cache_hit.trace`
-and `prepared_package_filing_iud.trace`, 2026-05-11).
+it directly without re-preparing. The wire dispatch is package
+marker + RPB handle + CP 0x3806 — no reply-side rename capture is
+required.
 
 ## Setup
 
@@ -138,7 +133,7 @@ On a fresh package (the `*PGM` doesn't exist yet):
 
 1. Connect emits `CREATE_PACKAGE` (function `0x180F`) with the
    resolved 10-char name (`APP` → `APP9899` plus session-option
-   suffix; identical to what JT400 would emit).
+   suffix).
 2. Every `Stmt.Prepare` / `db.Query` / `db.Exec` issues
    `PREPARE_DESCRIBE` with CP `0x3804` carrying the full
    package name. The server stores the prepared plan in the
@@ -163,23 +158,16 @@ On a reconnect with the same `package` name and `package-cache=true`:
 
 ## Eligibility — `package-criteria`
 
-Not every SQL string can be cached. The driver's gate
-(`driver.packageEligibleFor`) is byte-equivalent to JT400's
-`JDSQLStatement.isPackaged_` (verified against IBM/JTOpen `f14abcc`,
-2026-05-11) and matches IBM's own ODBC filing rule documented in
-the [SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
+Not every SQL string can be cached. The driver's gate matches
+IBM's ODBC / JDBC filing rule documented in the
+[SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
 support page:
 
 | Criteria | Files this SQL? |
 |---|---|
 | `default` (default) | Parameterised SELECT / INSERT / UPDATE / DELETE; `INSERT INTO t SELECT ...` (subselect, even without markers); `SELECT ... FOR UPDATE` (positioned cursor); `DECLARE PROCEDURE` / `DECLARE CURSOR`. Excludes `CURRENT OF`, unparameterised plain SELECT, `VALUES`, `WITH`, and `CALL`. |
-| `select` | Same as `default` PLUS unparameterised SELECT statements. (JT400's wider gate; matches `package criteria=select` exactly. Does **not** widen to VALUES / WITH — those remain non-cached under either criterion.) |
-| `extended` (v0.7.7) | Same as `default` PLUS `CALL` / `VALUES` / `WITH`. **go-db2i-original** — JT400 has no equivalent value (its [`JDProperties.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java) `PACKAGE_CRITERIA_*` enumeration is exactly two values: `default` and `select`; verified against JTOpen 2026-05-12). **Does not** inherit `select`'s unparameterised-SELECT widening — each criterion is a discrete switch, not cumulative. Interop note: a Go client passing `extended` will not share a `*PGM` with a JT400 client at all — JT400 rejects the unknown criterion value during DSN parse. The byte-equality guarantee for `default` / `select` is unaffected. |
-
-`select` previously also accepted VALUES / WITH in go-db2i
-v0.7.0–v0.7.2; v0.7.3 narrowed it to match JT400's wire-equivalent
-gate so Go and Java clients hash to the same `*PGM` for the same
-session options.
+| `select` | Same as `default` PLUS unparameterised SELECT statements. Does **not** widen to VALUES / WITH — those remain non-cached under either criterion. Cross-client byte-equal with JT400's `package criteria=select`. |
+| `extended` (v0.7.7) | Same as `default` PLUS `CALL` / `VALUES` / `WITH`. **go-db2i-specific** — does not inherit `select`'s unparameterised-SELECT widening (each criterion is a discrete switch, not cumulative). Interop note: a Go client passing `extended` will not share a `*PGM` with a JT400 client (JT400 has no equivalent value and rejects the unknown criterion during DSN parse). The byte-equality guarantee for `default` / `select` is unaffected. |
 
 `extended` and OUT/INOUT CALL (v0.7.8): a CALL with `sql.Out`
 destinations files into the `*PGM` under `extended` AND cache-hit
@@ -190,13 +178,11 @@ INOUT); `CHANGE_DESCRIPTOR` sends them on the wire, EXECUTE
 requests `ORSResultData`, and the reply ships CP `0x380E` with the
 OUT-value row decoded back into the bound `sql.Out` destinations.
 
-This is a go-db2i-original extension — JT400 has no equivalent
-behaviour because it doesn't file CALL under any of its criteria.
-The v0.7.8 plan
-([`docs/plans/v0.7.8-out-param-cache-hit.md`](./plans/v0.7.8-out-param-cache-hit.md))
-documents the V7R6M0 probe that confirmed the server honours this
-path. v0.7.1–v0.7.7 defensively rejected OUT direction bytes on
-the cache-hit path; that reject is gone.
+This extension is go-db2i-specific — JT400 doesn't file CALL
+under any of its criteria. v0.7.1–v0.7.7 defensively rejected
+OUT direction bytes on the cache-hit path; v0.7.8 confirmed via
+a V7R6M0 probe that the server honours this dispatch and the
+reject is gone.
 
 Examples:
 
@@ -240,8 +226,8 @@ through filing for INSERT / UPDATE / DELETE.
 
 Use `package-criteria=select` if your workload includes many
 identical zero-parameter SELECTs (typical of dashboards that hit
-the same metric query every refresh). Use `default` (the JT400
-default) if you want to minimise the `*PGM` size.
+the same metric query every refresh). Stick with the default if
+you want to minimise the `*PGM` size.
 
 ### LOB binds + the cache-hit fast path
 
@@ -342,11 +328,10 @@ Check the `package-criteria` table above. Common cases:
 
 **The package already exists from a previous deploy.**
 
-v0.7.1 treats `SQL-601 (object exists)` from `CREATE_PACKAGE` as
-success and continues. This matches JT400's
-`JDPackageManager.create()` behaviour. v0.7.0 incorrectly
-soft-disabled the cache in this case — upgrade if you saw
-"package soft-disabled" warnings in v0.7.0.
+`SQL-601 (object exists)` from `CREATE_PACKAGE` is treated as
+success — re-creating an existing `*PGM` is a no-op. (v0.7.0
+incorrectly soft-disabled the cache in this case; upgrade if you
+see "package soft-disabled" warnings on connect.)
 
 **I want to start fresh.**
 
@@ -404,12 +389,11 @@ never written to the `*PGM`. The package then shows
 To verify filing works on a given LPAR, run the same
 parameterised SQL **at least 3 times on a single pinned
 connection** before checking `SYSPACKAGESTAT`. The Go conformance
-test `TestFiling_ServerSideStateVerified` does exactly this; the
-JT400 fixture case `prepared_package_filing_verify.trace`
-mirrors it on the Java side. Both pass against IBM Cloud V7R6M0
-(`GOTCHE9899`, `NUMBER_STATEMENTS=2`, `PACKAGE_USED_SIZE=65744`)
-and against PUB400 V7R5M0 (`GOJTPK9689`, `NUMBER_STATEMENTS=2`,
-`PACKAGE_USED_SIZE=58880`) on the same prepare-loop pattern.
+test `TestFiling_ServerSideStateVerified` does exactly this and
+passes against IBM Cloud V7R6M0 (`GOTCHE9899`,
+`NUMBER_STATEMENTS=2`, `PACKAGE_USED_SIZE=65744`) and against
+PUB400 V7R5M0 (`GOJTPK9689`, `NUMBER_STATEMENTS=2`,
+`PACKAGE_USED_SIZE=58880`).
 
 The threshold also explains why every cache-hit-related test in
 `test/conformance/cache_hit_test.go` is gated behind
@@ -427,14 +411,14 @@ the on-wire name is what the driver actually files into:
 | `GOJTPKG` (truncated to 6) | `GOJTPK9899` | `GOJTPK9689` |
 | `GOTCHE` (already 6) | `GOTCHE9899` | `GOTCHE9689` |
 
-The 4-char suffix is the session-options hash JT400 (and
-`hostserver.BuildPackageName`) append per
-`JDPackageManager.java:466`. It varies with the connection
-attributes — date format, decimal separator, CCSID, etc. —
-specifically so two clients with different session options can
-share one `*PGM` library without poisoning each other's filed
-plans. Two clients with **identical** session options
-produce **byte-equal** package names and share one *PGM*.
+The 4-char suffix is a hash of the connection's session options
+(date format, decimal separator, CCSID, etc.) produced by
+`hostserver.BuildPackageName`. It varies with session options
+specifically so two clients with different settings can share one
+`*PGM` library without poisoning each other's filed plans. Two
+clients with **identical** session options produce **byte-equal**
+package names and share one `*PGM` — including across go-db2i
+and JT400 (the hash function matches).
 
 Verification queries should therefore use `LIKE 'BASE%'`:
 
@@ -467,7 +451,7 @@ V7R6M0 and V7R5M0 on 2026-05-11.
   reference including all package-cache keys.
 - [`docs/performance.md`](./performance.md) — measured round-trip
   savings and when to opt out.
-- [`docs/migrating-from-jt400.md`](./migrating-from-jt400.md) —
+- [`MIGRATING.md`](../MIGRATING.md) —
   JT400 `package` / `extended dynamic` JDBC property mapping.
 - godoc `Example_packageCache`, `Example_packageCacheObservability`,
   `Example_packageCacheCriteria` in `driver/example_test.go`.

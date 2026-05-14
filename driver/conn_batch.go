@@ -11,11 +11,10 @@ import (
 	"github.com/complacentsee/go-db2i/hostserver"
 )
 
-// MaxBlockedInputRows mirrors JT400's `maximumBlockedInputRows` cap
-// (`AS400JDBCPreparedStatementImpl.java:1636-1677`). Larger
-// `BatchExec` inputs are split client-side into chunks of this size
-// and executed sequentially -- each chunk pays one round-trip,
-// total rows-affected is summed across chunks.
+// MaxBlockedInputRows is the chunk size BatchExec uses to split
+// large inputs. Each chunk fits in a single multi-row block-insert
+// frame and pays one round-trip; total rows-affected is summed
+// across chunks.
 const MaxBlockedInputRows = 32000
 
 // BatchExec packs `rows` into one EXECUTE per 32k-row chunk via the

@@ -316,8 +316,8 @@ func parseLOBReply(rep *DBReply) (*LOBData, error) {
 //     from server, FieldLength=4, CCSID from server) and
 //     paramValues[i] to the locator handle so the subsequent
 //     CHANGE_DESCRIPTOR + EXECUTE encode the 4-byte handle in the
-//     SQLDA value slot, matching the JT400 wire pattern documented
-//     in docs/lob-bind-wire-protocol.md.
+//     SQLDA value slot. See internal/docs/lob-bind-wire-protocol.md
+//     for the wire-format derivation.
 //
 // Non-LOB parameters and a nil pmf (statement with no `?` markers
 // or an old-server reply that didn't include CP 0x3813) are

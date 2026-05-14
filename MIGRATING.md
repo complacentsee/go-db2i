@@ -141,8 +141,8 @@ only the DSN-knob parity view.
 
 | JT400 | go-db2i | Notes |
 |---|---|---|
-| `trace` / `trace server` / `trace toolbox` | `Config.Logger` + `Config.LogSQL` | M8-3 slog integration. Pass any `*slog.Logger`; the driver emits INFO at connect/close, DEBUG per Exec / Query / LOB chunk, WARN on ErrBadConn, ERROR on statement failures. SQL text gated on `LogSQL`. |
-| — | `Config.Tracer` | M8-4 OpenTelemetry spans. Set `Config.Tracer = tp.Tracer("…")` for SpanKindClient spans following the OTel database semantic conventions. |
+| `trace` / `trace server` / `trace toolbox` | `Config.Logger` + `Config.LogSQL` | slog integration. Pass any `*slog.Logger`; the driver emits INFO at connect/close, DEBUG per Exec / Query / LOB chunk, WARN on ErrBadConn, ERROR on statement failures. SQL text gated on `LogSQL`. |
+| — | `Config.Tracer` | OpenTelemetry spans. Set `Config.Tracer = tp.Tracer("…")` for SpanKindClient spans following the OTel database semantic conventions. |
 | `metadata source` / `describe option` | `extended-metadata` | `?extended-metadata=true` enables CP `0x3811` + `0x3829=0xF1` so `Rows.ColumnTypeSchemaName` / `…TableName` / `…BaseColumnName` / `…Label` populate. |
 
 ### Behaviour overrides

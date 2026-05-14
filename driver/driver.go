@@ -47,8 +47,8 @@
 //	             host-server pair) unless the caller overrode them.
 //	tls-insecure-skip-verify  Disables server-cert verification.
 //	             Useful for self-signed IBM i certs that lack DNS
-//	             SANs; equivalent to JT400's setUseSSL with cert
-//	             validation off.
+//	             SANs that crypto/tls would otherwise reject. Disables
+//	             MITM protection -- use sparingly.
 //	tls-server-name  Overrides the SNI / cert-verify hostname.
 //	ccsid        Application-data CCSID. Overrides the connection-
 //	             level "ClientCCSID" negotiated at sign-on (CP 0x3801)
@@ -233,9 +233,8 @@ type Config struct {
 	Library    string // default SQL schema; empty = no override
 
 	// Libraries is the full ordered list of libraries to add to the
-	// job's library list at connect time, mirroring JT400's
-	// `libraries=A,B,C` JDBC URL knob. The first library is tagged on
-	// the wire with EBCDIC indicator 'C' (current SQL schema); the
+	// job's library list at connect time. The first library is tagged
+	// on the wire with EBCDIC indicator 'C' (current SQL schema); the
 	// rest with 'L' (append to back of *LIBL).
 	//
 	// Composition with Library:
@@ -245,25 +244,21 @@ type Config struct {
 	//                                      parse so db.namespace is set)
 	//   - Both set:                        Library is prepended to
 	//                                      Libraries unless already
-	//                                      present (matches JT400's
-	//                                      JDLibraryList prepend rule)
+	//                                      present.
 	//
 	// DSN value accepts comma / space / colon / semicolon as
-	// separators (JT400-compatible): `?libraries=LIBA,LIBB LIBC`.
+	// separators: `?libraries=LIBA,LIBB LIBC`.
 	Libraries []string
 
 	// Naming selects the SQL naming convention the server applies
 	// when parsing unqualified identifiers. "sql" (default) parses
-	// MYLIB.TABLE; "system" parses MYLIB/TABLE. Mirrors JT400's
-	// `naming=sql|system` JDBC URL knob; the go-db2i default is
-	// "sql" (JT400 default is "system"). Set to "system" for
-	// migrations from RPG/CL apps whose SQL embeds slash
-	// qualifiers. Wire mapping: CP 0x380C value 0 vs 1.
+	// MYLIB.TABLE; "system" parses MYLIB/TABLE. Set to "system" for
+	// migrations from RPG/CL apps whose SQL embeds slash qualifiers.
+	// Wire mapping: CP 0x380C value 0 vs 1.
 	Naming string
 
 	// TimeFormat overrides the server-side time-output format for
-	// TIME columns and TIME literal parsing. Mirrors JT400's
-	// `time format` JDBC URL knob. Values:
+	// TIME columns and TIME literal parsing. Values:
 	//   ""    job-default (CP 0x3809 omitted)
 	//   hms   24-hour HH.MM.SS (the historical IBM i default)
 	//   usa   HH:MM AM|PM
@@ -274,7 +269,7 @@ type Config struct {
 
 	// DateSeparator overrides the date-string separator the server
 	// uses when formatting DATE columns and parsing DATE literals.
-	// Mirrors JT400's `date separator` JDBC URL knob. Values:
+	// Values:
 	//   ""   default (driven by DateFormat or job)
 	//   /    slash       (DATE_SEPARATOR index 0)
 	//   -    dash        (index 1)
@@ -283,8 +278,7 @@ type Config struct {
 	//   " "  space       (index 4)
 	DateSeparator string
 
-	// TimeSeparator overrides the time-string separator. Mirrors
-	// JT400's `time separator`. Values:
+	// TimeSeparator overrides the time-string separator. Values:
 	//   ""   default (job)
 	//   :    colon   (TIME_SEPARATOR index 0)
 	//   .    period  (index 1)
@@ -293,8 +287,7 @@ type Config struct {
 	TimeSeparator string
 
 	// DecimalSeparator overrides the decimal point character used
-	// in decimal-literal parsing and output. Mirrors JT400's
-	// `decimal separator`. Values:
+	// in decimal-literal parsing and output. Values:
 	//   ""   default (job)
 	//   .    period  (DECIMAL_SEPARATOR index 0)
 	//   ,    comma   (index 1)
@@ -338,9 +331,9 @@ type Config struct {
 	// the driver tags on string parameter binds.
 	//
 	// The default 0 means "auto-pick": 13488 (UCS-2 BE) for the
-	// SET_SQL_ATTRIBUTES negotiation (matching JT400's default), and
-	// 1208 (UTF-8) for parameter-bind tagging on V7R3+ servers /
-	// CCSID 37 on older releases (see preferredStringCCSID).
+	// SET_SQL_ATTRIBUTES negotiation, and 1208 (UTF-8) for parameter-
+	// bind tagging on V7R3+ servers / CCSID 37 on older releases (see
+	// preferredStringCCSID).
 	//
 	// Common explicit values:
 	//   1208   UTF-8 -- preserves the full Unicode repertoire on
@@ -361,8 +354,7 @@ type Config struct {
 	// LOBThreshold is the byte count below which the server returns
 	// LOB columns inline in row data (and accepts inline LOB shapes
 	// on bind) instead of allocating a server-side locator. Sent as
-	// CP 0x3822 in SET_SQL_ATTRIBUTES; matches JT400's "lob
-	// threshold" JDBC URL knob. Configured via the DSN
+	// CP 0x3822 in SET_SQL_ATTRIBUTES. Configured via the DSN
 	// "lob-threshold" query key.
 	//
 	// 0 = the historical default (32768). Raising it inlines bigger
@@ -371,14 +363,13 @@ type Config struct {
 	// chosen threshold.
 	LOBThreshold uint32
 
-	// ExtendedDynamic switches the connection on to JT400's
-	// extended-dynamic SQL package caching. When true and PackageName
-	// is non-empty, the driver instructs the server to maintain a
-	// persistent *PGM that accumulates PREPAREd statements across
-	// connections so a co-tenant reconnect skips the PREPARE round-
-	// trip. Mirrors JT400's "extended dynamic" JDBC URL knob;
-	// configured via the DSN "extended-dynamic=true" query key.
-	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	// ExtendedDynamic switches the connection on to extended-dynamic
+	// SQL package caching. When true and PackageName is non-empty,
+	// the driver instructs the server to maintain a persistent *PGM
+	// that accumulates PREPAREd statements across connections, so a
+	// co-tenant reconnect skips the PREPARE round-trip. Configured
+	// via the DSN "extended-dynamic=true" query key. Default false.
+	// See docs/package-caching.md for the operator's guide.
 	ExtendedDynamic bool
 
 	// PackageName is the user-chosen base for the on-wire package
@@ -403,28 +394,25 @@ type Config struct {
 	PackageCache bool
 
 	// PackageError selects how the driver handles errors from the
-	// CREATE_PACKAGE / RETURN_PACKAGE / CP 0x3804 paths. Mirrors
-	// JT400's "package error" JDBC URL knob; configured via the DSN
-	// "package-error=warning|exception|none" query key.
+	// CREATE_PACKAGE / RETURN_PACKAGE / CP 0x3804 paths. Configured
+	// via the DSN "package-error=warning|exception|none" query key.
 	//   "warning"   (default) slog.Warn + continue without package
 	//   "exception" return the error to the database/sql caller
 	//   "none"      silent drop + continue without package
 	PackageError string
 
 	// PackageCriteria filters which SQL strings the driver considers
-	// for cache insertion / lookup. Mirrors JT400's
-	// "package criteria" JDBC URL knob.
-	//   "default" (default) only parameterised statements (the JT400
-	//             rule: marker count > 0 && !isCurrentOf && various
-	//             special-case shapes)
+	// for cache insertion / lookup.
+	//   "default" (default) only parameterised statements (marker
+	//             count > 0, excluding cursor-positioned and a few
+	//             other special shapes)
 	//   "select"  default rules plus all SELECTs (broader cache)
 	PackageCriteria string
 
 	// PackageCCSID is the CCSID the server uses to write package-
-	// stored SQL text on disk. JT400's default is 13488 (UCS-2 BE);
-	// a value of 0 means "system default" (the connection's job
-	// CCSID). The driver accepts 13488 and 1200 (UTF-16 LE); other
-	// values must wait for the M11+ broader package-CCSID work.
+	// stored SQL text on disk. Default 13488 (UCS-2 BE); a value of
+	// 0 means "system default" (the connection's job CCSID). The
+	// driver accepts 13488 and 1200 (UTF-16 LE).
 	PackageCCSID int
 
 	// ExtendedMetadata, when true, asks the server to include CP
@@ -434,19 +422,17 @@ type Config struct {
 	// per-column schema name, base table name, base column name,
 	// and column label through go-db2i-specific Rows methods
 	// (Rows.ColumnTypeSchemaName / Rows.ColumnTypeTableName etc.).
-	// Mirrors JT400's "extended metadata=true" JDBC URL knob;
-	// configured via the DSN "extended-metadata=true" query key.
-	// Default false to preserve the pre-flag wire shape byte-for-byte.
+	// Configured via the DSN "extended-metadata=true" query key.
+	// Default false.
 	ExtendedMetadata bool
 
 	// BlockSizeKiB sets the continuation-FETCH BufferSize (CP
 	// 0x3834) the driver emits on PREPARE_DESCRIBE OPEN and every
-	// subsequent FETCH. Zero (the default) preserves the historical
-	// 32 KiB shape byte-for-byte. Valid range 1..512 KiB; out-of-
-	// range DSN values reject at parse time so users don't
-	// accidentally request a 16 GiB buffer through a typo. Mirrors
-	// JT400's `block size` JDBC URL knob (configured via DSN
-	// `block-size=N`).
+	// subsequent FETCH. Zero (the default) uses the historical
+	// 32 KiB shape. Valid range 1..512 KiB; out-of-range DSN
+	// values reject at parse time so users don't accidentally
+	// request a 16 GiB buffer through a typo. Configured via
+	// DSN `block-size=N`.
 	BlockSizeKiB int
 
 	// Logger is the *slog.Logger callers want the driver to emit
@@ -504,15 +490,12 @@ type Config struct {
 	// passes a context without a deadline (typically `sql.Open` /
 	// `db.Ping` / first-use `db.Query`). Default is 30s. Overriding
 	// to a smaller value makes a flaky-host connect fail fast; an
-	// explicit ctx deadline still wins over this knob.
-	//
-	// Mirrors JT400's `login timeout` JDBC URL property. Set via
+	// explicit ctx deadline still wins over this knob. Set via
 	// DSN `?login-timeout=N` (N in seconds; e.g. `?login-timeout=5`).
 	LoginTimeout time.Duration
 
 	// QueryOptimizeGoal sets the server-side query optimizer's
-	// objective. Mirrors JT400's `query optimize goal` JDBC URL
-	// property and translates to CP 0x3833 in SET_SQL_ATTRIBUTES.
+	// objective and translates to CP 0x3833 in SET_SQL_ATTRIBUTES.
 	// Use the hostserver.QueryOptimize* constants:
 	//
 	//   QueryOptimizeFirstIO (0xC6) -- time-to-first-row (streaming,
@@ -521,9 +504,7 @@ type Config struct {
 	//                                   bulk extracts)
 	//   QueryOptimizeUnset   (0)    -- omit the CP, server uses its
 	//                                   job default (typically *ALLIO
-	//                                   on V7R5+). Default; preserves
-	//                                   byte-equality with pre-v0.7.17
-	//                                   fixtures.
+	//                                   on V7R5+). Default.
 	//
 	// DSN form: `?query-optimize-goal=firstio` or `=allio`.
 	QueryOptimizeGoal byte
@@ -535,11 +516,8 @@ type Config struct {
 	// the OS-level TCP timeout (typically hours) -- a real
 	// production-reliability hazard. A 30-60s default is a safe
 	// belt-and-suspenders bound; an explicit ctx deadline still
-	// wins.
-	//
-	// Mirrors JT400's `socket timeout` JDBC URL property. Set via
-	// DSN `?socket-timeout=N` (N in seconds). Default 0 = no
-	// driver-level timeout; rely on caller-supplied ctx.
+	// wins. Set via DSN `?socket-timeout=N` (N in seconds). Default
+	// 0 = no driver-level timeout; rely on caller-supplied ctx.
 	SocketTimeout time.Duration
 }
 
@@ -562,12 +540,11 @@ func DefaultConfig() Config {
 		SignonPort: 8476,
 		DateFormat: hostserver.DateFormatJOB,
 		Isolation:  hostserver.IsolationCommitNone,
-		// Package-cache defaults match JT400's JDProperties.java
-		// (PACKAGE_LIBRARY="QGPL", PACKAGE_ERROR="warning",
-		// PACKAGE_CRITERIA="default", PACKAGE_CCSID=13488). The
-		// gating flags ExtendedDynamic + PackageCache start false
-		// so an unmodified Config never touches the package wire
-		// at all.
+		// Package-cache defaults: PACKAGE_LIBRARY="QGPL",
+		// PACKAGE_ERROR="warning", PACKAGE_CRITERIA="default",
+		// PACKAGE_CCSID=13488. The gating flags ExtendedDynamic +
+		// PackageCache start false so an unmodified Config never
+		// touches the package wire at all.
 		PackageLibrary:  "QGPL",
 		PackageError:    "warning",
 		PackageCriteria: "default",
@@ -847,9 +824,8 @@ func parseDSN(dsn string) (*Config, error) {
 		// downstream caller sees normalised bytes. Validate the
 		// charset before anything in the driver tries to hand it
 		// off to BuildPackageName. Max 10 chars matches the IBM i
-		// object-name limit JT400 accepts -- the encoder later
-		// truncates to 6 chars before the 4-char options suffix is
-		// appended, byte-equal to JT400 (JDPackageManager.java:466).
+		// object-name limit; the encoder later truncates to 6
+		// chars before the 4-char options-suffix is appended.
 		canon := canonPackageIdent(v)
 		if err := validatePackageIdent(canon, 10); err != nil {
 			return nil, fmt.Errorf("invalid package %q: %w", v, err)
