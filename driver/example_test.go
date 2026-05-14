@@ -111,19 +111,10 @@ func Example_lastInsertId() {
 }
 
 // Example_call demonstrates calling a stored procedure with IN-only
-// parameters. go-db2i routes any SQL starting with "CALL " through
-// the same CREATE_RPB + PREPARE_DESCRIBE + EXECUTE flow JT400 uses
-// for CallableStatement, with statement type 3 (TYPE_CALL) on both
-// PREPARE and EXECUTE. M9-1 covers IN-only; OUT / INOUT via sql.Out
-// lands in M9-2, multi-result-set procs via rows.NextResultSet() in
-// M9-3.
-//
-// For procs that take no parameters or carry literal arguments
-// inline (e.g. `CALL P_BUMP('A', 10)`), db.Exec still works -- the
-// driver detects the CALL verb and routes through ExecutePreparedSQL
-// rather than ExecuteImmediate so the server sees TYPE_CALL on
-// PREPARE. This is required for correct SQLERRD(2) population when
-// the proc returns dynamic result sets.
+// parameters. The driver detects the leading CALL verb and prepares
+// the statement with TYPE_CALL so the server returns the correct
+// metadata, even for procs with no parameter markers or only
+// literal arguments inline (e.g. `CALL P_BUMP('A', 10)`).
 func Example_call() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
@@ -137,14 +128,11 @@ func Example_call() {
 }
 
 // Example_callWithOut demonstrates OUT and INOUT parameter handling
-// via the database/sql sql.Out wrapper. go-db2i sets the
-// JT400-compatible direction byte (0xF1 for OUT, 0xF2 for INOUT) at
-// descriptor offset 30, ORs the ORS_RESULT_DATA bit into the EXECUTE
-// request so the server ships a synthetic single-row CP 0x380E
-// reply, and reflect-assigns the decoded values back to the caller's
-// destinations after EXECUTE returns. Go 1.21+ is required for the
-// sql.Out.In INOUT field; go-db2i's go.mod floor is 1.23 so this
-// is always available.
+// via the database/sql sql.Out wrapper. The driver tags each marker
+// with its direction on the wire, asks the server to ship the
+// returned values back as a synthetic single-row reply, and
+// reflect-assigns the decoded values into the caller's destinations
+// when EXECUTE returns.
 func Example_callWithOut() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
@@ -325,12 +313,11 @@ func Example_lobReader() {
 
 // Example_dsnKnobs exercises the three most commonly tuned DSN knobs
 // at once: ?lob-threshold=N caps the inline-LOB cutoff the server
-// uses for parameter-marker writes (matching JT400's "lob threshold"
-// JDBC property), ?ccsid=1208 forces UTF-8 on the application-data
-// CCSID so non-ASCII characters round-trip without locale-dependent
-// EBCDIC ambiguity, and ?tls=true wraps both as-signon and
-// as-database sockets in crypto/tls (flipping the default ports to
-// 9476 / 9471). The keys are independent -- mix and match per
+// uses for parameter-marker writes; ?ccsid=1208 forces UTF-8 on the
+// application-data CCSID so non-ASCII characters round-trip without
+// locale-dependent EBCDIC ambiguity; ?tls=true wraps both as-signon
+// and as-database sockets in crypto/tls (flipping the default ports
+// to 9476 / 9471). The keys are independent -- mix and match per
 // deployment.
 func Example_dsnKnobs() {
 	dsn := "db2i://USER:PASSWORD@host.example.com/" +
@@ -348,17 +335,15 @@ func Example_dsnKnobs() {
 }
 
 // Example_libraries pins the `libraries=A,B,C` knob, the multi-
-// library counterpart to `library=`. Mirrors JT400's
-// `libraries=APPLIB,DATALIB,QGPL` JDBC URL property: every entry is
-// added to the job's library list at connect time so unqualified
-// SQL names resolve without explicit `MYLIB.TABLE` qualification.
+// library counterpart to `library=`. Every entry is added to the
+// job's library list at connect time so unqualified SQL names
+// resolve without explicit `MYLIB.TABLE` qualification.
 //
 // Semantics:
 //   - The first entry is tagged with EBCDIC indicator 'C' (current
 //     SQL schema); the rest with 'L' (append to back of *LIBL).
 //   - `?library=X` is the default SQL schema. When both knobs are
-//     set and X is not already in the list, X is prepended (the
-//     JT400 JDLibraryList prepend rule).
+//     set and X is not already in the list, X is prepended.
 //   - Accepted separators: comma + space (the URL "+" decodes to
 //     space, so `?libraries=A+B+C` works).
 //
@@ -399,22 +384,23 @@ func Example_contextTimeout() {
 	defer rows.Close()
 }
 
-// Example_packageCache shows the minimal opt-in for v0.7.0 extended-
-// dynamic SQL packages + the v0.7.1 client-side cache-hit fast path.
+// Example_packageCache shows the minimal opt-in for extended-
+// dynamic SQL packages + the client-side cache-hit fast path.
 //
 // Wire flow on the first call against a fresh package:
 //
 //	CREATE_RPB + PREPARE_DESCRIBE + CHANGE_DESCRIPTOR + OPEN  (cache miss)
 //
 // After the first call, the server has filed the prepared plan in
-// MYLIB/APP9899 (10-char wire name = "APP" base + JT400-equal
-// suffix). Subsequent calls with byte-equal SQL hit the cache:
+// a persistent `*PGM` (10-char wire name derived from the `package=`
+// base plus a 4-char session-options hash suffix). Subsequent calls
+// with byte-identical SQL hit the cache:
 //
 //	CREATE_RPB + CHANGE_DESCRIPTOR + OPEN-with-name-override  (cache hit)
 //
 // The cached 18-byte server-assigned statement name rides in CP
-// 0x3806 so the server runs the filed plan directly. See
-// docs/package-caching.md for the full setup + verification flow.
+// 0x3806 so the server runs the filed plan without re-preparing.
+// See docs/package-caching.md for the operator's guide.
 func Example_packageCache() {
 	dsn := "db2i://USER:PASSWORD@host.example.com:8471/" +
 		"?library=MYLIB" +
@@ -491,12 +477,12 @@ func Example_packageCacheObservability() {
 // Example_packageCacheCriteria shows the package-criteria knob.
 // Default rejects unparameterised SELECT (zero markers) -- the
 // SELECT below would NOT be filed. package-criteria=select adds
-// it to the cache pool, matching JT400's broader filter.
+// it to the cache pool.
 //
 // Use "select" when your workload has many identical zero-
 // parameter SELECTs (typical of dashboards refreshing the same
-// metric). Use "default" (the JT400 default) to minimise *PGM
-// size in workloads where unparameterised SQL varies.
+// metric). Stick with "default" to minimise *PGM size in
+// workloads where unparameterised SQL varies.
 func Example_packageCacheCriteria() {
 	dsn := "db2i://USER:PASSWORD@host.example.com:8471/" +
 		"?library=MYLIB" +
@@ -555,12 +541,12 @@ func Example_batchExec_insert() {
 
 // Example_batchExec_lob shows that BatchExec accepts LOB binds: any
 // row carrying a *db2i.LOBValue routes the whole batch to the
-// per-row EXECUTE path (mirroring JT400's locator rule). Caller
-// code is unchanged; the cost is one round-trip per row rather
-// than one per chunk, but per-row is still safer than rolling your
-// own loop -- the cumulative affected count and the partial-
-// progress error reporting both stay consistent with the fast
-// path. (v0.7.15)
+// per-row EXECUTE path, because the locator-allocate flow doesn't
+// compose with the multi-row block-insert wire shape. Caller code
+// is unchanged; the cost is one round-trip per row rather than
+// one per chunk, but per-row is still safer than rolling your own
+// loop -- the cumulative affected count and the partial-progress
+// error reporting both stay consistent with the fast path. (v0.7.15)
 func Example_batchExec_lob() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
@@ -619,11 +605,10 @@ func Example_beginTxIsolation() {
 }
 
 // Example_savepoint shows the three driver-typed savepoint methods
-// added in v0.7.12. Each issues plain SQL through the connection's
-// Exec path -- byte-equal to JT400's Connection.setSavepoint /
-// releaseSavepoint / rollback(Savepoint) wire output. Savepoints
-// require an active unit of work (autocommit off), which BeginTx
-// provides.
+// added in v0.7.12. Each issues plain SQL (`SAVEPOINT`,
+// `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT`) through the
+// connection's Exec path. Savepoints require an active unit of
+// work (autocommit off), which BeginTx provides.
 func Example_savepoint() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&isolation=cs")
 	defer db.Close()
@@ -654,9 +639,8 @@ func Example_savepoint() {
 
 // Example_setSchema swaps the default schema mid-session via plain
 // SQL (`SET SCHEMA <name>`) without re-opening the connection.
-// Mirrors JT400's Connection.setSchema. Useful for multi-tenant
-// services that pin a per-tenant schema after auth without
-// thrashing the connection pool. (v0.7.12)
+// Useful for multi-tenant services that pin a per-tenant schema
+// after auth without thrashing the connection pool. (v0.7.12)
 func Example_setSchema() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/")
 	defer db.Close()
@@ -674,11 +658,11 @@ func Example_setSchema() {
 }
 
 // Example_libraries_runtime shows mid-session AddLibraries /
-// RemoveLibraries. AddLibraries reuses JT400's NDB
-// ADD_LIBRARY_LIST wire shape (one round-trip for N entries);
+// RemoveLibraries. AddLibraries uses the host-server NDB
+// ADD_LIBRARY_LIST flow (one round-trip for N entries).
 // RemoveLibraries loops `CALL QSYS2.QCMDEXC('RMVLIBLE LIB(X)')`
-// per library, because JT400 doesn't expose a NDB REMOVE either.
-// (v0.7.12)
+// per library — the host server has no NDB REMOVE wire, so
+// mid-session shrinking goes through CL. (v0.7.12)
 func Example_libraries_runtime() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&libraries=APPLIB")
 	defer db.Close()
@@ -705,10 +689,8 @@ func Example_libraries_runtime() {
 // `sql.Named()` binding for stored-procedure CALLs. The driver
 // looks up parameter names in QSYS2.SYSPARMS on first use and
 // reorders args so each named bind lands in the right slot --
-// declaration order in the source code doesn't have to match the
+// declaration order in the Go source doesn't have to match the
 // proc's declaration order. Cached on the *Stmt for repeat calls.
-//
-// Mirrors JT400's CallableStatement.setObject(name, val).
 func Example_callWithNamedParameters() {
 	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
 	defer db.Close()
@@ -755,4 +737,102 @@ func Example_scanAll() {
 	//     if err != nil { log.Fatal(err) }
 	//     use(w)
 	// }
+}
+
+// Example_nullableScan shows the two standard Go patterns for
+// reading columns that may be NULL: a pointer destination (left
+// nil on NULL, set to the column value otherwise) and the typed
+// sql.NullXxx wrappers from database/sql. Both work without any
+// driver-specific setup.
+func Example_nullableScan() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT id, label, expires_at FROM mylib.things`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var label *string         // pointer: nil when the column is NULL
+		var expires sql.NullTime  // wrapper: .Valid is false on NULL
+		if err := rows.Scan(&id, &label, &expires); err != nil {
+			log.Fatal(err)
+		}
+
+		labelStr := "(unknown)"
+		if label != nil {
+			labelStr = *label
+		}
+		if expires.Valid {
+			fmt.Printf("%d %s expires %s\n", id, labelStr, expires.Time.Format(time.RFC3339))
+		} else {
+			fmt.Printf("%d %s no expiry\n", id, labelStr)
+		}
+	}
+}
+
+// Example_errorRetry shows the typical lock-timeout retry pattern.
+// The driver classifies SQLCODE -911 / -913 as a transient lock
+// timeout via *hostserver.Db2Error.IsLockTimeout; the caller decides
+// the backoff strategy. Other Db2 errors (constraint violations,
+// syntax errors, etc.) fall through to the surrounding error path
+// unchanged.
+func Example_errorRetry() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB&isolation=cs")
+	defer db.Close()
+
+	const maxAttempts = 4
+	backoff := 50 * time.Millisecond
+
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		_, err = db.Exec(`UPDATE mylib.balance SET v = v - ? WHERE id = ?`, 10, 1)
+		if err == nil {
+			break
+		}
+		var dbErr *hostserver.Db2Error
+		if !errors.As(err, &dbErr) || !dbErr.IsLockTimeout() {
+			log.Fatal(err) // not a lock timeout: surface to the caller
+		}
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	if err != nil {
+		log.Fatalf("update gave up after %d attempts: %v", maxAttempts, err)
+	}
+}
+
+// Example_preparedStatementReuse shows that ordinary database/sql
+// prepared-statement reuse works as expected: db.Prepare PREPAREs
+// the SQL once, and subsequent Exec calls on the returned *sql.Stmt
+// reuse the same server-side plan. Enabling the extended-dynamic
+// package cache (see Example_packageCache) further amortises the
+// PREPARE across processes / connections, but db.Prepare alone is
+// enough to avoid re-parsing on a hot loop within one connection.
+func Example_preparedStatementReuse() {
+	db, _ := sql.Open("db2i", "db2i://u:p@host/?library=MYLIB")
+	defer db.Close()
+
+	stmt, err := db.Prepare(`INSERT INTO mylib.events (kind, payload) VALUES (?, ?)`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	events := []struct {
+		kind    string
+		payload string
+	}{
+		{"login", "u=alice"},
+		{"login", "u=bob"},
+		{"logout", "u=alice"},
+	}
+	for _, e := range events {
+		if _, err := stmt.Exec(e.kind, e.payload); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
