@@ -1,13 +1,11 @@
 # CCSID support in go-db2i
 
-This page documents which IBM CCSIDs the go-db2i driver round-trips
-correctly today, which it does not, and the workarounds for the
-gaps. CCSID = Coded Character Set Identifier; an IBM-assigned ID
-for a specific byte-to-character mapping. IBM i jobs run under a
+This page documents which IBM CCSIDs the driver round-trips
+correctly, which it does not, and the workarounds for the gaps.
+CCSID = Coded Character Set Identifier; an IBM-assigned ID for a
+specific byte-to-character mapping. IBM i jobs run under a
 job-level CCSID, and CHAR/VARCHAR/CLOB columns each carry their
 own CCSID tag that tells the client how to interpret column bytes.
-
-Status as of **v0.7.21**.
 
 ## Currently supported (encode + decode)
 
@@ -22,29 +20,28 @@ Status as of **v0.7.21**.
 
 ### Note on CCSID 273
 
-The v0.7.21 driver wraps `charmap.CodePage037` for the CCSID 273
-codec slot. For the ASCII printable subset (digits, `A-Z`, `a-z`,
-space, common punctuation) this produces correct bytes because
-037 and 273 agree on 239 of 256 positions. The 17 positions that
-diverge — `§ Ä Ö Ü ä ö ü ß` plus reshuffled punctuation
-(`@ # $ ^ [ ] { } ~ \`` and a few others) — will round-trip
-**incorrectly**. A real CCSID 273 mapping table is planned for
-the next release (see "Planned" below). German shops that need
-correct Umlaut handling today should override the session CCSID
-to 1208 (UTF-8) via `?ccsid=1208` if the server supports it
-(V7R3+ in most configurations).
+The driver currently wraps `charmap.CodePage037` for the CCSID
+273 codec slot. For the ASCII printable subset (digits, `A-Z`,
+`a-z`, space, common punctuation) this produces correct bytes
+because 037 and 273 agree on 239 of 256 positions. The 17
+positions that diverge — `§ Ä Ö Ü ä ö ü ß` plus reshuffled
+punctuation (`@ # $ ^ [ ] { } ~ \`` and a few others) — will
+round-trip **incorrectly**. A real CCSID 273 mapping table is
+planned (see "Planned" below). German shops that need correct
+Umlaut handling today should override the session CCSID to 1208
+(UTF-8) via `?ccsid=1208` if the server supports it (V7R3+ in
+most configurations).
 
 ## Unsupported (silent fallback to CCSID 37)
 
-Any CCSID not in the table above is silently decoded as CCSID 37
-by the v0.7.21 driver. This means **wrong bytes without an
-error** when:
+Any CCSID not in the table above is silently decoded as CCSID 37.
+This means **wrong bytes without an error** when:
 
 - An IBM i job advertises an unsupported job CCSID and the driver
   inherits it.
 - A column carries an unsupported CCSID tag in its metadata.
 
-Common gaps reported by JT400 deployments:
+Common unsupported CCSIDs:
 
 - **European SBCS** — 277 (DK / NO), 278 (FI / SE), 280 (IT),
   284 (ES), 285 (UK), 297 (FR), 500 (International), 871 (IS).
@@ -86,53 +83,22 @@ Common gaps reported by JT400 deployments:
    encoding in your Go code via the `ebcdic` subpackage or
    another library.
 
-## Planned (target v0.7.22)
+## Planned
 
-Phase 1 of the CCSID expansion roadmap will add 18 additional
-SBCS EBCDIC CCSIDs and upgrade CCSID 273 from the 037 stand-in
-to a real CDRA-sourced mapping table. The same release will
-introduce an opt-in `?charset-strict=true` DSN knob that
-promotes unknown-CCSID fallback from silent to a hard error
-(recommended for new deployments and CI pipelines).
+Additional CCSID coverage is rolled out in three phases. The
+roadmap and per-CCSID priority lives in
+[`../internal/PLAN.md`](../internal/PLAN.md). Phase 1 adds the
+common European SBCS pages (273 real-table upgrade, 277, 278,
+280, 284, 285, 297, 500, 871, 1047, 1140-1149) and introduces an
+opt-in `?charset-strict=true` DSN knob that promotes
+unknown-CCSID fallback from silent to a hard error. Phase 2
+extends to Cyrillic / Greek / Turkish / Hebrew / Arabic plus
+legacy EBCDIC pages on a demand-driven basis; Phase 3 covers
+DBCS / mixed Japanese / Korean / Chinese encodings.
 
-CCSIDs landing in v0.7.22:
-
-- **Stdlib-backed** (no table data, comes from `golang.org/x/text`):
-  1047, 1140.
-- **Hand-tabled from IBM CDRA / ICU UCM mappings**:
-  273 (upgrade), 277, 278, 280, 284, 285, 297, 500, 871,
-  1141, 1142, 1143, 1144, 1145, 1146, 1147, 1148, 1149.
-
-Once v0.7.22 ships, those rows move into "Currently supported."
-
-## Out of scope / future
-
-The remaining JT400-reachable CCSIDs are tracked but not on a
-committed schedule:
-
-- **Phase 2 — additional SBCS, demand-driven**:
-  cyrillic 1025, Greek 875, Turkish 1026, Hebrew 424, Arabic
-  420, plus legacy EBCDIC pages 256, 290, 423, 833, 836, 838,
-  870, 880, 905, 918, 920, 1026, 1097, 1112, 1122, 1123, 1153
-  through 1158, 1160, 1164, 1166. Each is a single 256-entry
-  table with the same generator pattern as Phase 1; the holdup
-  is demand, not effort. Please open an issue with your CCSID
-  if you need one.
-
-- **Phase 3 — DBCS / mixed encodings, customer-driven**:
-  Japanese 930, 933, 939; Korean 933, 1364; Simplified Chinese
-  935, 1388; Traditional Chinese 937, 1371. These require a
-  stateful decoder (shift-out / shift-in handling at byte 0x0E /
-  0x0F) and ~30-50 KB mapping tables per CCSID. Roughly 1-2
-  weeks of engineering for the full set; not started without a
-  concrete deployment that needs it. Open an issue with your
-  CCSID, table layout, and use case if you need DBCS.
-
-- **Pure DBCS** (300, 835, 837, 1390, 1399, 4396, 16684, 28709):
-  shipped only if Phase 3 lands.
-
-- **Strict-by-default fallback**: requires a major version bump
-  per semver; reconsider for v1.0.
+If you need a specific CCSID that's not yet supported, please
+open an issue with the CCSID number, sample column shape, and
+the deployment context — that's what drives prioritization.
 
 ## How to verify CCSID handling for your workload
 
@@ -156,18 +122,19 @@ committed schedule:
    above.** If everything appears there, you're good. If either
    number is in "Unsupported," apply a workaround.
 
-4. **Smoke test with strict mode** (when v0.7.22 ships):
+4. **Smoke test against a known-good string.** Pull a single row
+   whose contents you can recognize visually:
 
    ```go
-   db, _ := sql.Open("db2i", "db2i://USER:PASS@host:8471/?charset-strict=true&library=YOURLIB")
    var s string
    err := db.QueryRow("SELECT col FROM YOURLIB.YOURTAB FETCH FIRST 1 ROW ONLY").Scan(&s)
-   // err = "unsupported CCSID NNN" means you've hit a gap.
    ```
 
-   Until then, gaps surface as visibly garbled text rather than
-   an error — a hex-dump of the returned bytes against the IBM
-   CDRA table for your actual CCSID is the most reliable diagnostic.
+   Unsupported CCSIDs surface as visibly garbled text rather than
+   an error today — a hex-dump of the returned bytes against the
+   IBM CDRA table for your actual CCSID is the most reliable
+   diagnostic. The `?charset-strict=true` DSN knob (planned) will
+   convert these silent fallbacks into typed errors.
 
 ## Related
 
