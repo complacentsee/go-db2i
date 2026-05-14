@@ -8,9 +8,8 @@ import (
 )
 
 // Savepoint issues `SAVEPOINT <name> ON ROLLBACK RETAIN CURSORS`
-// against the connection. Matches JT400's
-// AS400JDBCConnection.setSavepoint wire output (plain SQL, no
-// special wire CP).
+// against the connection. Plain SQL through the existing Exec path;
+// no special wire CP.
 //
 // IBM i auto-starts a unit of work on the first SAVEPOINT when
 // autocommit is on, but the savepoint then scopes nothing useful --
@@ -24,22 +23,19 @@ import (
 //	    return driverConn.(*Conn).Savepoint(ctx, "SP1")
 //	})
 //
-// Name rules (mirrors IBM i SQL identifier syntax + JT400 byte
-// shape): 1-128 chars, must start with a letter, remaining chars
-// are letters / digits / underscore. The server folds names to
-// uppercase, matching JT400's unquoted emission.
+// Name rules (IBM i SQL identifier syntax): 1-128 chars, must
+// start with a letter, remaining chars are letters / digits /
+// underscore. The server folds names to uppercase.
 func (c *Conn) Savepoint(ctx context.Context, name string) error {
 	return c.runSavepointSQL(ctx, "SAVEPOINT", name, " ON ROLLBACK RETAIN CURSORS")
 }
 
-// ReleaseSavepoint issues `RELEASE SAVEPOINT <name>`. Matches
-// JT400's AS400JDBCConnection.releaseSavepoint output.
+// ReleaseSavepoint issues `RELEASE SAVEPOINT <name>`.
 func (c *Conn) ReleaseSavepoint(ctx context.Context, name string) error {
 	return c.runSavepointSQL(ctx, "RELEASE SAVEPOINT", name, "")
 }
 
 // RollbackToSavepoint issues `ROLLBACK TO SAVEPOINT <name>`.
-// Matches JT400's AS400JDBCConnection.rollback(Savepoint) output.
 func (c *Conn) RollbackToSavepoint(ctx context.Context, name string) error {
 	return c.runSavepointSQL(ctx, "ROLLBACK TO SAVEPOINT", name, "")
 }

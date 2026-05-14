@@ -12,10 +12,8 @@ import (
 
 // SetSchema issues `SET SCHEMA <name>` against the connection,
 // changing the default schema for unqualified table / view /
-// procedure references on this connection.
-//
-// Matches JT400's AS400JDBCConnection.setSchema wire output --
-// plain SQL through the existing Exec path, no special wire CP.
+// procedure references on this connection. Implemented as plain
+// SQL through the existing Exec path; no special wire CP.
 //
 // The name is sanitised against the IBM-i library-identifier rules
 // (1-10 chars from [A-Z0-9_#@$]) before assembly; the server folds
