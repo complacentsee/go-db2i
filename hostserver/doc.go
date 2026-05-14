@@ -139,9 +139,9 @@
 //
 // Wire-format references for contributors:
 //
-//   - docs/lob-bind-wire-protocol.md  LOB binds (CP 0x381D, 0x381E,
-//                                     0x381F, 0x3813, WRITE_LOB_DATA)
-//   - docs/lob-known-gaps.md          LOB SELECT current behavior
-//   - docs/configuration.md           Driver DSN reference
-//   - docs/PLAN.md                    Roadmap and design notes
+//   - internal/docs/lob-bind-wire-protocol.md  LOB binds (CP 0x381D, 0x381E,
+//                                              0x381F, 0x3813, WRITE_LOB_DATA)
+//   - docs/lob-known-gaps.md                   LOB SELECT current behavior
+//   - docs/configuration.md                    Driver DSN reference
+//   - internal/PLAN.md                         Roadmap and design notes
 package hostserver

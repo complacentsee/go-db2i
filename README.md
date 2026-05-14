@@ -173,7 +173,7 @@ The driver covers the `database/sql` surface of JT400's JDBC driver
 to IBM i through `db.Query` / `db.Exec` / `tx.Begin` / stored-procedure
 calls today, the migration is a DSN rewrite.
 
-See [`docs/migrating-from-jt400.md`](./docs/migrating-from-jt400.md) for
+See [`MIGRATING.md`](./MIGRATING.md) for
 the JDBC-property-to-DSN-key mapping, recipes, and a list of JT400
 features that are out of scope (non-JDBC JTOpen services like
 `CommandCall` / `IFSFile` / `DataQueue`, scrollable cursors, XA,

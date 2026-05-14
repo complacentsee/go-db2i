@@ -108,7 +108,7 @@ func (r *DBReply) findSuperExtendedParameterMarkerFormat() ([]ParameterMarkerFie
 // LOBLocator (relative offset 33; the server-allocated handle that
 // WRITE_LOB_DATA references), and LOBMaxSize (relative offset 42).
 //
-// Documented in detail in docs/lob-bind-wire-protocol.md.
+// Documented in detail in internal/docs/lob-bind-wire-protocol.md.
 func parseSuperExtendedParameterMarkerFormat(data []byte) ([]ParameterMarkerField, error) {
 	if len(data) < 16 {
 		return nil, fmt.Errorf("hostserver: super-extended parameter marker format too short: %d bytes", len(data))

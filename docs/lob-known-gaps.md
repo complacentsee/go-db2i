@@ -1,6 +1,6 @@
 # LOB support — known gaps
 
-Companion to `docs/lob-bind-wire-protocol.md`. Captures what the
+Companion to `../internal/docs/lob-bind-wire-protocol.md`. Captures what the
 LOB layer does **not** yet do. Every gap below is something a real
 caller could trip over; entries that are merely "we picked a
 different default than JT400" go into the wire-protocol doc, not
@@ -99,7 +99,7 @@ wanting N-row LOB batches use `db.Prepare` + N `Stmt.Exec` calls,
 or multi-tuple `INSERT VALUES (?, ?), (?, ?), ...` (covered by
 `TestLOBMultiRow`).
 
-**Wire-protocol ref.** `docs/lob-bind-wire-protocol.md` "Multi-row
+**Wire-protocol ref.** `../internal/docs/lob-bind-wire-protocol.md` "Multi-row
 batched INSERT — settled" has the full byte-level walkthrough.
 
 ## 3. JT400 `lob threshold` inline-small-LOB optimisation (CLOSED, M7-5)

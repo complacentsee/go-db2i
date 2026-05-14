@@ -573,7 +573,7 @@ citations.
     Wire-validated end-to-end on PUB400 V7R5M0: 8 KiB BLOB
     byte-equal vs JT400 fixture, 1 MiB streamed BLOB across 32
     chunks, ~8 KiB CLOB EBCDIC round-trip via `ebcdic.CCSID273`.
-    Wire-protocol reference at `docs/lob-bind-wire-protocol.md`.
+    Wire-protocol reference at `internal/docs/lob-bind-wire-protocol.md`.
   - **LOB inline (M7-5 + bug #14)** — DSN `?lob-threshold=N`
     drives CP `0x3822` `LOBFieldThreshold` in
     `SET_SQL_ATTRIBUTES`. Result-data decoder learnt the inline
@@ -659,7 +659,7 @@ Track A (foundations):
   exporter; live-validated against IBM Cloud V7R6M0 (span tree
   matches conventions byte-for-byte).
 - **M8-5 JTOpen DSN migration guide** ✅ 2026-05-11 —
-  `docs/migrating-from-jt400.md` enumerates every JTOpen JDBC URL
+  `MIGRATING.md` enumerates every JTOpen JDBC URL
   property (~70 distinct keys covered, cross-referenced against
   JT400's [JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java)
   enumeration). For each, the doc shows the go-db2i DSN equivalent
@@ -841,7 +841,7 @@ CP `0x381F`. The "deferred" item is closed.
 ### M11 — JT400 parity cleanup (complete 2026-05-12)
 
 Closes the four "⏭️ Deferred" DSN gaps in
-`docs/migrating-from-jt400.md` plus the long-tracked bug #15.
+`MIGRATING.md` plus the long-tracked bug #15.
 Each sub-item is a small, bounded passthrough; cumulative effect
 is that every documented JT400 JDBC URL property is now either
 supported, accepted with documented limits, or explicitly out of
@@ -881,7 +881,7 @@ V7R6M0 (2026-05-12).
   `TestTimeFormatUSA` confirms a TIME literal renders as
   `13:45:00` default vs `01:45 PM` under `?time-format=usa`.
 - **M11-5** ✅ — Documentation refresh. Moved the four ⏭️ rows in
-  `docs/migrating-from-jt400.md` to ✅ (DSN-key count 21 → 27).
+  `MIGRATING.md` to ✅ (DSN-key count 21 → 27).
   Added entries to `docs/configuration.md`. CHANGELOG entry per
   sub-item under `[0.7.11]`. README banner bumped to v0.7.11.
 
@@ -937,7 +937,7 @@ v0.7.11 defaults.
   driver (no live LPAR required).
 - **M12-5** ✅ — Documentation refresh. `docs/configuration.md`
   table extended with six new driver-typed methods + `block-size`
-  DSN row. `docs/migrating-from-jt400.md` 27 → 28 DSN keys plus
+  DSN row. `MIGRATING.md` 27 → 28 DSN keys plus
   new driver-typed-methods + convenience sections. CHANGELOG
   entry per sub-item under `[0.7.12]`. README banner bumped to
   v0.7.12.
@@ -962,7 +962,7 @@ Ship `docs/ccsid-support.md` documenting v0.7.21's supported set
 fallback behaviour (silent decode as CCSID 37), and three
 workarounds: `?ccsid=` override, server-side
 `CAST AS VARGRAPHIC CCSID 13488`, and `FOR BIT DATA`. Links from
-`docs/configuration.md` and `docs/migrating-from-jt400.md`.
+`docs/configuration.md` and `MIGRATING.md`.
 Single commit on `origin/main`; no code changes.
 
 ### Phase 1 — SBCS European EBCDIC (planned, target v0.7.22)
@@ -1005,7 +1005,7 @@ identical to Phase 1; held back by demand, not complexity.
 mapping is straightforward (256-entry CDRA-authoritative
 tables). JT400's full bidi stack — string-type model,
 shaping, numeric ordering, symmetric swapping — is
-intentionally out of scope per `docs/migrating-from-jt400.md`.
+intentionally out of scope per `MIGRATING.md`.
 We'd ship Hebrew / Arabic codecs as "logical-order Unicode
 codepoints; visual reordering and Arabic shaping are the
 caller's problem." `golang.org/x/text/unicode/bidi`
@@ -1050,7 +1050,7 @@ tests against staged columns, not CDRA alone.
 - **Full JT400 bidi parity** — see Phase 2 bidi caveat.
 - **JT400 `translate boolean` / `translate hex` /
   `translate binary`** — already declared out of scope in
-  `docs/migrating-from-jt400.md`.
+  `MIGRATING.md`.
 
 ## Working rhythm
 

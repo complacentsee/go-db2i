@@ -467,7 +467,7 @@ V7R6M0 and V7R5M0 on 2026-05-11.
   reference including all package-cache keys.
 - [`docs/performance.md`](./performance.md) — measured round-trip
   savings and when to opt out.
-- [`docs/migrating-from-jt400.md`](./migrating-from-jt400.md) —
+- [`MIGRATING.md`](../MIGRATING.md) —
   JT400 `package` / `extended dynamic` JDBC property mapping.
 - godoc `Example_packageCache`, `Example_packageCacheObservability`,
   `Example_packageCacheCriteria` in `driver/example_test.go`.

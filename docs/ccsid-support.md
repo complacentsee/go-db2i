@@ -172,7 +172,7 @@ committed schedule:
 ## Related
 
 - [`docs/configuration.md`](./configuration.md) — `?ccsid=` DSN knob.
-- [`docs/migrating-from-jt400.md`](./migrating-from-jt400.md) —
+- [`MIGRATING.md`](../MIGRATING.md) —
   JT400 ↔ go-db2i CCSID feature parity table.
 - [`docs/lob-known-gaps.md`](./lob-known-gaps.md) — DBCLOB
   encoding (CCSID 13488 vs 1200) details.
