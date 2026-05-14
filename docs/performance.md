@@ -81,7 +81,7 @@ stream wins on memory + lets pipelined consumers start earlier.
 `?lob-threshold=N` is the byte cutoff the server uses to decide whether
 to inline LOB column data in the row reply (cheaper round trip) or
 allocate a server-side locator that the driver fetches via
-`RETRIEVE_LOB_DATA`. Default 32768 (matches JT400 / native JDBC).
+`RETRIEVE_LOB_DATA`. Default 32768.
 
 | Threshold | Effect | Use case |
 |---|---|---|
@@ -91,8 +91,7 @@ allocate a server-side locator that the driver fetches via
 | 1 | Forces locator path for every LOB | Debugging the inline path vs locator path independently. The `?lob-threshold=1` setting is what the `TestCCSID1208RoundTrip/CLOB small inline` subtest uses to exercise the locator code path with a small payload. |
 
 **Recommendation.** Leave at default unless you've measured a specific
-LOB-shape mismatch. The server caps the value at 15,728,640 bytes
-(JT400 documented limit).
+LOB-shape mismatch. The server caps the value at 15,728,640 bytes.
 
 ## `?ccsid=N` vs the auto-pick default
 
@@ -273,12 +272,10 @@ on each cache-hit dispatch.
 
 A driver-typed extension on `*db2i.Conn`. Packs N parameter-marker
 sets into a single CP `0x381F` multi-row block on one EXECUTE
-request — the IBM i "block insert" wire shape JT400 uses for
-non-LOB IUD + MERGE batches
-([`AS400JDBCPreparedStatementImpl.java:944-948`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/AS400JDBCPreparedStatementImpl.java)).
-One round-trip per 32k-row chunk vs N per row for a regular
-`db.Exec` loop. Auto-splits at `MaxBlockedInputRows = 32000`
-(matches JT400's `maximumBlockedInputRows` cap).
+request — the IBM i "block insert" wire shape for non-LOB IUD +
+MERGE batches. One round-trip per 32k-row chunk vs N per row for
+a regular `db.Exec` loop. Auto-splits at `MaxBlockedInputRows =
+32000`.
 
 Wire savings:
 
@@ -306,10 +303,9 @@ typical pattern is `MERGE INTO target USING (VALUES (?, ?))` with
 each batch row supplying the source tuple.
 
 Limitations:
-- No LOB parameters. JT400 falls back to per-row EXECUTE for LOB
-  batches (locator-allocate doesn't compose with the multi-row
-  CP `0x381F` shape); `BatchExec` rejects `*db2i.LOBValue` rows
-  with a pointer at the per-row path.
+- No LOB parameters. The locator-allocate flow doesn't compose
+  with the multi-row CP `0x381F` shape, so `BatchExec` rejects
+  `*db2i.LOBValue` rows with a pointer at the per-row path.
 - No `sql.Out` destinations. IUD / MERGE have no OUT params on
   the wire.
 - Every row in a single call must have the same Go types per
