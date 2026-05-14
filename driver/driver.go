@@ -824,9 +824,8 @@ func parseDSN(dsn string) (*Config, error) {
 		// downstream caller sees normalised bytes. Validate the
 		// charset before anything in the driver tries to hand it
 		// off to BuildPackageName. Max 10 chars matches the IBM i
-		// object-name limit JT400 accepts -- the encoder later
-		// truncates to 6 chars before the 4-char options suffix is
-		// appended, byte-equal to JT400 (JDPackageManager.java:466).
+		// object-name limit; the encoder later truncates to 6
+		// chars before the 4-char options-suffix is appended.
 		canon := canonPackageIdent(v)
 		if err := validatePackageIdent(canon, 10); err != nil {
 			return nil, fmt.Errorf("invalid package %q: %w", v, err)

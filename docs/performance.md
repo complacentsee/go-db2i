@@ -142,8 +142,8 @@ For high-repetition LOB content the wire savings are dramatic:
 | 1 MiB random bytes | 1,048,576 bytes | ~1,049,000 bytes | ~1× (server skips compression on incompressible data) |
 | 8 KiB English text CLOB | 8,192 bytes | ~6,300 bytes | ~1.3× |
 
-(Numbers from the M7-7 `stress-test/rlemeasure` tool against IBM Cloud
-V7R6M0 and from the `TestDecompressDataStreamRLE` synthetic cases.)
+(Numbers from `stress-test/rlemeasure` against IBM Cloud V7R6M0
+and from the `TestDecompressDataStreamRLE` synthetic cases.)
 
 The server-side compression decision is automatic — there's no
 "force compression" or "force no-compression" knob. The driver just
@@ -334,7 +334,7 @@ fetch), buffer in your loop, not in the driver.
 
 ## When DEBUG logging hurts
 
-The slog integration (M8-3) emits one DEBUG line per `Stmt.Exec` /
+The slog integration emits one DEBUG line per `Stmt.Exec` /
 `Stmt.Query` / `LOBReader.Read` round trip. For high-throughput
 read workloads this adds 1-2 µs per call regardless of handler (the
 `slog.LevelDebug` filter check fires even when the handler discards).
@@ -348,7 +348,7 @@ so the per-call DEBUG attrs don't allocate.
 
 ## When OpenTelemetry tracing hurts
 
-The OTel integration (M8-4) starts one span per `ExecContext` /
+The OTel integration starts one span per `ExecContext` /
 `QueryContext`. The noop-tracer fallback (nil `Config.Tracer`) costs
 ~50 ns per call; a real SDK-backed tracer typically lands at 2-5 µs
 per span (most of which is the SDK's span allocation, not driver
