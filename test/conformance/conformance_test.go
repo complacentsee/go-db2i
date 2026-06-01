@@ -656,6 +656,101 @@ func TestGraphicScalarColumns(t *testing.T) {
 	})
 }
 
+// TestStoredProcedureGraphicOUT is the live evidence for issue #5: the
+// graphic-PARAMETER bind/encode path. It exercises the symmetric
+// counterpart to the issue-#3 read fix -- a stored procedure with
+// VARGRAPHIC OUT / INOUT parameters declared CCSID 1200, where the
+// server describes the marker as the real graphic SQL type (465) rather
+// than VARCHAR 1208. Before the fix, encodeRowData had no branch for
+// SQL type 464/465/468/469/472/473 and the CALL failed with
+// ErrUnsupportedCachedParamType ("SQL type 465: ... no encoder branch").
+//
+// The procs live in schema() (DB2I_SCHEMA, default GOTEST) so the test
+// is self-contained. They are dropped on entry for a clean slate. The
+// whole test skips if CREATE fails -- profiles without a DBCS-capable
+// NLSS can't host VARGRAPHIC CCSID 1200 objects, the same skip the
+// issue-#3 read test (TestGraphicScalarColumns) uses.
+//
+// Body `SET POUT = PIN CONCAT UX'0021'` appends U+0021 ('!') so the OUT
+// value is observably derived from the IN bind (proving the IN side
+// transited the wire, not just the OUT slot). The surrogate-pair
+// subtest binds U+1D11E (treble clef, D834 DD1E) to confirm a non-BMP
+// rune round-trips through encodeUTF16BE intact.
+func TestStoredProcedureGraphicOUT(t *testing.T) {
+	db := openDB(t)
+
+	const (
+		outProc = "GBINDPROC"    // IN + OUT
+		ioProc  = "GBINDPROC_IO" // INOUT
+	)
+	// DROP on entry -- DB2 for i has no DROP PROCEDURE IF EXISTS, so
+	// ignore the "not found" error from a clean target.
+	_, _ = db.Exec(fmt.Sprintf("DROP PROCEDURE %s.%s", schema(), outProc))
+	_, _ = db.Exec(fmt.Sprintf("DROP PROCEDURE %s.%s", schema(), ioProc))
+
+	// CREATE the IN+OUT proc. A DBCS-incapable profile fails here;
+	// skip the whole test rather than fail it (matches the read-path
+	// test's CREATE TABLE GRAPHIC skip).
+	if _, err := db.Exec(fmt.Sprintf(
+		"CREATE OR REPLACE PROCEDURE %s.%s "+
+			"(IN PIN VARGRAPHIC(20) CCSID 1200, OUT POUT VARGRAPHIC(20) CCSID 1200) "+
+			"LANGUAGE SQL BEGIN SET POUT = PIN CONCAT UX'0021'; END",
+		schema(), outProc)); err != nil {
+		t.Skipf("CREATE PROCEDURE VARGRAPHIC failed (probably no DBCS NLSS on this profile): %v", err)
+	}
+	defer db.Exec(fmt.Sprintf("DROP PROCEDURE %s.%s", schema(), outProc))
+
+	if _, err := db.Exec(fmt.Sprintf(
+		"CREATE OR REPLACE PROCEDURE %s.%s "+
+			"(INOUT P VARGRAPHIC(20) CCSID 1200) "+
+			"LANGUAGE SQL BEGIN SET P = P CONCAT UX'0021'; END",
+		schema(), ioProc)); err != nil {
+		t.Skipf("CREATE INOUT PROCEDURE VARGRAPHIC failed: %v", err)
+	}
+	defer db.Exec(fmt.Sprintf("DROP PROCEDURE %s.%s", schema(), ioProc))
+
+	// Primary reproducer from the issue: bind a string IN + sql.Out
+	// OUT, expect "Hi" -> "Hi!".
+	t.Run("IN+OUT round-trip", func(t *testing.T) {
+		var out string
+		if _, err := db.Exec(fmt.Sprintf("CALL %s.%s(?, ?)", schema(), outProc),
+			"Hi", sql.Out{Dest: &out}); err != nil {
+			t.Fatalf("CALL %s: %v", outProc, err)
+		}
+		if out != "Hi!" {
+			t.Errorf("OUT VARGRAPHIC = %q, want %q", out, "Hi!")
+		}
+	})
+
+	// Non-BMP: U+1D11E is a surrogate pair on the wire (two UTF-16 code
+	// units). Confirms encodeUTF16BE preserves it through the IN bind
+	// and the read path reconstructs it on the OUT return.
+	t.Run("surrogate pair round-trip", func(t *testing.T) {
+		var out string
+		if _, err := db.Exec(fmt.Sprintf("CALL %s.%s(?, ?)", schema(), outProc),
+			"A\U0001D11E", sql.Out{Dest: &out}); err != nil {
+			t.Fatalf("CALL %s (surrogate): %v", outProc, err)
+		}
+		if want := "A\U0001D11E!"; out != want {
+			t.Errorf("OUT VARGRAPHIC = %q, want %q (surrogate pair)", out, want)
+		}
+	})
+
+	// INOUT: the IN side of the bind value transits through the encode
+	// path (unlike OUT-only, whose input is an ignored empty string),
+	// so this is the stronger encode-path exercise.
+	t.Run("INOUT round-trip", func(t *testing.T) {
+		io := "Yo"
+		if _, err := db.Exec(fmt.Sprintf("CALL %s.%s(?)", schema(), ioProc),
+			sql.Out{Dest: &io, In: true}); err != nil {
+			t.Fatalf("CALL %s: %v", ioProc, err)
+		}
+		if io != "Yo!" {
+			t.Errorf("INOUT VARGRAPHIC = %q, want %q", io, "Yo!")
+		}
+	})
+}
+
 // TestLOBMultiRow exercises multi-tuple INSERT (`VALUES (?,?), (?,?)`).
 // Each parameter marker position gets its own server-allocated
 // locator handle in CP 0x3813 of the PREPARE_DESCRIBE reply, so a
@@ -1957,7 +2052,7 @@ func TestStoredProcedureINOnly(t *testing.T) {
 
 	// Clear any prior debris -- INS_AUDIT is keyed on CODE+QTY+TS for
 	// our purposes here, no PK to enforce uniqueness.
-	if _, err := db.Exec("DELETE FROM " + procLibrary + ".INS_AUDIT WHERE CODE = ?", code); err != nil {
+	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
 		t.Fatalf("clear INS_AUDIT: %v", err)
 	}
 
@@ -2324,7 +2419,7 @@ func TestSystemNaming(t *testing.T) {
 	slashFQN := schema() + "/" + tbl
 	var id int
 	var v string
-	if err := sysDB.QueryRow("SELECT ID, V FROM " + slashFQN + " WHERE ID = 1").Scan(&id, &v); err != nil {
+	if err := sysDB.QueryRow("SELECT ID, V FROM "+slashFQN+" WHERE ID = 1").Scan(&id, &v); err != nil {
 		t.Fatalf("SELECT %s under naming=system: %v", slashFQN, err)
 	}
 	if id != 1 || strings.TrimRight(v, " ") != "hello" {
@@ -2845,6 +2940,7 @@ func TestFetchFirstNExact(t *testing.T) {
 		})
 	}
 }
+
 // TestUserTableLargeScanReturnsAllRows pins the v0.7.14 bug-#2 fix.
 // Pre-fix, a fresh user-table streaming SELECT of 10000 INTEGER +
 // VARCHAR + DECIMAL rows on V7R6M0 returned only 8625 rows -- the
@@ -2888,7 +2984,7 @@ func TestUserTableLargeScanReturnsAllRows(t *testing.T) {
 	ins.Close()
 
 	var c int
-	if err := db.QueryRow("SELECT COUNT(*) FROM "+tbl).Scan(&c); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM " + tbl).Scan(&c); err != nil {
 		t.Fatalf("COUNT: %v", err)
 	}
 
