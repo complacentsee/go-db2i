@@ -233,22 +233,46 @@ you want to minimise the `*PGM` size.
 
 `INSERT INTO t (id, payload) VALUES (?, ?)` where `payload` is a
 `BLOB` / `CLOB` / `DBCLOB` column DOES file into the `*PGM`
-server-side (verified on V7R6M0 via `TestLOBBind_FilingProbe`).
-What it does NOT do — yet — is benefit from the client-side
-cache-hit fast path. The `*PGM`-stored parameter shape uses the
-raw-LOB SQL types (404/405/408/409) while our cache-hit encoder
-only has branches for the live-PREPARE locator types (960/961/
-964/965/968/969). When the cache-hit dispatch fires for a
-LOB-bind statement, it hits `ErrUnsupportedCachedParamType` and
-v0.7.5 falls through to plain `PREPARE_DESCRIBE` — same wire shape
-as the original cache-miss path, no data corruption, just no
-round-trip saving for that call.
+server-side (verified on PUB400 V7R5M0). What it does **not** do —
+and, by design, **cannot** — is benefit from the client-side
+cache-hit fast path. A LOB-bind statement always falls through to
+plain `PREPARE_DESCRIBE`: same wire shape as the cache-miss path,
+no data corruption, just no round-trip saving for that call.
 
-Practical impact: a LOB-bind INSERT loop run on a single
-connection pays the regular round-trip cost on every call,
-identical to the pre-v0.7.1 behaviour for the same SQL. Non-LOB
-parameterised statements still get the full cache-hit speedup.
-Cache-hit support for LOB binds is a v0.7.6 candidate.
+**Why this is a hard limit, not a missing feature.** The whole
+point of the cache-hit path is to *skip* `PREPARE_DESCRIBE` and
+save one round-trip. But a LOB bind needs a **server-allocated**
+locator handle, and that handle is allocated *by* `PREPARE_DESCRIBE`
+and returned in its CP `0x3813` reply (see
+[`internal/docs/lob-bind-wire-protocol.md`](../internal/docs/lob-bind-wire-protocol.md)).
+There is no way to obtain a valid locator without spending a
+round-trip:
+
+- A client-synthesised handle (e.g. the position-derived `0x100`,
+  `0x200` the server hands out on the regular path) is rejected by
+  `WRITE_LOB_DATA` with host-server return code **−814**
+  (errorClass 2). Confirmed live on V7R5M0 with the
+  `WRITE_LOB_DATA` frame placed both *before* and *after*
+  `CHANGE_DESCRIPTOR`.
+- JT400 itself always issues a `PREPARE_DESCRIBE` ahead of a LOB
+  bind, even when filing into the package, and even spends an
+  extra `RETRIEVE_LOB_DATA` round-trip to *re-allocate* locators
+  between rows of a LOB-column batch.
+
+So any scheme that made the cache-hit path work for LOB binds — a
+second `PREPARE_DESCRIBE`, a `RETRIEVE_LOB_DATA` re-allocation, a
+dedicated allocate request — would re-introduce exactly the
+round-trip the fast path is trying to eliminate. **The
+fall-through is the optimal behaviour, not a gap.**
+
+Mechanically, the cache-hit encoder has no branch for the
+raw-LOB SQL types (404/405/408/409/412/413) the `*PGM` stores, so
+the dispatch raises `ErrUnsupportedCachedParamType` and the driver
+re-routes through `PREPARE_DESCRIBE`. Practical impact: a LOB-bind
+INSERT loop pays the regular round-trip cost on every call;
+non-LOB parameterised statements still get the full cache-hit
+speedup. Pinned by `TestLOBBind_CacheMissByDesign` in
+`test/conformance/cache_hit_test.go`.
 
 ## Observability
 
