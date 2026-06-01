@@ -112,6 +112,20 @@
 // pays one ~32 KB-buffer round-trip per batch, not one per row;
 // memory stays bounded.
 //
+// # Parameter binding
+//
+// Go values bind to a fixed set of wire types and the server casts
+// them to the target column: int64 -> BIGINT, float64 -> DOUBLE,
+// bool -> SMALLINT, string -> VARCHAR, []byte -> VARCHAR FOR BIT DATA,
+// time.Time -> TIMESTAMP, nil -> SQL NULL.
+//
+// High-precision decimals: bind DECIMAL / NUMERIC / DECFLOAT values as
+// a string, not a float64. A float64 routes through DOUBLE and is
+// capped at IEEE-754 double precision (~15-17 significant digits), so a
+// value like a 30-digit DECFLOAT(34) silently loses its trailing
+// digits. A string bind ships as VARCHAR and the server casts the text
+// straight to the decimal column, preserving full precision.
+//
 // # Server compatibility
 //
 // V7R3+ servers accept CCSID 1208 (UTF-8) string binds, preserving
