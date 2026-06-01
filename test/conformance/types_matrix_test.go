@@ -452,6 +452,26 @@ func TestTypeMatrixDecimal(t *testing.T) {
 		})
 	})
 
+	// DECFLOAT34_high_precision pins the recommended lossless path for
+	// high-precision decimals (issue #12). A value with far more
+	// significant digits than an IEEE-754 float64 can represent
+	// (float64 caps at ~15-17) round-trips exactly when bound as a
+	// *string*: it ships as VARCHAR and the server casts the text
+	// straight to DECFLOAT(34). The same number bound as a float64
+	// would route through DOUBLE and be silently truncated -- e.g.
+	// float64(pi) keeps only "3.141592653589793". String binds are the
+	// only lossless path into DECIMAL(p,s) / DECFLOAT columns.
+	t.Run("DECFLOAT34_high_precision", func(t *testing.T) {
+		tbl := mkMatrixTable(t, db, "dhp", "DECFLOAT(34)", false)
+		// pi to 30 significant figures -- ~13 digits past float64's
+		// limit, comfortably within DECFLOAT(34)'s 34-digit coefficient.
+		const piHP = "3.14159265358979323846264338327"
+		runScalarCases(t, db, tbl, []scalarCase{
+			{"pi30", piHP, wantDec(piHP)},
+			{"null", nil, wantNull()},
+		})
+	})
+
 	// DECFLOAT special values can't be reached through a VARCHAR bind
 	// cast, so they go in as SQL literals. The driver decodes them to
 	// the canonical "Infinity"/"-Infinity"/"NaN" spellings (signaling

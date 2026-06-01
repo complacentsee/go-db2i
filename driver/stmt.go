@@ -801,6 +801,13 @@ func (s *Stmt) logQuery(op string, paramCount int, start time.Time, err error) {
 //	time.Time    -> TIMESTAMP (393)         26 bytes ISO format
 //	nil          -> INTEGER nullable (497)  flagged via indicator
 //
+// Decimal precision: the bind path never emits a native DECIMAL /
+// NUMERIC / DECFLOAT wire type. A float64 bound into such a column
+// goes through DOUBLE and is capped at IEEE-754 double precision
+// (~15-17 significant digits); bind the value as a string to preserve
+// full precision (the server casts the VARCHAR straight to the decimal
+// column). See the float64 case below and issue #12.
+//
 // stringCCSID is supplied by the caller (typically the Conn's
 // preferredStringCCSID()): CCSID 1208 (UTF-8) on V7R3+ servers --
 // preserves the full Unicode repertoire by writing the UTF-8 bytes
@@ -872,6 +879,17 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			shapes[i] = hostserver.PreparedParam{SQLType: 493, FieldLength: 8}
 			values[i] = v
 		case float64:
+			// float64 binds as DOUBLE and the server casts it to the
+			// column type. Binding into a high-precision DECIMAL(p,s) or
+			// DECFLOAT(16/34) column therefore routes through IEEE-754
+			// double (~15-17 significant digits) and silently loses
+			// precision beyond that -- the loss is inherent to float64,
+			// not to the cast. To preserve full decimal precision, bind
+			// the value as a *string*: it ships as VARCHAR (see the
+			// string case below) and the server casts the text straight
+			// to the decimal column without a binary-float round-trip.
+			// See issue #12 and TestTypeMatrixDecimal's high-precision
+			// case.
 			shapes[i] = hostserver.PreparedParam{SQLType: 481, FieldLength: 8}
 			values[i] = v
 		case bool:
