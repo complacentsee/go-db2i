@@ -1232,7 +1232,7 @@ func TestCacheHit_CriteriaExtended_OutCallDispatches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	const callSQL = "CALL " + procLibrary + ".P_LOOKUP(?, ?, ?)"
+	callSQL := "CALL " + procLibrary + ".P_LOOKUP(?, ?, ?)"
 
 	// 1. Warm-up filing on a pinned conn so all PREPAREs land on
 	//    one QZDASOINIT job and the 3-PREPARE threshold crosses.
