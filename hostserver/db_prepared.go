@@ -446,11 +446,88 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
 			// Remaining bytes left zero (server reads SL).
 			dataOff += int(p.FieldLength)
+		case 464, 465, // VARGRAPHIC      (NN, nullable)
+			472, 473: // LONG VARGRAPHIC (NN, nullable)
+			// Variable-length graphic wire layout mirrors VARCHAR but
+			// with 2-byte code units: a 2-byte BE SL = GRAPHIC CHARACTER
+			// count (= payload bytes / 2), then the payload, padded out
+			// to FieldLength. The SL counting characters rather than
+			// bytes is the same asymmetry the read mirror documents
+			// (db_result_data.go cases 464/465 + 472/473): a
+			// VARGRAPHIC(10) 'ABC' ships `00 03 | 00 41 00 42 00 43`.
+			// CCSID picks the payload codec (see encodeGraphicPayload).
+			// An OUT-only slot arrives with an empty string here, so
+			// SL=0 and the whole field is left as the zero-init pad.
+			payload, err := encodeGraphicPayload(p.CCSID, v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			maxBytes := int(p.FieldLength) - 2
+			if len(payload) > maxBytes {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: vargraphic value too long (%d bytes, max %d)", i, len(payload), maxBytes)
+			}
+			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)/2))
+			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
+			// Remaining bytes left zero (server reads SL).
+			dataOff += int(p.FieldLength)
+		case 468, 469: // GRAPHIC (fixed-length) -- NN, nullable
+			// Fixed-length graphic: NO SL prefix. Encode the payload,
+			// then right-pad to exactly FieldLength with the graphic
+			// space U+0020 (0x00 0x20) -- the same padding the read
+			// mirror (db_result_data.go case 468/469) preserves, e.g.
+			// GRAPHIC(5) 'ABC' ships `00 41 00 42 00 43 00 20 00 20`.
+			// FOR BIT DATA (CCSID 65535) has no notion of a graphic
+			// space, so its slack is left as the 0x00 zero-init pad.
+			payload, err := encodeGraphicPayload(p.CCSID, v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			if len(payload) > int(p.FieldLength) {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: graphic value too long (%d bytes, max %d)", i, len(payload), p.FieldLength)
+			}
+			copy(buf[dataOff:dataOff+len(payload)], payload)
+			if p.CCSID != ccsidBinary {
+				end := dataOff + int(p.FieldLength)
+				for off := dataOff + len(payload); off+2 <= end; off += 2 {
+					buf[off] = 0x00
+					buf[off+1] = 0x20
+				}
+			}
+			dataOff += int(p.FieldLength)
 		default:
 			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
 		}
 	}
 	return nil
+}
+
+// encodeGraphicPayload turns a bound value into the raw payload bytes
+// for a graphic (DBCS / Unicode) parameter, picking the codec from the
+// column CCSID. Shared by the VARGRAPHIC / LONG VARGRAPHIC (variable)
+// and GRAPHIC (fixed) arms of encodeRowData; the caller owns the SL
+// prefix or fixed-width padding around the bytes this returns.
+//
+//	65535  FOR BIT DATA   -- raw []byte passthrough (toBytes)
+//	13488  strict UCS-2 BE -- non-BMP runes substituted with U+003F
+//	else   UTF-16 BE       -- CCSID 1200; surrogate pairs preserved
+//
+// The string codecs always return an even byte count (one or two
+// 2-byte code units per rune), so the VARGRAPHIC caller's SL = len/2
+// is exact. FOR BIT DATA payloads are returned verbatim and may be
+// odd; callers binding bit data into a graphic slot own that risk,
+// matching toBytes' behaviour for VARCHAR FOR BIT DATA.
+func encodeGraphicPayload(ccsid uint16, v any) ([]byte, error) {
+	if ccsid == ccsidBinary {
+		return toBytes(v)
+	}
+	s, err := toString(v)
+	if err != nil {
+		return nil, err
+	}
+	if ccsid == 13488 {
+		return encodeUCS2BE(s), nil
+	}
+	return encodeUTF16BE(s), nil
 }
 
 // ChangeDescriptorRequest builds the 0x1E00 frame body that uploads
@@ -779,12 +856,12 @@ func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte,
 // PREPARE_DESCRIBE + CHANGE_DESCRIPTOR. Steps here:
 //
 //  1. EXECUTE (0x1805)        -- runs the proc body; cursors WITH
-//                                 RETURN open server-side. EXECUTE
-//                                 reply's SQLCA SQLERRD(2) carries
-//                                 the dynamic-result-set count.
+//     RETURN open server-side. EXECUTE
+//     reply's SQLCA SQLERRD(2) carries
+//     the dynamic-result-set count.
 //  2. OPEN_DESCRIBE (0x1804) -- attaches the client cursor to the
-//                                 first pre-opened proc cursor and
-//                                 returns its column descriptors.
+//     first pre-opened proc cursor and
+//     returns its column descriptors.
 //  3. FETCH (0x180B)         -- pulls the first row batch.
 //
 // Mirrors the JT400 wire shape in prepared_call_multi_set.trace
@@ -1363,7 +1440,7 @@ func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
 
 	// If totalNibbles is odd we need a leading zero pad nibble.
 	leadPad := 2*nbytes - totalNibbles // 0 or 1
-	cursor := 0 // index into digits
+	cursor := 0                        // index into digits
 	for i := 0; i < nbytes; i++ {
 		var hi, lo byte
 		if i == 0 && leadPad == 1 {
