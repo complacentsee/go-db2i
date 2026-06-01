@@ -70,6 +70,24 @@ const cachePackageName = "GOTCHE"
 // primer success.
 func TestMain(m *testing.M) {
 	dsn := os.Getenv("DB2I_DSN")
+
+	// Serialise the whole suite against the shared schema before any
+	// fixture is created (see suite_lock_test.go). Concurrent runs --
+	// two PR CI jobs, or a CI job plus a local run -- otherwise drop
+	// each other's fixed-name GOSQL_* tables mid-flight and fail with
+	// spurious SQL-204. The lease is best-effort: a setup failure logs
+	// a warning and the suite proceeds unserialised rather than aborts.
+	var lock *suiteLock
+	if dsn != "" {
+		l, err := acquireSuiteLock(dsn, schema())
+		if err != nil {
+			fmt.Fprintf(os.Stderr,
+				"conformance: suite lease unavailable (%v); running without serialisation\n", err)
+		} else {
+			lock = l
+		}
+	}
+
 	primeRan := dsn != "" && os.Getenv("DB2I_TEST_FILING") == "1"
 	if primeRan {
 		primeAndWipePackage(dsn, true)
@@ -80,6 +98,9 @@ func TestMain(m *testing.M) {
 		// os.Exit doesn't run deferred funcs, so the wipe goes here
 		// rather than via defer.
 		primeAndWipePackage(dsn, false)
+	}
+	if lock != nil {
+		lock.Release()
 	}
 	os.Exit(code)
 }
