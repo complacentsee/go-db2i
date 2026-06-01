@@ -705,16 +705,24 @@ func TestTypeMatrixGraphicBind(t *testing.T) {
 		})
 	})
 
-	// CCSID 65535 (no-conversion "bit data") graphic is intentionally NOT
-	// bound here. The driver exposes no IN-bind shape the server will
-	// accept for such a column: a []byte bind (VARCHAR FOR BIT DATA, CCSID
-	// 65535) and a string bind (VARCHAR CCSID 1208) both fail the implicit
-	// cast to VARGRAPHIC CCSID 65535 with SQL-332 (character conversion not
-	// defined) -- live-confirmed on PUB400 V7R5M0. Populating a 65535
-	// graphic column needs a raw same-CCSID source that the database/sql
-	// bind surface doesn't offer. The graphic READ path is covered by
-	// TestGraphicScalarColumns; graphic support tracks issues #3 (read) /
-	// #5 (bind).
+	// CCSID 65535 (no-conversion "bit data") graphic: a []byte ?-bind
+	// now lands verbatim in the column. The driver routes the bytes
+	// through the native graphic encoder (same-CCSID passthrough)
+	// instead of VARCHAR FOR BIT DATA, which the server refused to cast
+	// to a no-conversion graphic column (SQL-332 / 57017, issue #13).
+	// The bytes are raw 2-byte graphic code units, so the round-trip is
+	// byte-exact. Skips when the profile can't host a CCSID-65535
+	// graphic column.
+	t.Run("ccsid65535", func(t *testing.T) {
+		tbl := mkMatrixTable(t, db, "gv65", "VARGRAPHIC(64) CCSID 65535", true)
+		// "hi" as two UCS-2 BE graphic characters (U+0068, U+0069) plus
+		// a non-ASCII BMP code unit (U+00E9, e-acute).
+		raw := []byte{0x00, 0x68, 0x00, 0x69, 0x00, 0xE9}
+		runScalarCases(t, db, tbl, []scalarCase{
+			{"bytes", raw, wantBytes(raw)},
+			{"empty", []byte{}, wantBytes([]byte{})},
+		})
+	})
 }
 
 // ---- boolean ----------------------------------------------------------

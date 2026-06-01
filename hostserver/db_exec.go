@@ -265,6 +265,14 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		return nil, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
+	// IN-parameter graphic fixup: a []byte/string bind into a
+	// CCSID-65535 ("bit data") GRAPHIC/VARGRAPHIC column defaults to a
+	// VARCHAR shape the server won't cast (SQL-332 / 57017, issue #13).
+	// Adopt the column's declared graphic shape from the PMF so the
+	// value ships verbatim through the native graphic encoder. No-op for
+	// non-65535-graphic targets and non-[]byte/string binds.
+	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
+
 	// Stored-procedure OUT / INOUT shape fixup. For each slot whose
 	// caller-supplied PreparedParam.ParamType is 0xF1 (OUT) or 0xF2
 	// (INOUT), substitute the server's declared SQL type / length /

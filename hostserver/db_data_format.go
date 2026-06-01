@@ -153,6 +153,77 @@ func parseSuperExtendedParameterMarkerFormat(data []byte) ([]ParameterMarkerFiel
 	return out, nil
 }
 
+// isGraphicSQLType reports whether t is one of the graphic (DBCS /
+// Unicode) parameter SQL types -- VARGRAPHIC (464/465), GRAPHIC
+// (468/469), and LONG VARGRAPHIC (472/473) in their NN / nullable
+// pairs. encodeRowData has a dedicated encoder branch for each.
+func isGraphicSQLType(t uint16) bool {
+	switch t {
+	case 464, 465, 468, 469, 472, 473:
+		return true
+	}
+	return false
+}
+
+// reconcileGraphicBitDataBindShapes routes a []byte / string bind into
+// a CCSID-65535 ("bit data", no-conversion) GRAPHIC / VARGRAPHIC column
+// through the native graphic encoder. The database/sql bind path
+// (driver.bindArgsToPreparedParams) maps a []byte to VARCHAR FOR BIT
+// DATA (449, CCSID 65535) and a string to VARCHAR (449, the connection
+// string CCSID); neither implicitly casts to a no-conversion graphic
+// column -- the server rejects the bind with SQL-332 / SQLSTATE 57017
+// (character conversion not defined, issue #13). The 1200 / 13488
+// graphic CCSIDs are unaffected: they accept the implicit VARCHAR cast
+// and keep their working driver shape.
+//
+// Adopting the column's declared graphic shape from the
+// PREPARE_DESCRIBE parameter-marker format (CP 0x3813) makes
+// encodeRowData take its graphic branch, where encodeGraphicPayload
+// ships the value verbatim for CCSID 65535 (toBytes passthrough) behind
+// the 2-byte graphic-character SL the column expects. The bound bytes
+// must already be valid same-CCSID graphic data (an even byte count for
+// a 2-byte-per-character column); the driver ships them unchanged,
+// matching the no-conversion contract.
+//
+// Only []byte / string IN slots whose declared type is a CCSID-65535
+// graphic are rewritten. nil binds (handled via the indicator), LOB and
+// OUT/INOUT slots, and any other value type are left untouched, so the
+// working 1200 / 13488 graphic binds and every non-graphic bind keep
+// their existing shape.
+func reconcileGraphicBitDataBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
+	if len(pmf) == 0 {
+		return
+	}
+	for i := range shapes {
+		if i >= len(pmf) {
+			break
+		}
+		switch values[i].(type) {
+		case []byte, string:
+			// encodeGraphicPayload's CCSID-65535 branch (toBytes)
+			// accepts exactly these; other Go types have no
+			// no-conversion graphic encoding.
+		default:
+			continue
+		}
+		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
+			continue
+		}
+		p := pmf[i]
+		if p.CCSID != ccsidBinary || !isGraphicSQLType(p.SQLType) {
+			continue
+		}
+		shapes[i] = PreparedParam{
+			SQLType:     p.SQLType,
+			FieldLength: p.FieldLength,
+			Precision:   p.Precision,
+			Scale:       p.Scale,
+			CCSID:       p.CCSID,
+			ParamType:   shapes[i].ParamType,
+		}
+	}
+}
+
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --
 // JTOpen's DBSuperExtendedDataFormat. Layout (per the JTOpen source
 // header comment):
