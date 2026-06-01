@@ -1926,13 +1926,26 @@ func TestBooleanRoundTrip(t *testing.T) {
 
 // ----- M9 stored-procedure tests -----
 
-// procLibrary is the dedicated library hosting all M9 fixture procs
-// (P_INS / P_LOOKUP / P_INVENTORY / P_ROUNDTRIP) plus their supporting
-// tables. Tied to the test schema bootstrap in setUpStoredProcs --
-// hardcoded here to keep the conformance suite self-contained (no env
-// override) since the M9 fixtures captured against the same name and
-// the offline replay tests reference it verbatim.
-const procLibrary = "GOSPROCS"
+// procLibrary is the library hosting the M9 fixture procs (P_INS /
+// P_LOOKUP / P_INVENTORY / P_ROUNDTRIP) plus their supporting tables.
+//
+// It defaults to the test schema (schema()), so the stored-procedure
+// tests run on targets where the user owns a library but lacks CREATE
+// SCHEMA authority (e.g. PUB400's shared free tier): setUpStoredProcs
+// then creates the procs in that existing library rather than a new
+// one. Set DB2I_PROC_SCHEMA to host them in a dedicated, separate
+// library instead -- which also lets TestMultiLibrary exercise
+// library-list resolution; on a target with CREATE SCHEMA authority that
+// library is auto-created.
+//
+// The offline fixture replays reference the literal "GOSPROCS" in their
+// own packages (driver/, hostserver/) and are unaffected by this value.
+var procLibrary = func() string {
+	if v := os.Getenv("DB2I_PROC_SCHEMA"); v != "" {
+		return strings.ToUpper(v)
+	}
+	return schema()
+}()
 
 // setUpStoredProcs creates the GOSPROCS library, supporting tables,
 // and the four stored procedures the M9 tests exercise. Idempotent:
@@ -1946,20 +1959,25 @@ const procLibrary = "GOSPROCS"
 func setUpStoredProcs(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	// CREATE SCHEMA -- ignore SQLSTATE 42710 (already exists). DB2
-	// for i has no CREATE SCHEMA IF NOT EXISTS. SQLSTATE 42502
-	// (insufficient authority -- common on PUB400's shared free-
-	// tier, where users get a pre-created personal library but no
-	// authority to make more) skips the test cleanly instead of
-	// failing it; the test doesn't apply to that environment.
-	if _, err := db.Exec("CREATE SCHEMA " + procLibrary); err != nil {
-		if strings.Contains(err.Error(), "42502") ||
-			strings.Contains(err.Error(), "SQL-552") {
-			t.Skipf("no authority to create schema %s: %v", procLibrary, err)
-		}
-		if !strings.Contains(err.Error(), "42710") &&
-			!strings.Contains(err.Error(), "already exists") {
-			t.Fatalf("CREATE SCHEMA %s: %v", procLibrary, err)
+	// Only CREATE the proc library when it's a dedicated, separate one
+	// (DB2I_PROC_SCHEMA). When procLibrary is the test schema itself it
+	// already exists, so skip CREATE SCHEMA entirely -- this is what lets
+	// the M9 tests run on profiles without CREATE SCHEMA authority (e.g.
+	// PUB400), creating the procs in the existing library.
+	//
+	// CREATE SCHEMA -- ignore SQLSTATE 42710 (already exists); DB2 for i
+	// has no CREATE SCHEMA IF NOT EXISTS. SQLSTATE 42502 / SQL-552
+	// (insufficient authority) skips the test cleanly.
+	if !strings.EqualFold(procLibrary, schema()) {
+		if _, err := db.Exec("CREATE SCHEMA " + procLibrary); err != nil {
+			if strings.Contains(err.Error(), "42502") ||
+				strings.Contains(err.Error(), "SQL-552") {
+				t.Skipf("no authority to create schema %s: %v", procLibrary, err)
+			}
+			if !strings.Contains(err.Error(), "42710") &&
+				!strings.Contains(err.Error(), "already exists") {
+				t.Fatalf("CREATE SCHEMA %s: %v", procLibrary, err)
+			}
 		}
 	}
 
