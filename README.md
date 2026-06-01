@@ -179,6 +179,22 @@ features that are out of scope (non-JDBC JTOpen services like
 `CommandCall` / `IFSFile` / `DataQueue`, scrollable cursors, XA,
 client reroute, named-parameter binding for procs).
 
+## Contributing
+
+Go source is kept `gofmt`-clean. The repo ships a pre-commit hook in
+`.githooks/` that blocks any commit whose staged `.go` files are not
+formatted. Git does not run tracked hooks until you opt in, so enable
+it once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook checks only the files you are committing (against their staged
+content) and never rewrites them — if it reports a file, run
+`gofmt -w <file>` and re-stage. Bypass a single commit with
+`git commit --no-verify`.
+
 ## Acknowledgements
 
 Built clean-room from public protocol references including the

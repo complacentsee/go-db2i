@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#
+# pre-commit: reject commits that introduce un-gofmt'd Go code.
+#
+# Checks ONLY the .go files staged for this commit, against their staged
+# content (the index blob, not the working tree), so it is fast and
+# validates exactly what will be committed. It reports the offenders and
+# fails -- it never rewrites your staged changes.
+#
+# Enable once per clone (the repo ships the hook, but git will not run
+# hooks from a tracked directory until you point core.hooksPath at it):
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass for a single commit, sparingly:
+#
+#     git commit --no-verify
+
+# gofmt ships with the Go toolchain. If it is missing, skip rather than
+# wedge `git commit` -- a missing toolchain is an environment problem,
+# not something the format gate should block on.
+if ! command -v gofmt >/dev/null 2>&1; then
+	echo "pre-commit: gofmt not found in PATH; skipping Go format check" >&2
+	exit 0
+fi
+
+# Collect staged Go files that are not gofmt-clean. --diff-filter=ACMR
+# drops deletions; -z keeps paths with spaces/newlines intact. Each file
+# is checked via its staged blob (git show :path) piped to `gofmt -l`,
+# which echoes "<standard input>" iff the content needs formatting. The
+# while-loop runs in the pipe's subshell, but its stdout is captured by
+# the surrounding $(...), so the collected list survives.
+unformatted=$(
+	git diff --cached --name-only --diff-filter=ACMR -z |
+		while IFS= read -r -d '' file; do
+			case "$file" in
+			*.go) ;;
+			*) continue ;;
+			esac
+			if [ -n "$(git show ":$file" | gofmt -l)" ]; then
+				printf '%s\n' "$file"
+			fi
+		done
+)
+
+if [ -n "$unformatted" ]; then
+	{
+		echo "pre-commit: these staged Go files are not gofmt-formatted:"
+		echo "$unformatted" | sed 's/^/  /'
+		echo
+		echo "Fix them, re-stage, and commit again:"
+		echo "  gofmt -w <file>..."
+		echo "  git add  <file>..."
+		echo
+		echo "(bypass once with: git commit --no-verify)"
+	} >&2
+	exit 1
+fi
+
+exit 0
