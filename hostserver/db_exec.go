@@ -289,6 +289,13 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		}
 	}
 
+	// IN-parameter NULL fixup: a nil bind defaults to the INTEGER-NULL
+	// marker shape, which the server cannot cast to a native
+	// BINARY/VARBINARY column (issue #11). Adopt the column's declared
+	// shape from the PMF so the NULL is universally assignable. No-op
+	// for non-nil binds, so the working IN shapes are untouched.
+	reconcileNullBindShapes(paramShapes, paramValues, pmf)
+
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
 	// round trip for callers that pass through ExecutePreparedSQL
 	// for symmetry but happen to bind zero arguments.

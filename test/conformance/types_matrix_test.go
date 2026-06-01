@@ -296,26 +296,6 @@ func wantDateYMD(y int, mo time.Month, d int) func(*testing.T, *sql.Row) {
 	}
 }
 
-// assertColNull inserts a literal SQL NULL (no ?-bind) and asserts the
-// column reads back NULL. Native BINARY/VARBINARY columns reject the
-// driver's nil bind -- nil becomes an INTEGER-NULL parameter shape
-// (driver/stmt.go) which the server cannot cast to a binary column
-// (SQL-301 / SQLSTATE 07006). A literal NULL still exercises the NULL
-// *read* path, which is what this matrix is pinning.
-func assertColNull(t *testing.T, db *sql.DB, tbl string, id int) {
-	t.Helper()
-	if _, err := db.Exec(fmt.Sprintf("INSERT INTO %s (id, v) VALUES (?, NULL)", tbl), id); err != nil {
-		t.Fatalf("INSERT literal NULL: %v", err)
-	}
-	var n sql.NullString
-	if err := db.QueryRow("SELECT v FROM "+tbl+" WHERE id = ?", id).Scan(&n); err != nil {
-		t.Fatalf("scan NULL: %v", err)
-	}
-	if n.Valid {
-		t.Errorf("expected SQL NULL, got %q", n.String)
-	}
-}
-
 // ---- integer types ----------------------------------------------------
 
 // TestTypeMatrixIntegers round-trips SMALLINT / INTEGER / BIGINT at their
@@ -591,17 +571,23 @@ func TestTypeMatrixBinary(t *testing.T) {
 		runScalarCases(t, db, tbl, []scalarCase{
 			{"bytes", []byte{0x01, 0x02, 0x03, 0x04}, wantBytes([]byte{0x01, 0x02, 0x03, 0x04})},
 			{"empty", []byte{}, wantBytes([]byte{})},
+			// A direct nil ?-bind now round-trips as SQL NULL: the
+			// driver adopts the column's declared shape from the
+			// parameter-marker format instead of the INTEGER-NULL
+			// marker the server refused to cast to a native binary
+			// column (issue #11).
+			{"null", nil, wantNull()},
 		})
-		// Native VARBINARY rejects a nil ?-bind (see assertColNull).
-		t.Run("null", func(t *testing.T) { assertColNull(t, db, tbl, 99) })
 	})
 
 	t.Run("BINARY_fixed", func(t *testing.T) {
 		tbl := mkMatrixTable(t, db, "bbn", "BINARY(8)", false)
 		runScalarCases(t, db, tbl, []scalarCase{
 			{"full", full8, wantBytes(full8)},
+			// Direct nil ?-bind into a fixed native BINARY column now
+			// round-trips as SQL NULL (issue #11).
+			{"null", nil, wantNull()},
 		})
-		t.Run("null", func(t *testing.T) { assertColNull(t, db, tbl, 99) })
 	})
 }
 
