@@ -179,6 +179,49 @@ features that are out of scope (non-JDBC JTOpen services like
 `CommandCall` / `IFSFile` / `DataQueue`, scrollable cursors, XA,
 client reroute, named-parameter binding for procs).
 
+## Testing
+
+Two tiers, both wired into CI (`.github/workflows/ci.yml`):
+
+**Offline unit tests** — no database; run on every push / PR:
+
+```sh
+make test    # go test ./...
+make cover   # + coverage profile and summary
+make lint    # golangci-lint (config in .golangci.yml)
+```
+
+**Live conformance suite** — the `//go:build conformance` tests under
+[`test/conformance/`](./test/conformance) exercise a real IBM i. They
+are idempotent (each drops its own `GOSQL_`-prefixed tables / procedures
+on entry) and `t.Skip` when `DB2I_DSN` is unset or a feature is
+unavailable on the target profile (e.g. no DBCS NLSS), so they are safe
+to run anywhere. Point them at a target through the environment — never
+on the command line — and run:
+
+```sh
+set +x && source .env.pub400-v7r5   # exports DB2I_DSN, DB2I_SCHEMA, ...
+make test-conformance               # go test -tags=conformance ./test/conformance/...
+```
+
+The canonical environment / secret names (mirroring the gitignored
+`.env.pub400-v7r5`):
+
+| Variable | Meaning |
+|---|---|
+| `DB2I_DSN` | Connection string; the whole suite skips when unset. |
+| `DB2I_SCHEMA` | Schema that owns the test objects (default `GOTEST`). |
+| `DB2I_HOST` / `DB2I_USER` / `DB2I_PASSWORD` / `DB2I_LIBRARY` | DSN components, mirrored for convenience. |
+| `DB2I_TEST_FILING=1` | Opt in to the SQL-package filing / cache-hit tests. |
+| `DB2I_SCHEMA_B`, `DB2I_TLS_TARGET`, `DB2I_TEST_CCSID13488_TABLE` | Unlock the second-library, TLS, and strict-UCS-2 DBCLOB tests. |
+
+In CI the live suite runs nightly, on manual dispatch, and on same-repo
+PRs against **PUB400 (V7R5M0)** as the canonical base target, with
+`DB2I_DSN` / `DB2I_SCHEMA` supplied as repository **secrets**; an
+optional non-gating matrix leg targets IBM Cloud V7R6 via
+`DB2I_DSN_IBMCLOUD` / `DB2I_SCHEMA_IBMCLOUD`. Forks have no secret access,
+so the live job skips cleanly there.
+
 ## Contributing
 
 Go source is kept `gofmt`-clean. The repo ships a pre-commit hook in
