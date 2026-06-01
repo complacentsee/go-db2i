@@ -46,10 +46,13 @@ import (
 	"github.com/complacentsee/go-db2i/hostserver"
 )
 
-// cachePackageName is the shared package base for every cache-hit
-// test. 6-char limit; resolves to "GOTCHE9899" on the wire with
-// default session options.
-const cachePackageName = "GOTCHE"
+// cachePackageName is the per-run-unique *SQLPKG base for every
+// cache-hit test. "GP" + the 4-char runToken keeps it within the 6-char
+// base limit (the server appends a 4-char options-hash to form the
+// 10-char wire name). Per-run uniqueness means concurrent suites file
+// into and wipe their own package rather than clobbering a shared one;
+// each run primes and wipes its own in TestMain.
+var cachePackageName = "GP" + runToken
 
 // TestMain primes the shared *SQLPKG before any cache-hit test runs
 // and wipes it after, so the suite is hermetic regardless of
@@ -934,7 +937,7 @@ func TestCacheHit_OutParameterFallthrough(t *testing.T) {
 	defer db.Close()
 	var name string
 	var qty int
-	if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+	if _, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 		"WIDGET",
 		sql.Out{Dest: &name},
 		sql.Out{Dest: &qty},
@@ -1170,7 +1173,7 @@ func TestCacheHit_CriteriaExtended(t *testing.T) {
 		defer cancel()
 
 		const code = "M10EXTCALL" // P_INS.P_CODE is VARCHAR(10)
-		callSQL := "CALL " + procLibrary + ".P_INS(?, ?)"
+		callSQL := "CALL " + procLibrary + "." + procInsName + "(?, ?)"
 		// File P_INS through threshold under extended; pin one conn
 		// so all PREPAREs land on the same QZDASOINIT job.
 		warm, _ := openDBWithPackageCache(t, "extended")
@@ -1179,7 +1182,7 @@ func TestCacheHit_CriteriaExtended(t *testing.T) {
 			t.Fatalf("warm conn: %v", err)
 		}
 		if _, err := warmConn.ExecContext(ctx,
-			"DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+			"DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code); err != nil {
 			t.Fatalf("clear INS_AUDIT: %v", err)
 		}
 		for i := 0; i < filingPrepareCount; i++ {
@@ -1201,7 +1204,7 @@ func TestCacheHit_CriteriaExtended(t *testing.T) {
 
 		// Cleanup.
 		_, _ = db.ExecContext(ctx,
-			"DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code)
+			"DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code)
 	})
 }
 
@@ -1232,7 +1235,7 @@ func TestCacheHit_CriteriaExtended_OutCallDispatches(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	callSQL := "CALL " + procLibrary + ".P_LOOKUP(?, ?, ?)"
+	callSQL := "CALL " + procLibrary + "." + procLookName + "(?, ?, ?)"
 
 	// 1. Warm-up filing on a pinned conn so all PREPAREs land on
 	//    one QZDASOINIT job and the 3-PREPARE threshold crosses.
@@ -1801,7 +1804,7 @@ func TestFiling_WireEquivalenceWithJT400(t *testing.T) {
 	wipeDB := openDB(t)
 	defer wipeDB.Close()
 	wipePackage(t, wipeDB, cachePackageName)
-	const tblName = "GOJTWEQ"
+	tblName := tablePrefix + "WEQ" // per-run-unique (see tablePrefix)
 	qual := schema() + "." + tblName
 	_, _ = wipeDB.ExecContext(ctx, "DROP TABLE "+qual)
 	if _, err := wipeDB.ExecContext(ctx,
