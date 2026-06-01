@@ -1,0 +1,207 @@
+name: CI
+
+# Two tracks:
+#   * Offline (always, every PR + push to main): build, vet, gofmt,
+#     `go vet -tags=conformance` compile-check, offline unit tests with
+#     coverage, race detector, and golangci-lint (gated to new findings).
+#   * Live conformance (nightly schedule, manual dispatch, push to main,
+#     and same-repo PRs): the //go:build conformance suite against the
+#     canonical PUB400 V7R5 target (and, optionally, IBM Cloud V7R6),
+#     with credentials injected from repo secrets as environment
+#     variables -- never on a command line.
+#
+# Fork safety: secrets are unavailable to fork PRs, so DB2I_DSN arrives
+# empty there and the suite's dsn() helper t.Skips every live test (the
+# job stays green). The live job's `if:` also restricts PR triggers to
+# same-repo branches, so it never even starts for forks.
+#
+# Required repo secrets for the live job (mirror the gitignored
+# .env.pub400-v7r5 / .env.ibmcloud-v7r6 files):
+#   DB2I_DSN, DB2I_SCHEMA                     -- PUB400 V7R5 (canonical)
+#   DB2I_DSN_IBMCLOUD, DB2I_SCHEMA_IBMCLOUD   -- IBM Cloud V7R6 (optional)
+# Optional repo secrets/vars that unlock additional gated tests:
+#   secret DB2I_SCHEMA_B                      -- second library tests
+#   secret DB2I_TLS_TARGET                    -- TLS connectivity test
+#   secret DB2I_TEST_CCSID13488_TABLE         -- strict UCS-2 DBCLOB test
+#   var    DB2I_TEST_FILING (=1)              -- SQL-package filing tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly at 06:37 UTC (off the top-of-hour to spread API load).
+    - cron: "37 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: offline (build/vet/test) ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor (go.mod's declared minimum) + latest stable.
+        go: ["1.23.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: go build
+        run: go build ./...
+
+      - name: gofmt (must be clean)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to be run on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go vet (conformance build tag compile-check)
+        run: go vet -tags=conformance ./...
+
+      - name: go test (offline unit) with coverage
+        env:
+          # Race detector on the stable leg only -- it roughly triples
+          # test time, and the floor leg already proves the build.
+          RACE: ${{ matrix.go == 'stable' && '-race' || '' }}
+        run: |
+          go test ./... $RACE \
+            -coverpkg=./... -coverprofile=coverage.out -covermode=atomic
+
+      - name: coverage summary + baseline gate
+        if: matrix.go == 'stable'
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          total="$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')"
+          echo "### Offline coverage: ${total}% (coverpkg=./...)" >> "$GITHUB_STEP_SUMMARY"
+          # Offline (no live DB) coverage floor -- a regression backstop,
+          # not a target. The live conformance job exercises the bulk of
+          # the driver/hostserver paths and pushes real coverage much
+          # higher. Baseline measured ~56% on 2026-06-01.
+          floor="50.0"
+          awk -v t="$total" -v f="$floor" 'BEGIN {
+            if (t+0 < f+0) {
+              printf "::error::offline coverage %.1f%% is below baseline floor %.1f%%\n", t, f
+              exit 1
+            }
+            printf "offline coverage %.1f%% >= floor %.1f%%\n", t, f
+          }'
+
+      - name: upload coverage profile
+        if: matrix.go == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-offline
+          path: coverage.out
+          if-no-files-found: warn
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # only-new-issues diffs against the merge base / previous
+          # commit, which needs full history.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      # golangci-lint v2 requires golangci-lint-action v7+ (v6 is pinned to
+      # the v1 line and rejects a v2 linter version).
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.1.6
+          # Baseline pre-existing findings in untouched files; enforce a
+          # clean gate only on what a change introduces. See .golangci.yml.
+          only-new-issues: true
+
+  live-conformance:
+    name: live conformance (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: offline
+    # Run on the nightly schedule, manual dispatch, post-merge pushes to
+    # main, and same-repo PRs. Fork PRs (no secret access) are excluded
+    # here and additionally skip at the suite level when DB2I_DSN is empty.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    continue-on-error: ${{ matrix.optional || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [pub400]
+        include:
+          # IBM Cloud V7R6 is a second VRM axis but non-gating: a flaky
+          # or unconfigured secondary target must not fail the workflow.
+          - target: ibmcloud
+            optional: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: live conformance suite
+        env:
+          # Branch on the optional (ibmcloud) leg so an empty/absent pub400
+          # secret stays empty -- the suite then t.Skips cleanly rather than
+          # silently borrowing the IBM Cloud DSN.
+          DB2I_DSN: ${{ matrix.target == 'ibmcloud' && secrets.DB2I_DSN_IBMCLOUD || secrets.DB2I_DSN }}
+          DB2I_SCHEMA: ${{ matrix.target == 'ibmcloud' && secrets.DB2I_SCHEMA_IBMCLOUD || secrets.DB2I_SCHEMA }}
+          # Optional gated extras (each test t.Skips when its var is empty).
+          DB2I_SCHEMA_B: ${{ secrets.DB2I_SCHEMA_B }}
+          DB2I_TLS_TARGET: ${{ secrets.DB2I_TLS_TARGET }}
+          DB2I_TEST_CCSID13488_TABLE: ${{ secrets.DB2I_TEST_CCSID13488_TABLE }}
+          DB2I_TEST_FILING: ${{ vars.DB2I_TEST_FILING }}
+        run: |
+          if [ -z "$DB2I_DSN" ]; then
+            echo "::notice::DB2I_DSN secret unset for target '${{ matrix.target }}'; live tests will skip cleanly."
+          fi
+          go test -tags=conformance -v -timeout 30m \
+            -coverpkg=./... \
+            -coverprofile=coverage-conformance-${{ matrix.target }}.out \
+            -covermode=atomic \
+            ./test/conformance/...
+
+      - name: coverage summary
+        if: always()
+        run: |
+          if [ -f coverage-conformance-${{ matrix.target }}.out ]; then
+            go tool cover -func=coverage-conformance-${{ matrix.target }}.out | tail -1
+            total="$(go tool cover -func=coverage-conformance-${{ matrix.target }}.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')"
+            echo "### Live conformance coverage (${{ matrix.target }}): ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-conformance-${{ matrix.target }}
+          path: coverage-conformance-${{ matrix.target }}.out
+          if-no-files-found: ignore

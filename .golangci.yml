@@ -1,0 +1,57 @@
+# golangci-lint v2 configuration for go-db2i.
+#
+# Lint-gate policy
+# ----------------
+# CI runs golangci-lint with `only-new-issues: true` (see
+# .github/workflows/ci.yml), so findings that pre-date a change in files
+# the change does not touch are baselined automatically and the gate
+# enforces clean lint on the lines a PR actually modifies. To reproduce
+# the gate locally on a feature branch:
+#
+#     golangci-lint run --build-tags=conformance \
+#       --new-from-merge-base=origin/main ./...
+#
+# On top of that diff-based baseline, this file trims two classes of
+# tree-wide noise that the project deliberately does not gate on:
+#
+#   * errcheck on idiomatic best-effort calls -- Close/SetDeadline in
+#     defers, the demo programs under cmd/, and test files; and
+#   * staticcheck's stylistic ST* (stylecheck) and QF* (quickfix)
+#     groups, which this codebase has not adopted.
+#
+# The correctness-focused analysis stays fully enabled: govet, the
+# staticcheck SA* group, ineffassign, unused, and errcheck on real
+# production error returns.
+version: "2"
+
+run:
+  # Analyze the conformance-tagged integration suite too, so new live
+  # tests under test/conformance are linted like the rest of the tree.
+  build-tags:
+    - conformance
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -ST1* # stylecheck (naming/style conventions) -- not adopted
+        - -QF1* # quickfix refactor suggestions -- not adopted
+    errcheck:
+      # Best-effort socket teardown / deadline reset on cleanup paths.
+      exclude-functions:
+        - (net.Conn).Close
+        - (net.Conn).SetDeadline
+  exclusions:
+    rules:
+      # Test code routinely defers Close()/Exec() and parses args with
+      # Sscanf without checking the error -- an errcheck gate there is
+      # pure noise.
+      - path: _test\.go
+        linters:
+          - errcheck
+      # cmd/ holds demonstration / diagnostic programs, not library code.
+      - path: (^|/)cmd/
+        linters:
+          - errcheck
