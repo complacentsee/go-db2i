@@ -57,7 +57,64 @@ func schema() string {
 	return "GOTEST"
 }
 
-const tablePrefix = "GOSQL_"
+// runToken is a short, per-process-unique token woven into every
+// fixture object name (see tablePrefix, cachePackageName, and the proc
+// fixtures). Two conformance suites running against the same shared
+// schema at the same time -- two PR CI jobs (the CI concurrency group
+// is keyed per ref, so branches never serialise), the nightly run plus
+// a manual one, or a CI job plus a local run -- otherwise create and
+// drop the same fixed-name objects and fail with spurious SQL-204
+// (object not found). Tagging every name with a per-run token makes
+// each run self-isolated: it cannot collide with any other run, even
+// one still using the old shared names. IBM i resolves SQL names well
+// past 10 chars (auto-generating system names), so the token costs no
+// headroom the old "GOSQL_" scheme relied on.
+var runToken = newRunToken()
+
+// newRunToken derives a 4-character base-36 token from the process id
+// and start time. Same-machine runs differ by pid; cross-machine runs
+// (a CI runner vs a developer's box) differ by start nanos. Computed
+// once per process so every fixture name in a run shares it.
+func newRunToken() string {
+	n := uint64(os.Getpid())*2654435761 + uint64(time.Now().UnixNano())
+	// Uppercase only: IBM i folds unquoted object names to uppercase on
+	// CREATE, and the catalog views (e.g. SYSPACKAGESTAT) store them
+	// uppercase. A lowercase token would fail the suite's case-sensitive
+	// LIKE comparisons against those catalogs (the package name never
+	// matches), even though SQL identifier folding hides it for plain
+	// CREATE/SELECT.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 4)
+	for i := range b {
+		b[i] = alphabet[n%uint64(len(alphabet))]
+		n /= uint64(len(alphabet))
+	}
+	return string(b)
+}
+
+// tablePrefix is the per-run-unique prefix for the suite's fixture
+// tables. Six chars -- "G" + the 4-char runToken + "_" -- matches the
+// length of the old fixed "GOSQL_" so every existing suffix-length
+// assumption still holds.
+var tablePrefix = "G" + runToken + "_"
+
+// Per-run-unique names for the M9 stored-proc fixtures and their
+// support tables. They live in a shared library (procLibrary) that
+// PUB400 grants no CRTLIB authority to recreate per run, so the object
+// names themselves carry the token -- same self-isolation rationale as
+// tablePrefix. Each is "G" + the 4-char runToken + a distinguishing
+// letter, so they're distinct from each other and from the tablePrefix
+// tables. Referenced wherever the suite used the old fixed names
+// (P_INS, INS_AUDIT, ...).
+var (
+	procInsName  = "G" + runToken + "I" // was P_INS
+	procLookName = "G" + runToken + "L" // was P_LOOKUP
+	procInvName  = "G" + runToken + "N" // was P_INVENTORY
+	procRtName   = "G" + runToken + "R" // was P_ROUNDTRIP
+	tblInsAudit  = "G" + runToken + "A" // was INS_AUDIT
+	tblWidgets   = "G" + runToken + "W" // was WIDGETS
+	tblInventory = "G" + runToken + "V" // was INVENTORY
+)
 
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -679,10 +736,11 @@ func TestGraphicScalarColumns(t *testing.T) {
 func TestStoredProcedureGraphicOUT(t *testing.T) {
 	db := openDB(t)
 
-	const (
-		outProc = "GBINDPROC"    // IN + OUT
-		ioProc  = "GBINDPROC_IO" // INOUT
-	)
+	// Per-run-unique (see procInsName et al.): these graphic OUT/INOUT
+	// procs live in schema() and would otherwise collide with a
+	// concurrent run's identically-named procs.
+	outProc := "G" + runToken + "GO" // IN + OUT (was GBINDPROC)
+	ioProc := "G" + runToken + "GX"  // INOUT    (was GBINDPROC_IO)
 	// DROP on entry -- DB2 for i has no DROP PROCEDURE IF EXISTS, so
 	// ignore the "not found" error from a clean target.
 	_, _ = db.Exec(fmt.Sprintf("DROP PROCEDURE %s.%s", schema(), outProc))
@@ -1981,7 +2039,7 @@ func setUpStoredProcs(t *testing.T, db *sql.DB) {
 		}
 	}
 
-	for _, tbl := range []string{"INS_AUDIT", "WIDGETS", "INVENTORY"} {
+	for _, tbl := range []string{tblInsAudit, tblWidgets, tblInventory} {
 		// DDL: object name is a SQL identifier; cannot be a bind
 		// parameter. Constant + hardcoded loop value, no injection
 		// surface here.
@@ -2002,13 +2060,13 @@ func setUpStoredProcs(t *testing.T, db *sql.DB) {
 	// DDL: column types / defaults / procedure bodies aren't bindable;
 	// these statements are all interpolated identifiers + hardcoded
 	// constants.
-	mustExec("CREATE TABLE " + procLibrary + ".INS_AUDIT (" +
+	mustExec("CREATE TABLE " + procLibrary + "." + tblInsAudit + " (" +
 		"CODE VARCHAR(10), QTY INTEGER, " +
 		"INSERTED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-	mustExec("CREATE TABLE " + procLibrary + ".WIDGETS (" +
+	mustExec("CREATE TABLE " + procLibrary + "." + tblWidgets + " (" +
 		"CODE VARCHAR(10) NOT NULL PRIMARY KEY, " +
 		"NAME VARCHAR(64), QTY INTEGER)")
-	mustExec("CREATE TABLE " + procLibrary + ".INVENTORY (" +
+	mustExec("CREATE TABLE " + procLibrary + "." + tblInventory + " (" +
 		"CODE VARCHAR(10), QTY INTEGER, LOCATION VARCHAR(20))")
 
 	// Seed data: VALUES *are* parameterisable, so route through the
@@ -2016,48 +2074,48 @@ func setUpStoredProcs(t *testing.T, db *sql.DB) {
 	// against accidental SQL injection if these constants ever
 	// pick up external input, and exercises ExecutePreparedSQL on
 	// a known-good shape (VARCHAR + INTEGER) as a side effect.
-	mustExecArgs("INSERT INTO "+procLibrary+".WIDGETS VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblWidgets+" VALUES (?, ?, ?)",
 		"WIDGET", "Acme Widget", 100)
-	mustExecArgs("INSERT INTO "+procLibrary+".WIDGETS VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblWidgets+" VALUES (?, ?, ?)",
 		"GADGET", "Acme Gadget", 5)
-	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblInventory+" VALUES (?, ?, ?)",
 		"LOW1", 2, "A1")
-	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblInventory+" VALUES (?, ?, ?)",
 		"LOW2", 3, "A2")
-	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblInventory+" VALUES (?, ?, ?)",
 		"HIGH1", 50, "B1")
-	mustExecArgs("INSERT INTO "+procLibrary+".INVENTORY VALUES (?, ?, ?)",
+	mustExecArgs("INSERT INTO "+procLibrary+"."+tblInventory+" VALUES (?, ?, ?)",
 		"HIGH2", 100, "B2")
 
-	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_INS " +
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + "." + procInsName + " " +
 		"(IN P_CODE VARCHAR(10), IN P_QTY INTEGER) " +
 		"LANGUAGE SQL " +
 		"BEGIN " +
-		"INSERT INTO " + procLibrary + ".INS_AUDIT (CODE, QTY) " +
+		"INSERT INTO " + procLibrary + "." + tblInsAudit + " (CODE, QTY) " +
 		"VALUES (P_CODE, P_QTY); " +
 		"END")
-	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_LOOKUP " +
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + "." + procLookName + " " +
 		"(IN P_CODE VARCHAR(10), OUT P_NAME VARCHAR(64), OUT P_QTY INTEGER) " +
 		"LANGUAGE SQL " +
 		"BEGIN " +
 		"SELECT NAME, QTY INTO P_NAME, P_QTY " +
-		"FROM " + procLibrary + ".WIDGETS WHERE CODE = P_CODE; " +
+		"FROM " + procLibrary + "." + tblWidgets + " WHERE CODE = P_CODE; " +
 		"END")
-	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_INVENTORY " +
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + "." + procInvName + " " +
 		"(IN P_MIN_QTY INTEGER) " +
 		"DYNAMIC RESULT SETS 2 " +
 		"LANGUAGE SQL " +
 		"BEGIN " +
 		"DECLARE C1 CURSOR WITH RETURN FOR " +
-		"SELECT CODE, QTY FROM " + procLibrary + ".INVENTORY " +
+		"SELECT CODE, QTY FROM " + procLibrary + "." + tblInventory + " " +
 		"WHERE QTY < P_MIN_QTY ORDER BY CODE; " +
 		"DECLARE C2 CURSOR WITH RETURN FOR " +
-		"SELECT CODE, QTY FROM " + procLibrary + ".INVENTORY " +
+		"SELECT CODE, QTY FROM " + procLibrary + "." + tblInventory + " " +
 		"WHERE QTY >= P_MIN_QTY ORDER BY CODE; " +
 		"OPEN C1; " +
 		"OPEN C2; " +
 		"END")
-	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + ".P_ROUNDTRIP " +
+	mustExec("CREATE OR REPLACE PROCEDURE " + procLibrary + "." + procRtName + " " +
 		"(INOUT P_COUNTER INTEGER) " +
 		"LANGUAGE SQL " +
 		"BEGIN " +
@@ -2082,20 +2140,20 @@ func TestStoredProcedureINOnly(t *testing.T) {
 
 	// Clear any prior debris -- INS_AUDIT is keyed on CODE+QTY+TS for
 	// our purposes here, no PK to enforce uniqueness.
-	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+	if _, err := db.Exec("DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code); err != nil {
 		t.Fatalf("clear INS_AUDIT: %v", err)
 	}
 
 	// The actual CALL. No OUT params; statement-type TYPE_CALL=3
 	// drives the server-side dispatch.
-	if _, err := db.Exec("CALL "+procLibrary+".P_INS(?, ?)", code, qty); err != nil {
+	if _, err := db.Exec("CALL "+procLibrary+"."+procInsName+"(?, ?)", code, qty); err != nil {
 		t.Fatalf("CALL P_INS: %v", err)
 	}
 
 	// Verify the proc's INSERT landed.
 	var got int
 	if err := db.QueryRow(
-		"SELECT COUNT(*) FROM "+procLibrary+".INS_AUDIT WHERE CODE = ? AND QTY = ?",
+		"SELECT COUNT(*) FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ? AND QTY = ?",
 		code, qty).Scan(&got); err != nil {
 		t.Fatalf("SELECT COUNT(*): %v", err)
 	}
@@ -2104,7 +2162,7 @@ func TestStoredProcedureINOnly(t *testing.T) {
 	}
 
 	// Cleanup so re-runs start clean.
-	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+	if _, err := db.Exec("DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code); err != nil {
 		t.Logf("cleanup: %v", err)
 	}
 }
@@ -2122,7 +2180,7 @@ func TestStoredProcedureOUT(t *testing.T) {
 
 	var name string
 	var qty int
-	if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+	if _, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 		"WIDGET",
 		sql.Out{Dest: &name},
 		sql.Out{Dest: &qty},
@@ -2161,7 +2219,7 @@ func TestStoredProcedureNamedParameters(t *testing.T) {
 	t.Run("declaration order", func(t *testing.T) {
 		var name string
 		var qty int
-		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		if _, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 			sql.Named("P_CODE", "WIDGET"),
 			sql.Named("P_NAME", sql.Out{Dest: &name}),
 			sql.Named("P_QTY", sql.Out{Dest: &qty}),
@@ -2180,7 +2238,7 @@ func TestStoredProcedureNamedParameters(t *testing.T) {
 		var name string
 		var qty int
 		// Args supplied in P_QTY, P_CODE, P_NAME order on purpose.
-		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		if _, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 			sql.Named("P_QTY", sql.Out{Dest: &qty}),
 			sql.Named("P_CODE", "GADGET"),
 			sql.Named("P_NAME", sql.Out{Dest: &name}),
@@ -2198,7 +2256,7 @@ func TestStoredProcedureNamedParameters(t *testing.T) {
 	t.Run("case-insensitive name match", func(t *testing.T) {
 		var name string
 		var qty int
-		if _, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		if _, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 			sql.Named("p_code", "WIDGET"),
 			sql.Named("p_NAME", sql.Out{Dest: &name}),
 			sql.Named("P_qty", sql.Out{Dest: &qty}),
@@ -2212,7 +2270,7 @@ func TestStoredProcedureNamedParameters(t *testing.T) {
 
 	t.Run("unknown name rejects", func(t *testing.T) {
 		var qty int
-		_, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		_, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 			sql.Named("P_CODE", "WIDGET"),
 			sql.Named("BOGUS", "x"),
 			sql.Named("P_QTY", sql.Out{Dest: &qty}),
@@ -2229,7 +2287,7 @@ func TestStoredProcedureNamedParameters(t *testing.T) {
 	t.Run("mixed named + positional rejects", func(t *testing.T) {
 		var name string
 		var qty int
-		_, err := db.Exec("CALL "+procLibrary+".P_LOOKUP(?, ?, ?)",
+		_, err := db.Exec("CALL "+procLibrary+"."+procLookName+"(?, ?, ?)",
 			"WIDGET",
 			sql.Named("P_NAME", sql.Out{Dest: &name}),
 			sql.Named("P_QTY", sql.Out{Dest: &qty}),
@@ -2266,7 +2324,7 @@ func TestStoredProcedureMultiResultSet(t *testing.T) {
 	db := openDB(t)
 	setUpStoredProcs(t, db)
 
-	rows, err := db.Query("CALL "+procLibrary+".P_INVENTORY(?)", 5)
+	rows, err := db.Query("CALL "+procLibrary+"."+procInvName+"(?)", 5)
 	if err != nil {
 		t.Fatalf("Query CALL P_INVENTORY: %v", err)
 	}
@@ -2370,7 +2428,7 @@ func TestMultiLibrary(t *testing.T) {
 	t.Run("baseline_unqualified_resolves_to_204_without_libraries", func(t *testing.T) {
 		base := openDB(t)
 		defer base.Close()
-		_, err := base.Exec("CALL P_INS(?, ?)", "M11_BASELINE", 1)
+		_, err := base.Exec("CALL "+procInsName+"(?, ?)", "M11_BASELINE", 1)
 		if err == nil {
 			t.Skip("baseline CALL resolved without libraries= -- job library list may already include GOSPROCS; cannot validate M11-2 conclusively in this environment")
 		}
@@ -2383,22 +2441,22 @@ func TestMultiLibrary(t *testing.T) {
 	// CODE is VARCHAR(10) in INS_AUDIT, so keep this <= 10 chars.
 	const code = "M11_MULTI"
 	const qty = 17
-	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+	if _, err := db.Exec("DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code); err != nil {
 		t.Fatalf("clear INS_AUDIT: %v", err)
 	}
-	if _, err := db.Exec("CALL P_INS(?, ?)", code, qty); err != nil {
+	if _, err := db.Exec("CALL "+procInsName+"(?, ?)", code, qty); err != nil {
 		t.Fatalf("CALL P_INS (unqualified, libraries=...,GOSPROCS): %v", err)
 	}
 	var got int
 	if err := db.QueryRow(
-		"SELECT COUNT(*) FROM "+procLibrary+".INS_AUDIT WHERE CODE = ? AND QTY = ?",
+		"SELECT COUNT(*) FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ? AND QTY = ?",
 		code, qty).Scan(&got); err != nil {
 		t.Fatalf("SELECT COUNT(*): %v", err)
 	}
 	if got != 1 {
 		t.Errorf("INS_AUDIT row count for %q/%d = %d, want 1 (proc resolved via libraries=)", code, qty, got)
 	}
-	if _, err := db.Exec("DELETE FROM "+procLibrary+".INS_AUDIT WHERE CODE = ?", code); err != nil {
+	if _, err := db.Exec("DELETE FROM "+procLibrary+"."+tblInsAudit+" WHERE CODE = ?", code); err != nil {
 		t.Logf("cleanup: %v", err)
 	}
 }
@@ -2419,7 +2477,7 @@ func TestSystemNaming(t *testing.T) {
 	// Bootstrap a known table via the default-naming connection.
 	bootstrap := openDB(t)
 	defer bootstrap.Close()
-	const tbl = tablePrefix + "M11_NAMING"
+	tbl := tablePrefix + "M11_NAMING"
 	fqn := schema() + "." + tbl
 	dropSQL := "DROP TABLE " + fqn
 	bootstrap.Exec(dropSQL)
@@ -2520,7 +2578,7 @@ func TestStoredProcedureINOUT(t *testing.T) {
 	setUpStoredProcs(t, db)
 
 	counter := 5
-	if _, err := db.Exec("CALL "+procLibrary+".P_ROUNDTRIP(?)",
+	if _, err := db.Exec("CALL "+procLibrary+"."+procRtName+"(?)",
 		sql.Out{Dest: &counter, In: true},
 	); err != nil {
 		t.Fatalf("CALL P_ROUNDTRIP: %v", err)
@@ -2992,8 +3050,9 @@ func TestUserTableLargeScanReturnsAllRows(t *testing.T) {
 
 	// Mirror JT400's select_large_user_table_10k case exactly:
 	// 3-column schema (ID INT, NAME VARCHAR(40), AMT DECIMAL(11,2)),
-	// 10-char system table name "GOJT_T1", 1..N IDs, no ORDER BY.
-	tbl := schema() + ".GOJT_T1"
+	// 3-column schema, 1..N IDs, no ORDER BY. Table name is per-run-
+	// unique (see tablePrefix) so concurrent runs don't collide.
+	tbl := schema() + "." + tablePrefix + "T1"
 	db.Exec("DROP TABLE " + tbl)
 	if _, err := db.Exec("CREATE TABLE " + tbl + " (ID INTEGER NOT NULL PRIMARY KEY, NAME VARCHAR(40) NOT NULL, AMT DECIMAL(11,2) NOT NULL)"); err != nil {
 		t.Fatalf("CREATE: %v", err)
