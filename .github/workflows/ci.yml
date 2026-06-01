@@ -132,6 +132,12 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.1.6
+          # Build golangci-lint from source with the runner's Go toolchain
+          # rather than downloading the release binary: the v2.1.6 binary
+          # is compiled with an older Go and its bundled go/types panics
+          # type-checking against a newer `stable` Go. goinstall links the
+          # runner's Go, matching local `make lint`.
+          install-mode: goinstall
           # Baseline pre-existing findings in untouched files; enforce a
           # clean gate only on what a change introduces. See .golangci.yml.
           only-new-issues: true
