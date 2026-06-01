@@ -964,8 +964,14 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			// NULL: SQLType picks the fixed-length INTEGER nullable
 			// shape so FieldLength is meaningful (4 bytes); the
 			// server reads the indicator first and ignores the data
-			// slot. Column type mismatches are handled by the
-			// server's implicit cast.
+			// slot. This INTEGER-NULL placeholder is the bind path's
+			// best guess without the column type; for most columns the
+			// server's implicit cast accepts it, but native
+			// BINARY/VARBINARY rejects it (SQL-301 / 07006). The
+			// hostserver exec path overrides the shape from the
+			// PREPARE_DESCRIBE parameter-marker format for nil binds
+			// (hostserver.reconcileNullBindShapes) so the NULL is
+			// assignable to the actual column type (issue #11).
 			shapes[i] = hostserver.PreparedParam{SQLType: 497, FieldLength: 4}
 			values[i] = nil
 		default:
