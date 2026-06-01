@@ -69,28 +69,28 @@ type rleSeed struct {
 func rle1FuzzSeeds() []rleSeed {
 	return []rleSeed{
 		{src: []byte("hello world"), expected: 11},
-		{src: []byte{0x1B, 0x1B, 0x41}, expected: 2},                                  // escaped 0x1B + literal A
-		{src: []byte{0x1B, 0xCC, 0x00, 0x00, 0x00, 0x08}, expected: 8},                // run of 8 0xCC
-		{src: []byte{0x1B, 0x00, 0x00, 0x00, 0x10, 0x00}, expected: 4096},             // zero-pattern run
-		{src: []byte{0x1B}, expected: 4},                                              // truncated escape
-		{src: []byte{0x1B, 0xCC, 0x00, 0x00}, expected: 4},                            // truncated run header
-		{src: []byte{0x1B, 0xCC, 0xFF, 0xFF, 0xFF, 0xFF}, expected: 4},                // negative count
-		{src: []byte{0x1B, 0xCC, 0x00, 0x00, 0x10, 0x00}, expected: 16},               // run > expected
-		{src: bytes.Repeat([]byte{0x41}, 1024), expected: 1024},                       // literal block
-		{src: []byte{}, expected: 0},                                                  // empty
+		{src: []byte{0x1B, 0x1B, 0x41}, expected: 2},                      // escaped 0x1B + literal A
+		{src: []byte{0x1B, 0xCC, 0x00, 0x00, 0x00, 0x08}, expected: 8},    // run of 8 0xCC
+		{src: []byte{0x1B, 0x00, 0x00, 0x00, 0x10, 0x00}, expected: 4096}, // zero-pattern run
+		{src: []byte{0x1B}, expected: 4},                                  // truncated escape
+		{src: []byte{0x1B, 0xCC, 0x00, 0x00}, expected: 4},                // truncated run header
+		{src: []byte{0x1B, 0xCC, 0xFF, 0xFF, 0xFF, 0xFF}, expected: 4},    // negative count
+		{src: []byte{0x1B, 0xCC, 0x00, 0x00, 0x10, 0x00}, expected: 16},   // run > expected
+		{src: bytes.Repeat([]byte{0x41}, 1024), expected: 1024},           // literal block
+		{src: []byte{}, expected: 0},                                      // empty
 	}
 }
 
 func dataStreamRLEFuzzSeeds() []rleSeed {
 	return []rleSeed{
 		{src: []byte("hello world"), expected: 11},
-		{src: []byte{0x1B, 0x1B, 0x41, 0x1B, 0x1B}, expected: 3},                     // two escaped 0x1B + literal
-		{src: []byte{0x1B, 0xCC, 0xCC, 0x08, 0x00}, expected: 4096},                  // 4 KiB run
-		{src: []byte{0x1B, 0x00, 0x00, 0x00, 0x10}, expected: 32},                    // 32-byte zero fill
-		{src: []byte{0x1B, 0xAA, 0xBB, 0x00}, expected: 16},                          // truncated repeater header
-		{src: []byte{0x1B, 0xAA, 0xBB, 0xFF, 0xFF}, expected: 4},                     // repeater count overflows expected
-		{src: bytes.Repeat([]byte{0x41}, 1024), expected: 1024},                      // literal block
-		{src: []byte{0x1B}, expected: 4},                                             // truncated escape
-		{src: []byte{}, expected: 0},                                                 // empty
+		{src: []byte{0x1B, 0x1B, 0x41, 0x1B, 0x1B}, expected: 3},    // two escaped 0x1B + literal
+		{src: []byte{0x1B, 0xCC, 0xCC, 0x08, 0x00}, expected: 4096}, // 4 KiB run
+		{src: []byte{0x1B, 0x00, 0x00, 0x00, 0x10}, expected: 32},   // 32-byte zero fill
+		{src: []byte{0x1B, 0xAA, 0xBB, 0x00}, expected: 16},         // truncated repeater header
+		{src: []byte{0x1B, 0xAA, 0xBB, 0xFF, 0xFF}, expected: 4},    // repeater count overflows expected
+		{src: bytes.Repeat([]byte{0x41}, 1024), expected: 1024},     // literal block
+		{src: []byte{0x1B}, expected: 4},                            // truncated escape
+		{src: []byte{}, expected: 0},                                // empty
 	}
 }

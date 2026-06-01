@@ -57,11 +57,11 @@ const (
 	cpAddAuthFactor       uint16 = 0x112F // 4-byte CCSID + MFA token (serverLevel >= 18)
 
 	// Code points carried in SignonInfoRep (0xF004).
-	cpCurrentSignonDate  uint16 = 0x1106 // 8-byte: yr(2)+mo+day+hr+min+sec+reserved(1)
-	cpLastSignonDate     uint16 = 0x1107
-	cpExpirationDate     uint16 = 0x1108
-	cpPWDExpiryWarnDays  uint16 = 0x112C // 4-byte uint32, days
-	cpServerCCSID        uint16 = 0x1114 // 4-byte uint32
+	cpCurrentSignonDate uint16 = 0x1106 // 8-byte: yr(2)+mo+day+hr+min+sec+reserved(1)
+	cpLastSignonDate    uint16 = 0x1107
+	cpExpirationDate    uint16 = 0x1108
+	cpPWDExpiryWarnDays uint16 = 0x112C // 4-byte uint32, days
+	cpServerCCSID       uint16 = 0x1114 // 4-byte uint32
 )
 
 // ExchangeAttributesRequest builds a SIGNON / HOSTCNN exchange-

@@ -133,11 +133,11 @@ func init() {
 // exponents outside the [-383, 384] biased-encodable range.
 func encodeDecimal64(negative bool, digits []byte, exponent int) ([]byte, error) {
 	const (
-		precision  = 16
-		bias       = 398
+		precision   = 16
+		bias        = 398
 		expContBits = 8
-		expMin     = -bias                       // -398
-		expMax     = (1<<(2+expContBits) - 1) - bias // 1023 - 398 = 625? actually max = 384
+		expMin      = -bias                           // -398
+		expMax      = (1<<(2+expContBits) - 1) - bias // 1023 - 398 = 625? actually max = 384
 	)
 	if len(digits) > precision {
 		return nil, fmt.Errorf("decimal64: %d digits exceeds precision %d", len(digits), precision)
@@ -151,7 +151,7 @@ func encodeDecimal64(negative bool, digits []byte, exponent int) ([]byte, error)
 		}
 	}
 	biasedExp := exponent + bias
-	if biasedExp < 0 || biasedExp >= (1 << (2 + expContBits)) {
+	if biasedExp < 0 || biasedExp >= (1<<(2+expContBits)) {
 		return nil, fmt.Errorf("decimal64: biased exponent %d out of range", biasedExp)
 	}
 
@@ -188,8 +188,8 @@ func encodeDecimal64(negative bool, digits []byte, exponent int) ([]byte, error)
 // boundary, same as the decoder.
 func encodeDecimal128(negative bool, digits []byte, exponent int) ([]byte, error) {
 	const (
-		precision  = 34
-		bias       = 6176
+		precision   = 34
+		bias        = 6176
 		expContBits = 12
 	)
 	if len(digits) > precision {
@@ -204,7 +204,7 @@ func encodeDecimal128(negative bool, digits []byte, exponent int) ([]byte, error
 		}
 	}
 	biasedExp := exponent + bias
-	if biasedExp < 0 || biasedExp >= (1 << (2 + expContBits)) {
+	if biasedExp < 0 || biasedExp >= (1<<(2+expContBits)) {
 		return nil, fmt.Errorf("decimal128: biased exponent %d out of range", biasedExp)
 	}
 
@@ -355,7 +355,7 @@ func decodeDecimal64(b []byte) (string, error) {
 	}
 	hi := binary.BigEndian.Uint64(b)
 	sign := byte(hi >> 63)
-	combo := byte((hi >> 58) & 0x1F) // 5 bits
+	combo := byte((hi >> 58) & 0x1F)     // 5 bits
 	expCont := uint64((hi >> 50) & 0xFF) // 8 bits
 	coefCont := hi & ((1 << 50) - 1)     // 50 bits
 
@@ -432,8 +432,8 @@ func decodeDecimal128(b []byte) (string, error) {
 			declet = uint16((lo >> uint(bitOff)) & 0x3FF)
 		} else {
 			// Declet straddles the hi/lo boundary.
-			low := lo >> uint(bitOff)                  // bits available in lo
-			highBits := hiCoef << uint(64-bitOff)      // remaining bits from hi
+			low := lo >> uint(bitOff)             // bits available in lo
+			highBits := hiCoef << uint(64-bitOff) // remaining bits from hi
 			declet = uint16((low | highBits) & 0x3FF)
 		}
 		bcd := dpdToBCD[declet]

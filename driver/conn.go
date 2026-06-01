@@ -377,10 +377,11 @@ func (c *Conn) Logger() *slog.Logger { return c.log }
 // to transcode to the column's actual CCSID on its side.
 //
 // Static IBM i version map:
-//   0x00070500  V7R5M0  -- 1208 supported
-//   0x00070400  V7R4M0  -- 1208 supported
-//   0x00070300  V7R3M0  -- 1208 supported
-//   < V7R3      -- fall back to CCSID 37
+//
+//	0x00070500  V7R5M0  -- 1208 supported
+//	0x00070400  V7R4M0  -- 1208 supported
+//	0x00070300  V7R3M0  -- 1208 supported
+//	< V7R3      -- fall back to CCSID 37
 //
 // Caller can override the auto-pick via DSN ?ccsid=N (cfg.CCSID).
 // When set non-zero, that wins over the VRM-driven default. Useful

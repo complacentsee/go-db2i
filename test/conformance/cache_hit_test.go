@@ -2216,8 +2216,8 @@ func TestLOBBind_FilingProbe(t *testing.T) {
 	case numStmts >= 1 && stmtSeen == 0:
 		t.Logf("CONCLUSION: SYSPACKAGESTAT counts a statement but SYSPACKAGESTMTSTAT is empty -- unusual. Investigate before declaring v0.7.5 done.")
 	case numStmts >= 1 && autoPopulateFired:
-		t.Logf("CONCLUSION: server DID file the LOB-bind INSERT, AND v0.7.4 auto-populate fired on iter 3+. " +
-			"BUT the cache-hit encoder rejected the LOB locator (%s). " +
+		t.Logf("CONCLUSION: server DID file the LOB-bind INSERT, AND v0.7.4 auto-populate fired on iter 3+. "+
+			"BUT the cache-hit encoder rejected the LOB locator (%s). "+
 			"v0.7.5 should either: (a) skip auto-populate for SQLs with LOB binds "+
 			"(`packageEligibleFor` extension), or (b) defer to v0.7.6 with extended "+
 			"cache-hit encoder support for LOB types. The server cooperation is now "+

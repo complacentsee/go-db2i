@@ -486,14 +486,14 @@ func SetSQLAttributesRequest(opts DBAttributesOptions) (Header, []byte, error) {
 		params = append(params, DBParamVarString(0x380F, 273, dlBytes))
 	}
 	params = append(params,
-		DBParamShort(0x3812, 0x0001),                                    // PackageAddStmtAllowed
-		DBParamByte(0x3821, 0xF2),                                       // UseExtendedFormatsIndicator
-		dbParamLOBThreshold(opts.LOBThreshold),                          // LOBFieldThreshold (CP 0x3822)
-		DBParamShort(0x3811, 0x0001),                                    // AmbiguousSelectOption
-		DBParam{CodePoint: 0x3825, Data: []byte{0xF6, 0x00, 0x00, 0x00}}, // ClientSupportInfo (V7R5+)
+		DBParamShort(0x3812, 0x0001),                                                 // PackageAddStmtAllowed
+		DBParamByte(0x3821, 0xF2),                                                    // UseExtendedFormatsIndicator
+		dbParamLOBThreshold(opts.LOBThreshold),                                       // LOBFieldThreshold (CP 0x3822)
+		DBParamShort(0x3811, 0x0001),                                                 // AmbiguousSelectOption
+		DBParam{CodePoint: 0x3825, Data: []byte{0xF6, 0x00, 0x00, 0x00}},             // ClientSupportInfo (V7R5+)
 		DBParam{CodePoint: 0x3827, Data: []byte{0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00}}, // DecimalPrecisionIndicators
-		DBParamByte(0x3828, 0x00),                                       // HexConstantParserOption
-		DBParamShort(0x3830, 0x0001),                                    // LocatorPersistence
+		DBParamByte(0x3828, 0x00),                                                    // HexConstantParserOption
+		DBParamShort(0x3830, 0x0001),                                                 // LocatorPersistence
 	)
 	// CP 0x3833 QueryOptimizeGoal -- omitted entirely unless the
 	// caller set it via ?query-optimize-goal=. Position in the wire

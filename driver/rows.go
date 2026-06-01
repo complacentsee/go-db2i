@@ -22,10 +22,10 @@ import (
 // hostserver.SelectResult shape is still used for offline tests and
 // the cmd/smoketest harness via SelectStaticSQL / SelectPreparedSQL.
 type Rows struct {
-	cursor    *hostserver.Cursor
-	conn      *Conn
-	closeErr  error // sticky -- so repeated Close calls return the same value
-	closed    bool
+	cursor   *hostserver.Cursor
+	conn     *Conn
+	closeErr error // sticky -- so repeated Close calls return the same value
+	closed   bool
 }
 
 // Columns returns the per-column names parsed from the

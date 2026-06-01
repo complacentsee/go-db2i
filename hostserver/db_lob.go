@@ -96,11 +96,12 @@ type LOBLocator struct {
 // stream more chunks.
 //
 // CCSID is the encoding tag the server stamped on the data:
-//   65535       BLOB / FOR BIT DATA -- bytes are binary
-//   1208        CLOB tagged as UTF-8
-//   13488       DBCLOB tagged as UCS-2 BE
-//   else        CLOB tagged with an SBCS / EBCDIC table; caller
-//               transcodes via ebcdic.* converters as appropriate.
+//
+//	65535       BLOB / FOR BIT DATA -- bytes are binary
+//	1208        CLOB tagged as UTF-8
+//	13488       DBCLOB tagged as UCS-2 BE
+//	else        CLOB tagged with an SBCS / EBCDIC table; caller
+//	            transcodes via ebcdic.* converters as appropriate.
 //
 // Bytes is always returned verbatim from the wire -- no transcode.
 // Callers who want a Go string for a CLOB need to decode it

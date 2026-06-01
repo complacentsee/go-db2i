@@ -19,16 +19,16 @@ func FuzzSuffixFromOptions(f *testing.F) {
 	// Seed corpus covers the documented enum extremes plus the
 	// COMMIT_MODE_RR overflow branches that get the trickiest math.
 	seeds := []PackageOptions{
-		{},                                      // defaults
-		{TranslateHex: 1},                       // 1-bit slot pin
-		{CommitMode: 4, DateSeparator: 0},       // RR overflow case 1
-		{CommitMode: 4, DateSeparator: 3},       // RR overflow case 2
-		{DateFormat: 7, DateSeparator: 4},       // upper-end enum values
-		{DecimalSeparator: 1, Naming: 1},        // both top bits of char3
-		{TimeFormat: 4, TimeSeparator: 3},       // top of char4
-		{CommitMode: 100, DateFormat: -50},      // adversarial out-of-range
-		{TranslateHex: 1 << 30},                 // huge
-		{TimeFormat: -1, TimeSeparator: -1},     // negative
+		{},                                  // defaults
+		{TranslateHex: 1},                   // 1-bit slot pin
+		{CommitMode: 4, DateSeparator: 0},   // RR overflow case 1
+		{CommitMode: 4, DateSeparator: 3},   // RR overflow case 2
+		{DateFormat: 7, DateSeparator: 4},   // upper-end enum values
+		{DecimalSeparator: 1, Naming: 1},    // both top bits of char3
+		{TimeFormat: 4, TimeSeparator: 3},   // top of char4
+		{CommitMode: 100, DateFormat: -50},  // adversarial out-of-range
+		{TranslateHex: 1 << 30},             // huge
+		{TimeFormat: -1, TimeSeparator: -1}, // negative
 	}
 	for _, s := range seeds {
 		f.Add(s.TranslateHex, s.CommitMode, s.DateFormat,

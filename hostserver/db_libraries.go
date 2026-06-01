@@ -74,8 +74,8 @@ func NDBAddLibraryListMulti(conn io.ReadWriter, libraries []string, correlationI
 	}
 
 	libParam := make([]byte, total)
-	binary.BigEndian.PutUint16(libParam[0:2], 273)                       // CCSID
-	binary.BigEndian.PutUint16(libParam[2:4], uint16(len(libraries)))    // numLibraries
+	binary.BigEndian.PutUint16(libParam[0:2], 273)                    // CCSID
+	binary.BigEndian.PutUint16(libParam[2:4], uint16(len(libraries))) // numLibraries
 	off := 4
 	for i, libBytes := range encoded {
 		if i == 0 {

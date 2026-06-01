@@ -20,13 +20,13 @@ import (
 //  1. Build a 14-character salt input:
 //     a. Uppercase the userID, blank-pad to 10 chars (first 10 chars).
 //     b. Append the LAST 4 chars of the password (right-padded to 4
-//        with spaces if shorter).
+//     with spaces if shorter).
 //  2. UTF-16 BE encode -> 28 bytes.
 //  3. SHA-256(28-byte input) -> 32-byte salt.
 //  4. PBKDF2-HMAC-SHA-512(password = UTF-8(password),
-//                         salt = 32-byte salt,
-//                         iter = 10022,
-//                         keyLen = 64) -> 64-byte token PW_TOKEN.
+//     salt = 32-byte salt,
+//     iter = 10022,
+//     keyLen = 64) -> 64-byte token PW_TOKEN.
 //     NOTE the UTF-8 here -- JT400's spec comment says "Unicode" but
 //     the actual Java implementation goes through PBEKeySpec, whose
 //     PBKDF2KeyImpl encodes the char[] as UTF-8 (sun.security.pkcs.PBEKey
@@ -36,7 +36,7 @@ import (
 //     returns SQL -3008 / errClass 8 ("password incorrect"). Live-
 //     validated against IBM i 7.6 on IBM Cloud Power VS, 2026-05-08.
 //  5. PW_SUB = SHA-512(PW_TOKEN || serverSeed || clientSeed
-//                      || UTF-16BE(10-char-padded-userID) || sequence).
+//     || UTF-16BE(10-char-padded-userID) || sequence).
 //     UTF-16BE here is correct (matches both spec and JT400's actual
 //     getBytes("utf-16be") call).
 //

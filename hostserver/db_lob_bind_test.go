@@ -61,15 +61,15 @@ func TestParameterMarkerFormatLocatorsMatchFixture(t *testing.T) {
 		t.Fatalf("PMF field count = %d, want 3 (ID INTEGER, B BLOB, C CLOB)", len(pmf))
 	}
 	cases := []struct {
-		idx        int
-		wantSQL    uint16
-		wantCCSID  uint16
+		idx         int
+		wantSQL     uint16
+		wantCCSID   uint16
 		wantLocator uint32
-		wantIsLOB  bool
+		wantIsLOB   bool
 	}{
-		{0, 496, 0x0000, 0x00000000, false},      // ID INTEGER NN
-		{1, 961, 0xFFFF, 0x00000100, true},       // B BLOB
-		{2, 965, 0x0111, 0x00000200, true},       // C CLOB CCSID 273
+		{0, 496, 0x0000, 0x00000000, false}, // ID INTEGER NN
+		{1, 961, 0xFFFF, 0x00000100, true},  // B BLOB
+		{2, 965, 0x0111, 0x00000200, true},  // C CLOB CCSID 273
 	}
 	for _, tc := range cases {
 		f := pmf[tc.idx]
@@ -203,7 +203,7 @@ func TestWriteLOBDataLargeFixture(t *testing.T) {
 // the SQLDA value block.
 func TestEncodeDBExtendedDataLOBBind(t *testing.T) {
 	shapes := []PreparedParam{
-		{SQLType: 497, FieldLength: 4},  // ID INTEGER nullable
+		{SQLType: 497, FieldLength: 4},                // ID INTEGER nullable
 		{SQLType: 961, FieldLength: 4, CCSID: 0xFFFF}, // BLOB locator
 		{SQLType: 965, FieldLength: 4, CCSID: 0x0111}, // CLOB locator (CCSID 273)
 	}
@@ -217,8 +217,8 @@ func TestEncodeDBExtendedDataLOBBind(t *testing.T) {
 		// Header
 		0x00, 0x00, 0x00, 0x01, // ConsistencyToken
 		0x00, 0x00, 0x00, 0x01, // RowCount = 1
-		0x00, 0x03,             // ColumnCount = 3
-		0x00, 0x02,             // IndicatorSize = 2
+		0x00, 0x03, // ColumnCount = 3
+		0x00, 0x02, // IndicatorSize = 2
 		0x00, 0x00, 0x00, 0x00, // reserved
 		0x00, 0x00, 0x00, 0x0c, // RowSize = 12
 		// Indicators (3 cols * 2 bytes, all non-null)

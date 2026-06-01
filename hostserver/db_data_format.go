@@ -26,10 +26,10 @@ const (
 	SQLTypeTime        uint16 = 389
 	SQLTypeTimestampNN uint16 = 392
 	SQLTypeTimestamp   uint16 = 393
-	SQLTypeFloat4          uint16 = 480
-	SQLTypeFloat8          uint16 = 480 // distinguished by length
-	SQLTypeDecimal         uint16 = 484
-	SQLTypeNumeric         uint16 = 488
+	SQLTypeFloat4      uint16 = 480
+	SQLTypeFloat8      uint16 = 480 // distinguished by length
+	SQLTypeDecimal     uint16 = 484
+	SQLTypeNumeric     uint16 = 488
 )
 
 // findSuperExtendedDataFormat returns the parsed list of column

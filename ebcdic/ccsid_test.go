@@ -32,11 +32,11 @@ func TestCCSID37UserIDFromFixture(t *testing.T) {
 // is 0xF0..0xF9, lowercase 'a' is 0x81, slash is 0x61).
 func TestCCSID37PunctuationAndDigits(t *testing.T) {
 	cases := map[string][]byte{
-		"0":   {0xF0},
-		"9":   {0xF9},
-		"/":   {0x61},
-		" ":   {0x40},
-		"a":   {0x81},
+		"0": {0xF0},
+		"9": {0xF9},
+		"/": {0x61},
+		" ": {0x40},
+		"a": {0x81},
 		"341513/QUSER/QZSOSIGN": {
 			0xF3, 0xF4, 0xF1, 0xF5, 0xF1, 0xF3,
 			0x61,
