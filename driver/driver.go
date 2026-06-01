@@ -292,8 +292,8 @@ type Config struct {
 	//   .    period  (DECIMAL_SEPARATOR index 0)
 	//   ,    comma   (index 1)
 	DecimalSeparator string
-	DateFormat byte   // hostserver.DateFormat* constant; 0 = JOB
-	Isolation  int16  // hostserver.Isolation* constant; -1 = default (CS)
+	DateFormat       byte  // hostserver.DateFormat* constant; 0 = JOB
+	Isolation        int16 // hostserver.Isolation* constant; -1 = default (CS)
 
 	// TLS controls whether the driver wraps the as-signon and
 	// as-database sockets in crypto/tls. When true, the dial uses

@@ -151,8 +151,8 @@ func TestEncodeDBExtendedDataBatch_BatchErrorPrefixesRow(t *testing.T) {
 		{SQLType: 500, FieldLength: 2}, // SMALLINT NN
 	}
 	rows := [][]any{
-		{int32(1)},        // ok
-		{int32(100_000)},  // overflow on row 1
+		{int32(1)},       // ok
+		{int32(100_000)}, // overflow on row 1
 	}
 	_, err := EncodeDBExtendedDataBatch(params, rows)
 	if err == nil {

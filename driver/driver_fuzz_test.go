@@ -71,15 +71,15 @@ func parseDSNFuzzSeeds() []string {
 		"db2i://u:p@h/?tls=on",
 		"db2i://u:p@h/?tls=off",
 		// Negative cases pinned from TestParseDSNRejectsBadInputs.
-		"http://u:p@h/",                            // wrong scheme
-		"db2i://h/",                            // missing user info
-		"db2i://u:p@/",                         // missing host
-		"db2i://u:p@h:notaport/",               // non-numeric port
-		"db2i://u:p@h/?date=bogus",             // unknown date
-		"db2i://u:p@h/?isolation=bogus",        // unknown isolation
-		"db2i://u:p@h/?lob=bogus",              // unknown lob mode
-		"db2i://u:p@h/?ccsid=notanumber",       // bad ccsid
-		"db2i://u:p@h/?ccsid=65537",            // ccsid out of uint16
+		"http://u:p@h/",                  // wrong scheme
+		"db2i://h/",                      // missing user info
+		"db2i://u:p@/",                   // missing host
+		"db2i://u:p@h:notaport/",         // non-numeric port
+		"db2i://u:p@h/?date=bogus",       // unknown date
+		"db2i://u:p@h/?isolation=bogus",  // unknown isolation
+		"db2i://u:p@h/?lob=bogus",        // unknown lob mode
+		"db2i://u:p@h/?ccsid=notanumber", // bad ccsid
+		"db2i://u:p@h/?ccsid=65537",      // ccsid out of uint16
 		"db2i://u:p@h/?lob-threshold=notanumber",
 		"db2i://u:p@h/?extended-metadata=maybe",
 		"db2i://u:p@h/?tls=maybe",

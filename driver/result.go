@@ -34,8 +34,8 @@ type Result struct {
 
 	// once gates the IDENTITY_VAL_LOCAL round trip so concurrent
 	// LastInsertId calls only fire one query.
-	once   sync.Once
-	cachedID int64
+	once      sync.Once
+	cachedID  int64
 	cachedErr error
 }
 
@@ -58,8 +58,8 @@ var ErrNoLastInsertId = errors.New("db2i: INSERT did not generate an IDENTITY va
 // which table the most recent INSERT (or this Result's INSERT) hit.
 // Concretely:
 //
-//   1. INSERT INTO has_identity → LastInsertId() = N
-//   2. INSERT INTO no_identity  → LastInsertId() STILL = N (sticky)
+//  1. INSERT INTO has_identity → LastInsertId() = N
+//  2. INSERT INTO no_identity  → LastInsertId() STILL = N (sticky)
 //
 // Callers who need to know whether a specific INSERT generated an
 // IDENTITY value should compare LastInsertId() before-and-after,

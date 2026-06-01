@@ -46,10 +46,10 @@ func TestEncryptPasswordSHA1RejectsBadInputs(t *testing.T) {
 	serverSeed := []byte{8, 7, 6, 5, 4, 3, 2, 1}
 
 	cases := []struct {
-		name              string
-		userID, password  string
-		client, server    []byte
-		wantErr           bool
+		name             string
+		userID, password string
+		client, server   []byte
+		wantErr          bool
 	}{
 		{"empty password", "USER", "", clientSeed, serverSeed, true},
 		{"star password", "USER", "*BLANK", clientSeed, serverSeed, true},

@@ -756,8 +756,8 @@ func Example_nullableScan() {
 
 	for rows.Next() {
 		var id int64
-		var label *string         // pointer: nil when the column is NULL
-		var expires sql.NullTime  // wrapper: .Valid is false on NULL
+		var label *string        // pointer: nil when the column is NULL
+		var expires sql.NullTime // wrapper: .Valid is false on NULL
 		if err := rows.Scan(&id, &label, &expires); err != nil {
 			log.Fatal(err)
 		}

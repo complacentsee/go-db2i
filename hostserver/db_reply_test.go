@@ -144,9 +144,9 @@ func TestParseDBReplyCompressedLengthCapped(t *testing.T) {
 	be := binary.BigEndian
 	payload := make([]byte, 20+10) // template + bare wrap header
 	be.PutUint32(payload[4:8], dataCompressedMask)
-	be.PutUint32(payload[20:24], 10)              // ll = 10 (wrap header only)
-	be.PutUint16(payload[24:26], 0x3832)          // correct compression CP
-	be.PutUint32(payload[26:30], 1<<30)           // 1 GiB declared decompressed length
+	be.PutUint32(payload[20:24], 10)     // ll = 10 (wrap header only)
+	be.PutUint16(payload[24:26], 0x3832) // correct compression CP
+	be.PutUint32(payload[26:30], 1<<30)  // 1 GiB declared decompressed length
 	_, err := ParseDBReply(payload)
 	if err == nil {
 		t.Fatal("expected error on oversized declared decompressed length, got nil")

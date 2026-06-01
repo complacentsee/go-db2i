@@ -108,8 +108,8 @@ func TestPurgeCachedStatement(t *testing.T) {
 	})
 	t.Run("entry absent", func(t *testing.T) {
 		c := &Conn{pkg: &hostserver.PackageManager{
-			Name:    "GOTPKG",
-			Cached:  map[string]*hostserver.PackageStatement{},
+			Name:   "GOTPKG",
+			Cached: map[string]*hostserver.PackageStatement{},
 		}}
 		c.purgeCachedStatement("SELECT 1")
 		if len(c.pkg.Cached) != 0 {

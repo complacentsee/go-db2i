@@ -94,9 +94,9 @@ func TestPackedBCDRejectsOverflow(t *testing.T) {
 		scale     int
 		value     string
 	}{
-		{name: "int_too_big", precision: 5, scale: 2, value: "9999.99"},   // 4 int digits > 3 allowed
-		{name: "frac_too_long", precision: 5, scale: 2, value: "1.234"},   // 3 frac digits > 2 allowed
-		{name: "non_digit", precision: 5, scale: 2, value: "12a.34"},      // bad char
+		{name: "int_too_big", precision: 5, scale: 2, value: "9999.99"}, // 4 int digits > 3 allowed
+		{name: "frac_too_long", precision: 5, scale: 2, value: "1.234"}, // 3 frac digits > 2 allowed
+		{name: "non_digit", precision: 5, scale: 2, value: "12a.34"},    // bad char
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

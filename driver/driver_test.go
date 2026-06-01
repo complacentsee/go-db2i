@@ -107,24 +107,24 @@ func TestParseDSNIsolations(t *testing.T) {
 
 func TestParseDSNRejectsBadInputs(t *testing.T) {
 	cases := map[string]string{
-		"wrong scheme":      "postgres://u:p@h/db",
-		"missing user":      "db2i://h:8471/",
-		"empty user":        "db2i://@h:8471/",
-		"missing host":      "db2i://u:p@",
-		"bad port":          "db2i://u:p@h:notnumeric/",
-		"port zero":         "db2i://u:p@h:0/",
-		"port over 65535":   "db2i://u:p@h:99999/",
-		"bad date format":   "db2i://u:p@h/?date=bogus",
-		"bad isolation":     "db2i://u:p@h/?isolation=bogus",
-		"bad signon-port":   "db2i://u:p@h/?signon-port=notanumber",
-		"signon-port zero":  "db2i://u:p@h/?signon-port=0",
-		"bad lob mode":      "db2i://u:p@h/?lob=bogus",
-		"block-size zero":   "db2i://u:p@h/?block-size=0",
-		"block-size 4":      "db2i://u:p@h/?block-size=4",
-		"block-size 7":      "db2i://u:p@h/?block-size=7",
-		"block-size 513":    "db2i://u:p@h/?block-size=513",
-		"block-size abc":    "db2i://u:p@h/?block-size=abc",
-		"block-size neg":    "db2i://u:p@h/?block-size=-1",
+		"wrong scheme":     "postgres://u:p@h/db",
+		"missing user":     "db2i://h:8471/",
+		"empty user":       "db2i://@h:8471/",
+		"missing host":     "db2i://u:p@",
+		"bad port":         "db2i://u:p@h:notnumeric/",
+		"port zero":        "db2i://u:p@h:0/",
+		"port over 65535":  "db2i://u:p@h:99999/",
+		"bad date format":  "db2i://u:p@h/?date=bogus",
+		"bad isolation":    "db2i://u:p@h/?isolation=bogus",
+		"bad signon-port":  "db2i://u:p@h/?signon-port=notanumber",
+		"signon-port zero": "db2i://u:p@h/?signon-port=0",
+		"bad lob mode":     "db2i://u:p@h/?lob=bogus",
+		"block-size zero":  "db2i://u:p@h/?block-size=0",
+		"block-size 4":     "db2i://u:p@h/?block-size=4",
+		"block-size 7":     "db2i://u:p@h/?block-size=7",
+		"block-size 513":   "db2i://u:p@h/?block-size=513",
+		"block-size abc":   "db2i://u:p@h/?block-size=abc",
+		"block-size neg":   "db2i://u:p@h/?block-size=-1",
 	}
 	for name, dsn := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -912,7 +912,7 @@ func TestPackageEligibleFor_SelectCriteria(t *testing.T) {
 		// VALUES / WITH: it ORs `|| isSelect_`, not `|| isStatementType_`.
 		{"VALUES 1", false, false},
 		{"WITH C AS (SELECT 1) SELECT * FROM C", false, false},
-		{"INSERT INTO T VALUES (1)", false, false}, // still not
+		{"INSERT INTO T VALUES (1)", false, false},     // still not
 		{"DECLARE C CURSOR FOR SELECT 1", false, true}, // inherited from default
 		{"UPDATE T SET X=? WHERE CURRENT OF C", true, false},
 	}

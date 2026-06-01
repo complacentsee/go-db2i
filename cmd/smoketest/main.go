@@ -670,4 +670,3 @@ func fail(format string, args ...any) {
 	fmt.Fprintln(os.Stderr)
 	os.Exit(1)
 }
-

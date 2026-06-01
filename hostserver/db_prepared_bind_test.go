@@ -37,8 +37,8 @@ func TestEncodeDBExtendedDataBinaryVarchar(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00, // reserved
 		0x00, 0x00, 0x00, 0x06, // row size = 2 (SL) + 4 (payload)
 	}
-	wantIndicator := []byte{0x00, 0x00}                              // not null
-	wantData := []byte{0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF}           // SL=4 + raw bytes
+	wantIndicator := []byte{0x00, 0x00}                    // not null
+	wantData := []byte{0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF} // SL=4 + raw bytes
 	want := append(append(append([]byte{}, wantHeader...), wantIndicator...), wantData...)
 
 	if !bytes.Equal(got, want) {

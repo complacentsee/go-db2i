@@ -22,11 +22,11 @@ func TestParseExtendedResultDataVLFFromBitFlag(t *testing.T) {
 	// header=20, indicators=2, rowInfoHeader=8, rowData=6, rowInfoArray=4
 	be := binary.BigEndian
 	data := make([]byte, 40)
-	be.PutUint32(data[0:4], 1)             // consistency token
-	be.PutUint32(data[4:8], 1)             // rowCount
-	be.PutUint16(data[8:10], 1)            // colCount
-	be.PutUint16(data[10:12], 2)           // indicatorSize
-	be.PutUint32(data[16:20], 18)          // rowSize (col.Length=18, matches non-VLF total!)
+	be.PutUint32(data[0:4], 1)    // consistency token
+	be.PutUint32(data[4:8], 1)    // rowCount
+	be.PutUint16(data[8:10], 1)   // colCount
+	be.PutUint16(data[10:12], 2)  // indicatorSize
+	be.PutUint32(data[16:20], 18) // rowSize (col.Length=18, matches non-VLF total!)
 	// indicators (1*1*2 = 2 bytes): not null
 	// 20..21 = 00 00
 	// VLF row-info header at offset 22:
@@ -124,8 +124,8 @@ func TestParseExtendedResultDataVLFNullableMixed(t *testing.T) {
 	be.PutUint32(data[42:46], 8)
 
 	cols := []SelectColumn{
-		{SQLType: 449, Length: 52, CCSID: 37, Name: "OBJTEXT"},     // VARCHAR(50)
-		{SQLType: 449, Length: 5, CCSID: 37, Name: "JOURNALED"},    // VARCHAR(3)
+		{SQLType: 449, Length: 52, CCSID: 37, Name: "OBJTEXT"},      // VARCHAR(50)
+		{SQLType: 449, Length: 5, CCSID: 37, Name: "JOURNALED"},     // VARCHAR(3)
 		{SQLType: 449, Length: 12, CCSID: 37, Name: "JOURNAL_NAME"}, // VARCHAR(10)
 	}
 

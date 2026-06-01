@@ -108,7 +108,7 @@ type ctxErrWrap struct {
 	cause  error
 }
 
-func (w *ctxErrWrap) Error() string  { return w.ctxErr.Error() }
+func (w *ctxErrWrap) Error() string   { return w.ctxErr.Error() }
 func (w *ctxErrWrap) Unwrap() []error { return []error{w.ctxErr, w.cause} }
 func (w *ctxErrWrap) Is(target error) bool {
 	return errors.Is(w.ctxErr, target)

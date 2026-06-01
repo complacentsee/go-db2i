@@ -22,14 +22,14 @@ func TestEnrichWithExtendedColumnDescriptors(t *testing.T) {
 
 	// Build the variable-info section for col 0: schema=GOTEST,
 	// table=USERS, base column=NAME.
-	col0 := buildExtRec(0x3900, []byte{0xD5, 0x81, 0x94, 0x85}) // "Name" in CCSID 37
-	col0 = append(col0, buildExtRec(0x3901, []byte{0xE4, 0xE2, 0xC5, 0xD9, 0xE2})...)             // "USERS"
-	col0 = append(col0, buildExtRec(0x3904, []byte{0xC7, 0xD6, 0xE3, 0xC5, 0xE2, 0xE3})...)       // "GOTEST"
+	col0 := buildExtRec(0x3900, []byte{0xD5, 0x81, 0x94, 0x85})                             // "Name" in CCSID 37
+	col0 = append(col0, buildExtRec(0x3901, []byte{0xE4, 0xE2, 0xC5, 0xD9, 0xE2})...)       // "USERS"
+	col0 = append(col0, buildExtRec(0x3904, []byte{0xC7, 0xD6, 0xE3, 0xC5, 0xE2, 0xE3})...) // "GOTEST"
 
 	// Col 1: schema=PROD, table=ORDERS, base column=ID, label=Order ID (CCSID 37).
-	col1 := buildExtRec(0x3900, []byte{0xC9, 0xC4})                                                  // "ID"
-	col1 = append(col1, buildExtRec(0x3901, []byte{0xD6, 0xD9, 0xC4, 0xC5, 0xD9, 0xE2})...)          // "ORDERS"
-	col1 = append(col1, buildExtRec(0x3904, []byte{0xD7, 0xD9, 0xD6, 0xC4})...)                      // "PROD"
+	col1 := buildExtRec(0x3900, []byte{0xC9, 0xC4})                                         // "ID"
+	col1 = append(col1, buildExtRec(0x3901, []byte{0xD6, 0xD9, 0xC4, 0xC5, 0xD9, 0xE2})...) // "ORDERS"
+	col1 = append(col1, buildExtRec(0x3904, []byte{0xD7, 0xD9, 0xD6, 0xC4})...)             // "PROD"
 	// Label with CCSID 37: "Order ID"
 	col1Label := append([]byte{0x00, 0x25}, []byte{0xD6, 0x99, 0x84, 0x85, 0x99, 0x40, 0xC9, 0xC4}...)
 	col1 = append(col1, buildExtRecRaw(0x3902, col1Label)...)
@@ -46,8 +46,8 @@ func TestEnrichWithExtendedColumnDescriptors(t *testing.T) {
 	// 6 reserved bytes (zeros) at payload[4:10]
 
 	// Col 0 fixed record at payload[10..26]
-	payload[10] = 0x01 // updateable
-	payload[11] = 0x01 // searchable
+	payload[10] = 0x01              // updateable
+	payload[11] = 0x01              // searchable
 	be.PutUint16(payload[12:14], 0) // attributes
 	be.PutUint32(payload[14:18], uint32(varStartFromLL))
 	be.PutUint32(payload[18:22], uint32(col0VarLen))
@@ -102,7 +102,7 @@ func TestEnrichWithExtendedColumnDescriptors(t *testing.T) {
 // "extended metadata bit set but server didn't include it" case.
 func TestEnrichWithExtendedColumnDescriptorsEmpty(t *testing.T) {
 	cols := []SelectColumn{{Name: "X"}}
-	enrichWithExtendedColumnDescriptors(cols, []byte{0, 0, 0, 0})  // too short
+	enrichWithExtendedColumnDescriptors(cols, []byte{0, 0, 0, 0}) // too short
 	if cols[0].Schema != "" || cols[0].Table != "" {
 		t.Errorf("short payload leaked: %+v", cols[0])
 	}

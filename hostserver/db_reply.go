@@ -264,18 +264,18 @@ func unwrapCompressedReply(payload []byte) ([]byte, error) {
 // the right call.
 type ServerAttributes struct {
 	// Numeric POs.
-	DateFormatPO            uint16
-	DateSeparatorPO         uint16
-	TimeFormatPO            uint16
-	TimeSeparatorPO         uint16
-	DecimalSeparatorPO      uint16
-	NamingConventionPO      uint16
-	IgnoreDecimalDataError  uint16
-	CommitmentControlLevel  uint16
-	DRDAPackageSize         uint16
-	TranslationIndicator    uint8
-	ServerCCSID             uint16
-	ServerNLSSValue         uint16
+	DateFormatPO           uint16
+	DateSeparatorPO        uint16
+	TimeFormatPO           uint16
+	TimeSeparatorPO        uint16
+	DecimalSeparatorPO     uint16
+	NamingConventionPO     uint16
+	IgnoreDecimalDataError uint16
+	CommitmentControlLevel uint16
+	DRDAPackageSize        uint16
+	TranslationIndicator   uint8
+	ServerCCSID            uint16
+	ServerNLSSValue        uint16
 
 	// EBCDIC bytes (decode through CCSID 37 for these).
 	ServerLanguageId           []byte // 3 bytes,  e.g. "ENU"

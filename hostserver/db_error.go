@@ -24,14 +24,15 @@ import (
 //
 // SQLCode is the IBM SQL error code (negative = error, 0 = ok,
 // positive = warning). Examples relevant to labelverification-gw:
-//   -204  table not found
-//   -206  column not found
-//   -302  numeric value out of range / truncation
-//   -407  null insert into NOT NULL column
-//   -530  foreign-key violation
-//   -803  unique-key violation (duplicate row)
-//   -911  deadlock / lock timeout
-//   -913  unsuccessful execution / lock timeout warning
+//
+//	-204  table not found
+//	-206  column not found
+//	-302  numeric value out of range / truncation
+//	-407  null insert into NOT NULL column
+//	-530  foreign-key violation
+//	-803  unique-key violation (duplicate row)
+//	-911  deadlock / lock timeout
+//	-913  unsuccessful execution / lock timeout warning
 //
 // MessageID is the 8-char IBM message identifier (e.g. "SQL0204")
 // pulled from the SQLERRP slot. Useful for log greping but not part

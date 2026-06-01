@@ -167,8 +167,8 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 	}
 	bf := estimateBlockingFactor(cols, blockSizeKiB)
 	params := []DBParam{
-		DBParamShort(cpDBFetchScrollOption, 0x0000),                                  // 0x380E: FETCH_NEXT
-		{CodePoint: cpDBBlockingFactor, Data: blockingFactorBytes(bf)},               // 0x380C: rows/block
+		DBParamShort(cpDBFetchScrollOption, 0x0000),                    // 0x380E: FETCH_NEXT
+		{CodePoint: cpDBBlockingFactor, Data: blockingFactorBytes(bf)}, // 0x380C: rows/block
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
 	if err != nil {
@@ -223,6 +223,7 @@ func fetchMoreRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 //   - 0x380E Fetch Scroll Option (short; 0 = FETCH_NEXT)
 //   - 0x380C Blocking Factor (uint32; matches JT400's 2048-row
 //     default per JDProperties.BLOCK_SIZE)
+//
 // The CALL cursor needs the BlockingFactor explicitly (the proc-
 // opened cursor's server-side state doesn't carry a default block
 // size like a fresh SELECT cursor does).
@@ -250,7 +251,7 @@ func fetchCallRows(conn io.ReadWriter, cols []SelectColumn, nextCorrelation uint
 		ParameterMarkerDescriptor: 0,
 	}
 	params := []DBParam{
-		DBParamShort(cpDBFetchScrollOption, 0x0000), // FETCH_NEXT
+		DBParamShort(cpDBFetchScrollOption, 0x0000),                           // FETCH_NEXT
 		{CodePoint: cpDBBlockingFactor, Data: []byte{0x00, 0x00, 0x08, 0x00}}, // 2048 rows / block
 	}
 	hdr, payload, err := BuildDBRequest(ReqDBSQLFetch, tpl, params)
@@ -503,16 +504,16 @@ type SelectResult struct {
 // the JTOpen-style 3-call sequence:
 //
 //  1. CREATE_RPB (0x1D00)        -- create a Request Parameter
-//                                   Block named "STMT0001" /
-//                                   "CRSR0001". Discards reply.
+//     Block named "STMT0001" /
+//     "CRSR0001". Discards reply.
 //  2. PREPARE_DESCRIBE (0x1803)  -- send statement text + ask for
-//                                   column descriptors. Reply
-//                                   carries SQLCA + super-extended
-//                                   data format (CP 0x3812).
+//     column descriptors. Reply
+//     carries SQLCA + super-extended
+//     data format (CP 0x3812).
 //  3. OPEN_DESCRIBE_FETCH (0x180E) -- execute + fetch all rows in
-//                                   one round trip. Reply carries
-//                                   SQLCA + extended result data
-//                                   (CP 0x380E) -- the row bytes.
+//     one round trip. Reply carries
+//     SQLCA + extended result data
+//     (CP 0x380E) -- the row bytes.
 //
 // nextCorrelation is the starting CorrelationID to use; the three
 // frames consume nextCorrelation, nextCorrelation+1, nextCorrelation+2.

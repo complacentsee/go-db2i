@@ -329,7 +329,7 @@ func TestDecompressDataStreamRLE_RoundTrip(t *testing.T) {
 	t.Run("zero-pattern fast path", func(t *testing.T) {
 		// JT400 fast-paths zero-byte runs with the same record form.
 		src := []byte{rleEscapeByte, 0x00, 0x00, 0x00, 0x10} // count = 16
-		want := make([]byte, 32) // 16 × 2 = 32 zero bytes
+		want := make([]byte, 32)                             // 16 × 2 = 32 zero bytes
 		got, err := decompressDataStreamRLE(src, 32)
 		if err != nil {
 			t.Fatalf("decompressDataStreamRLE: %v", err)
