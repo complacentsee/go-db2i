@@ -6,9 +6,8 @@ name: CI
 #     coverage, race detector, and golangci-lint (gated to new findings).
 #   * Live conformance (nightly schedule, manual dispatch, push to main,
 #     and same-repo PRs): the //go:build conformance suite against the
-#     canonical PUB400 V7R5 target (and, optionally, IBM Cloud V7R6),
-#     with credentials injected from repo secrets as environment
-#     variables -- never on a command line.
+#     canonical PUB400 V7R5 target, with credentials injected from repo
+#     secrets as environment variables -- never on a command line.
 #
 # Fork safety: secrets are unavailable to fork PRs, so DB2I_DSN arrives
 # empty there and the suite's dsn() helper t.Skips every live test (the
@@ -16,9 +15,8 @@ name: CI
 # same-repo branches, so it never even starts for forks.
 #
 # Required repo secrets for the live job (mirror the gitignored
-# .env.pub400-v7r5 / .env.ibmcloud-v7r6 files):
+# .env.pub400-v7r5 file):
 #   DB2I_DSN, DB2I_SCHEMA                     -- PUB400 V7R5 (canonical)
-#   DB2I_DSN_IBMCLOUD, DB2I_SCHEMA_IBMCLOUD   -- IBM Cloud V7R6 (optional)
 # Optional repo secrets/vars that unlock additional gated tests:
 #   secret DB2I_SCHEMA_B                      -- second library tests
 #   secret DB2I_TLS_TARGET                    -- TLS connectivity test
@@ -143,7 +141,7 @@ jobs:
           only-new-issues: true
 
   live-conformance:
-    name: live conformance (${{ matrix.target }})
+    name: live conformance (PUB400 V7R5)
     runs-on: ubuntu-latest
     needs: offline
     # Run on the nightly schedule, manual dispatch, post-merge pushes to
@@ -155,16 +153,6 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)
-    continue-on-error: ${{ matrix.optional || false }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [pub400]
-        include:
-          # IBM Cloud V7R6 is a second VRM axis but non-gating: a flaky
-          # or unconfigured secondary target must not fail the workflow.
-          - target: ibmcloud
-            optional: true
     steps:
       - uses: actions/checkout@v4
 
@@ -175,11 +163,8 @@ jobs:
 
       - name: live conformance suite
         env:
-          # Branch on the optional (ibmcloud) leg so an empty/absent pub400
-          # secret stays empty -- the suite then t.Skips cleanly rather than
-          # silently borrowing the IBM Cloud DSN.
-          DB2I_DSN: ${{ matrix.target == 'ibmcloud' && secrets.DB2I_DSN_IBMCLOUD || secrets.DB2I_DSN }}
-          DB2I_SCHEMA: ${{ matrix.target == 'ibmcloud' && secrets.DB2I_SCHEMA_IBMCLOUD || secrets.DB2I_SCHEMA }}
+          DB2I_DSN: ${{ secrets.DB2I_DSN }}
+          DB2I_SCHEMA: ${{ secrets.DB2I_SCHEMA }}
           # Optional gated extras (each test t.Skips when its var is empty).
           DB2I_SCHEMA_B: ${{ secrets.DB2I_SCHEMA_B }}
           DB2I_TLS_TARGET: ${{ secrets.DB2I_TLS_TARGET }}
@@ -187,27 +172,27 @@ jobs:
           DB2I_TEST_FILING: ${{ vars.DB2I_TEST_FILING }}
         run: |
           if [ -z "$DB2I_DSN" ]; then
-            echo "::notice::DB2I_DSN secret unset for target '${{ matrix.target }}'; live tests will skip cleanly."
+            echo "::notice::DB2I_DSN secret unset; live tests will skip cleanly."
           fi
           go test -tags=conformance -v -timeout 30m \
             -coverpkg=./... \
-            -coverprofile=coverage-conformance-${{ matrix.target }}.out \
+            -coverprofile=coverage-conformance-pub400.out \
             -covermode=atomic \
             ./test/conformance/...
 
       - name: coverage summary
         if: always()
         run: |
-          if [ -f coverage-conformance-${{ matrix.target }}.out ]; then
-            go tool cover -func=coverage-conformance-${{ matrix.target }}.out | tail -1
-            total="$(go tool cover -func=coverage-conformance-${{ matrix.target }}.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')"
-            echo "### Live conformance coverage (${{ matrix.target }}): ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f coverage-conformance-pub400.out ]; then
+            go tool cover -func=coverage-conformance-pub400.out | tail -1
+            total="$(go tool cover -func=coverage-conformance-pub400.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')"
+            echo "### Live conformance coverage (PUB400 V7R5): ${total}%" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: upload coverage profile
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-conformance-${{ matrix.target }}
-          path: coverage-conformance-${{ matrix.target }}.out
+          name: coverage-conformance-pub400
+          path: coverage-conformance-pub400.out
           if-no-files-found: ignore

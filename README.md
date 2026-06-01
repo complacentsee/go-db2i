@@ -217,10 +217,8 @@ The canonical environment / secret names (mirroring the gitignored
 
 In CI the live suite runs nightly, on manual dispatch, and on same-repo
 PRs against **PUB400 (V7R5M0)** as the canonical base target, with
-`DB2I_DSN` / `DB2I_SCHEMA` supplied as repository **secrets**; an
-optional non-gating matrix leg targets IBM Cloud V7R6 via
-`DB2I_DSN_IBMCLOUD` / `DB2I_SCHEMA_IBMCLOUD`. Forks have no secret access,
-so the live job skips cleanly there.
+`DB2I_DSN` / `DB2I_SCHEMA` supplied as repository **secrets**. Forks have
+no secret access, so the live job skips cleanly there.
 
 ## Contributing
 
