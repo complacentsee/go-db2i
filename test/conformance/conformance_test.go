@@ -564,6 +564,98 @@ func TestLOBDBClobCCSID13488(t *testing.T) {
 	})
 }
 
+// TestGraphicScalarColumns covers the scalar (non-LOB) graphic read
+// path fixed for issue #3: GRAPHIC (468/469), VARGRAPHIC (464/465),
+// and LONG VARGRAPHIC (472/473). Before the fix, any query projecting
+// such a column failed the whole row-parse with
+// "unsupported SQL type 47x".
+func TestGraphicScalarColumns(t *testing.T) {
+	db := openDB(t)
+
+	// Sub-test 1: zero-setup reproducer. QSYS2.SYSVIEWS.VIEW_DEFINITION
+	// is a LONG VARGRAPHIC CCSID 1200 column present on every IBM i.
+	// The raw graphic decode must equal the server-side conversion of
+	// the same value to UTF-8 (CAST ... AS VARCHAR CCSID 1208) -- a
+	// lossless oracle that isolates the defect to graphic *decoding*.
+	// Pre-fix this query errored out entirely.
+	t.Run("SYSVIEWS LONG VARGRAPHIC vs UTF-8 cast oracle", func(t *testing.T) {
+		// LENGTH filter keeps the VARCHAR(4000) CAST from overflowing
+		// on huge view definitions; 1000 chars is plenty to exercise
+		// the SL-prefix + UTF-16 decode across many rows.
+		rows, err := db.Query(`
+			SELECT VIEW_DEFINITION,
+			       CAST(VIEW_DEFINITION AS VARCHAR(4000) CCSID 1208) AS DEF
+			  FROM QSYS2.SYSVIEWS
+			 WHERE VIEW_DEFINITION IS NOT NULL
+			   AND LENGTH(VIEW_DEFINITION) <= 1000
+			 FETCH FIRST 50 ROWS ONLY`)
+		if err != nil {
+			t.Fatalf("query SYSVIEWS: %v", err)
+		}
+		defer rows.Close()
+		checked := 0
+		for rows.Next() {
+			var raw, oracle string
+			if err := rows.Scan(&raw, &oracle); err != nil {
+				t.Fatalf("scan row %d: %v", checked, err)
+			}
+			if raw != oracle {
+				t.Errorf("row %d: raw LONG VARGRAPHIC decode != UTF-8 cast oracle\n  raw    = %q\n  oracle = %q",
+					checked, raw, oracle)
+			}
+			checked++
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err: %v", err)
+		}
+		if checked == 0 {
+			t.Skip("no SYSVIEWS rows with VIEW_DEFINITION <= 1000 chars; cannot exercise read path")
+		}
+		t.Logf("verified %d LONG VARGRAPHIC view definitions against the UTF-8 cast oracle", checked)
+	})
+
+	// Sub-test 2: explicit GRAPHIC(n) (fixed) and VARGRAPHIC(n)
+	// (variable) round-trip through a real table. Values are written
+	// with Unicode hex literals (UX'...') so the test exercises only
+	// the read path -- binding a graphic *parameter* is a separate,
+	// out-of-scope gap (see hostserver/db_prepared.go). The VARGRAPHIC
+	// payload includes a non-BMP surrogate pair (U+1D11E treble clef)
+	// to confirm the UTF-16 surrogate reconstruction.
+	t.Run("GRAPHIC/VARGRAPHIC table round-trip", func(t *testing.T) {
+		dropTestTables(t, db)
+		tbl := schema() + "." + tablePrefix + "graphic"
+		if _, err := db.Exec(fmt.Sprintf(
+			`CREATE TABLE %s (id INTEGER NOT NULL PRIMARY KEY, g GRAPHIC(20) CCSID 1200, vg VARGRAPHIC(50) CCSID 1200)`, tbl)); err != nil {
+			t.Skipf("CREATE TABLE GRAPHIC failed (probably no DBCS NLSS on this profile): %v", err)
+		}
+		defer db.Exec("DROP TABLE " + tbl)
+
+		// UX'0048 0069' = "Hi"; vg adds " " + U+1D11E (D834 DD1E).
+		if _, err := db.Exec(fmt.Sprintf(
+			`INSERT INTO %s (id, g, vg) VALUES (1, UX'00480069', UX'004800690020D834DD1E')`, tbl)); err != nil {
+			t.Fatalf("insert via UX literal: %v", err)
+		}
+
+		var g, vg string
+		if err := db.QueryRow(fmt.Sprintf(`SELECT g, vg FROM %s WHERE id = 1`, tbl)).Scan(&g, &vg); err != nil {
+			t.Fatalf("scan graphic columns: %v", err)
+		}
+		// GRAPHIC(20) is fixed-length: "Hi" right-padded with U+0020
+		// graphic spaces to 20 characters. Trim to compare the
+		// content, then separately assert the padded width to lock in
+		// the fixed-slot decode.
+		if got := strings.TrimRight(g, " "); got != "Hi" {
+			t.Errorf("GRAPHIC content = %q, want %q", got, "Hi")
+		}
+		if wantLen := 20; len([]rune(g)) != wantLen {
+			t.Errorf("GRAPHIC fixed width = %d runes, want %d (space-padded)", len([]rune(g)), wantLen)
+		}
+		if want := "Hi \U0001D11E"; vg != want {
+			t.Errorf("VARGRAPHIC round-trip = %q, want %q (surrogate pair)", vg, want)
+		}
+	})
+}
+
 // TestLOBMultiRow exercises multi-tuple INSERT (`VALUES (?,?), (?,?)`).
 // Each parameter marker position gets its own server-allocated
 // locator handle in CP 0x3813 of the PREPARE_DESCRIBE reply, so a

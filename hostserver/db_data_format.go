@@ -260,6 +260,22 @@ func sqlTypeMetadata(sqlType uint16, length uint32, precision, scale uint16) (ty
 		return "VARCHAR", int(scale), false
 	case 452, 453, 456, 457, 460, 461:
 		return "CHAR", int(length), false
+	case 464, 465:
+		// VARGRAPHIC -- declared slot is 2 + 2*maxchars (2-byte SL
+		// prefix + 2-byte code units). Display size is the char count.
+		if length >= 2 {
+			return "VARGRAPHIC", int(length-2) / 2, false
+		}
+		return "VARGRAPHIC", 0, false
+	case 468, 469:
+		// GRAPHIC (fixed) -- no SL prefix; slot is 2*chars bytes.
+		return "GRAPHIC", int(length) / 2, false
+	case 472, 473:
+		// LONG VARGRAPHIC -- same wire shape as VARGRAPHIC.
+		if length >= 2 {
+			return "LONG VARGRAPHIC", int(length-2) / 2, false
+		}
+		return "LONG VARGRAPHIC", 0, false
 	case 480, 481:
 		switch length {
 		case 4:

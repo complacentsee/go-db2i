@@ -270,13 +270,21 @@ func nullSkipWidth(col SelectColumn, fixedSlots bool) int {
 // LONG_VARCHAR_FOR_BIT_DATA, VARBINARY, DATALINK, VARGRAPHIC,
 // LONG_VARGRAPHIC, NVARCHAR, LONG_NVARCHAR) translated to the
 // IBM i wire SQL type numbers (NN/nullable pairs).
+//
+// NOTE: GRAPHIC (468/469) is deliberately NOT here. It is a
+// FIXED-length type with no SL prefix (live-confirmed on PUB400
+// V7R5M0 for issue #3 -- a GRAPHIC(5) value ships exactly
+// 2*5 payload bytes with no length header). Only the VARGRAPHIC
+// (464/465) and LONG VARGRAPHIC (472/473) graphic forms carry a
+// 2-byte SL. The decodeColumn graphic cases and this classifier
+// must agree, or a NULL GRAPHIC column in a VLF row would null-skip
+// 2 bytes instead of col.Length and shift subsequent columns.
 func isVarLengthSQLType(sqlType uint16) bool {
 	switch sqlType {
 	case 448, 449, // VARCHAR (also covers VARCHAR FOR BIT DATA when CCSID=65535)
 		456, 457, // LONG_VARCHAR
 		460, 461, // LONG_VARCHAR_FOR_BIT_DATA (rare; typically same shape as 456/457)
 		464, 465, // VARGRAPHIC (graphic, 2-byte SL of char-count)
-		468, 469, // VARGRAPHIC family alt
 		472, 473, // LONG_VARGRAPHIC
 		908, 909: // VARBINARY (JT400 SQLVarbinary.getNativeType -> 908)
 		return true
@@ -412,6 +420,64 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, fmt.Errorf("decode varchar ccsid %d: %w", col.CCSID, err)
 		}
 		return s, 2 + n, nil
+
+	case 464, 465, // VARGRAPHIC      (NN / nullable)
+		472, 473: // LONG VARGRAPHIC (NN / nullable)
+		// Variable-length graphic (DBCS / Unicode) columns. Wire
+		// format mirrors VARCHAR but with 2-byte code units: a
+		// 2-byte BE SL prefix followed by the payload. Live-confirmed
+		// against PUB400 V7R5M0 (issue #3) that the SL counts GRAPHIC
+		// CHARACTERS (code units), not bytes -- e.g.
+		// CAST('ABC' AS VARGRAPHIC(10) CCSID 1200) ships
+		// `00 03 | 00 41 00 42 00 43`, SL=3 with 6 payload bytes. So
+		// payload bytes = 2 * SL and consumed = 2 + 2*SL. col.Length
+		// is the declared slot width (2 + 2*maxchars); in the
+		// VLF-compressed result-data path the row carries only the
+		// 2+2*SL actual bytes, which is what we advance by.
+		//
+		// CCSID picks the codec:
+		//   65535  FOR BIT DATA -> raw []byte, no transcode
+		//   else   UTF-16 BE / UCS-2 BE via decodeGraphicLOB
+		//          (1200 = UTF-16 BE, 13488 = UCS-2 BE; the same
+		//          helper the inline-DBCLOB case 412/413 uses).
+		if len(b) < 2 {
+			return nil, 0, fmt.Errorf("vargraphic header wants 2 bytes, have %d", len(b))
+		}
+		chars := int(binary.BigEndian.Uint16(b[:2]))
+		nbytes := chars * 2
+		if nbytes > int(col.Length) {
+			return nil, 0, fmt.Errorf("vargraphic declared length %d bytes exceeds column max %d", nbytes, col.Length)
+		}
+		if len(b) < 2+nbytes {
+			return nil, 0, fmt.Errorf("vargraphic wants %d bytes (header+data), have %d", 2+nbytes, len(b))
+		}
+		if col.CCSID == ccsidBinary {
+			out := make([]byte, nbytes)
+			copy(out, b[2:2+nbytes])
+			return out, 2 + nbytes, nil
+		}
+		return decodeGraphicLOB(b[2 : 2+nbytes]), 2 + nbytes, nil
+
+	case 468, 469: // GRAPHIC (fixed-length) -- NN / nullable
+		// Fixed-length graphic (DBCS / Unicode) columns. Unlike
+		// VARGRAPHIC there is NO SL prefix: the payload is exactly
+		// col.Length bytes (2 * declared char count), space-padded
+		// with U+0020 graphic spaces. Live-confirmed against PUB400
+		// V7R5M0 (issue #3): CAST('ABC' AS GRAPHIC(5) CCSID 1200)
+		// ships `00 41 00 42 00 43 00 20 00 20` with col.Length=10
+		// and no length header. Because 468/469 are fixed-width,
+		// isVarLengthSQLType must NOT list them -- otherwise a NULL
+		// GRAPHIC column in a VLF row would null-skip 2 bytes instead
+		// of col.Length and slide every subsequent column.
+		if len(b) < int(col.Length) {
+			return nil, 0, fmt.Errorf("graphic wants %d bytes, have %d", col.Length, len(b))
+		}
+		if col.CCSID == ccsidBinary {
+			out := make([]byte, col.Length)
+			copy(out, b[:col.Length])
+			return out, int(col.Length), nil
+		}
+		return decodeGraphicLOB(b[:col.Length]), int(col.Length), nil
 
 	case 912, 913:
 		// BINARY (fixed-length) -- NN / nullable. JT400's
