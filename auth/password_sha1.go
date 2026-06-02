@@ -25,9 +25,18 @@ import (
 //     0x40 to 10 bytes, then back to Unicode -- this normalises the
 //     character set the same way JTOpen does, so two callers passing
 //     "USER" (4 chars) and "USER      " (10 chars w/ space pad)
-//     produce identical bytes;
-//   - password is trimmed of leading + trailing Unicode spaces, then
-//     each rune is encoded big-endian into 2 bytes (no BOM).
+//     produce identical bytes.
+//     DEFERRED: JTOpen uses SignonConverter's invariant-charset table
+//     (the restricted set of valid user-ID/DES-password characters,
+//     with a handful of accented Latin-1 folds) rather than a general
+//     CCSID-37 round-trip. The two agree on the ASCII letters/digits/
+//     specials a userID may actually contain; they diverge only on
+//     exotic accented inputs that IBM i rejects anyway. Porting the
+//     full table is tracked separately -- see issue #34.
+//   - password is trimmed of trailing Unicode spaces (only the
+//     {U+0000, U+0020, U+3000} code points, mirroring JTOpen's
+//     trimUnicodeSpace), then each rune is encoded big-endian into
+//     2 bytes (no BOM). Leading spaces are significant and preserved.
 //
 // sequence is the literal byte slice {0, 0, 0, 0, 0, 0, 0, 1}.
 //
@@ -35,9 +44,12 @@ import (
 // don't round-trip through CCSID 37.
 //
 // Inputs are validated minimally (an empty password or one starting
-// with '*' is rejected, mirroring the JTOpen guards). All buffer
-// allocations are heap-resident; callers concerned about plaintext-
-// password residue in memory should overwrite their own copies.
+// with '*' is rejected, mirroring the JTOpen guards). The transient
+// UTF-16 password buffer and the intermediate token are zeroed before
+// return on a best-effort basis (mirroring JTOpen's CredentialVault
+// .clearArray calls); the caller's own password string is immutable
+// and cannot be wiped here, so callers concerned about plaintext-
+// password residue should still overwrite their own copies.
 func EncryptPasswordSHA1(userID, password string, clientSeed, serverSeed []byte) ([]byte, error) {
 	if password == "" {
 		return nil, fmt.Errorf("auth: password is empty")
@@ -56,13 +68,15 @@ func EncryptPasswordSHA1(userID, password string, clientSeed, serverSeed []byte)
 	if err != nil {
 		return nil, err
 	}
-	passwordBytes := utf16BE(strings.TrimSpace(password))
+	passwordBytes := utf16BE(trimUnicodeSpace(password))
+	defer zero(passwordBytes)
 
 	// token = SHA-1(userIDBytes || passwordBytes)
 	h := sha1.New()
 	h.Write(userIDBytes)
 	h.Write(passwordBytes)
 	token := h.Sum(nil)
+	defer zero(token)
 
 	// encrypted = SHA-1(token || serverSeed || clientSeed || userIDBytes || sequence)
 	sequence := []byte{0, 0, 0, 0, 0, 0, 0, 1}
@@ -73,6 +87,26 @@ func EncryptPasswordSHA1(userID, password string, clientSeed, serverSeed []byte)
 	h.Write(userIDBytes)
 	h.Write(sequence)
 	return h.Sum(nil), nil
+}
+
+// trimUnicodeSpace strips trailing space code points from s, matching
+// com.ibm.as400.access.AS400ImplRemote.trimUnicodeSpace: only the
+// three code points {U+0000 NUL, U+0020 SPACE, U+3000 IDEOGRAPHIC
+// SPACE} are trimmed, and only from the end. Leading and interior
+// spaces are preserved (unlike strings.TrimSpace, which also strips
+// leading runs and a broader Unicode whitespace set).
+func trimUnicodeSpace(s string) string {
+	runes := []rune(s)
+	end := len(runes)
+	for end > 0 {
+		switch runes[end-1] {
+		case '\x00', ' ', '　':
+			end--
+		default:
+			return string(runes[:end])
+		}
+	}
+	return string(runes[:end])
 }
 
 // userIDToUTF16BE applies the EBCDIC -> Unicode -> UTF-16 BE pipeline

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +44,13 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		slog.String("driver", "db2i"),
 		slog.String("dsn_host", c.cfg.Host),
 	)
+
+	// One-shot warning when TLS cert verification is disabled. The DES
+	// password path warns about an unvalidated algorithm; the TLS path
+	// silently dropping MITM protection deserves the same visibility.
+	if c.cfg.TLS && c.cfg.TLSInsecureSkipVerify {
+		warnInsecureTLS(ctx, log)
+	}
 
 	// Sign-on phase: open as-signon, perform encrypted handshake.
 	signon, err := dialHostServer(c.cfg, c.cfg.SignonPort, deadline)
@@ -1069,6 +1077,29 @@ func dialWithDeadline(network, addr string, deadline time.Time) (net.Conn, error
 		timeout = 30 * time.Second
 	}
 	return net.DialTimeout(network, addr, timeout)
+}
+
+// insecureTLSWarnOnce gates the InsecureSkipVerify warning to one
+// emission per process, matching the auth package's one-shot
+// unvalidated-algorithm warning rather than logging it on every
+// connection in a pool.
+var insecureTLSWarnOnce sync.Once
+
+// warnInsecureTLS logs a one-shot WARN that server-certificate
+// verification is disabled. Split from emitInsecureTLSWarning so tests
+// can exercise the log line without fighting the process-wide Once.
+func warnInsecureTLS(ctx context.Context, log *slog.Logger) {
+	insecureTLSWarnOnce.Do(func() {
+		emitInsecureTLSWarning(ctx, log)
+	})
+}
+
+// emitInsecureTLSWarning writes the warning unconditionally.
+func emitInsecureTLSWarning(ctx context.Context, log *slog.Logger) {
+	log.LogAttrs(ctx, slog.LevelWarn,
+		"db2i: TLS certificate verification disabled (tls-insecure-skip-verify); the connection is vulnerable to man-in-the-middle attacks -- use only for self-signed IBM i host-server certs on a trusted path",
+		slog.Bool("tls_insecure_skip_verify", true),
+	)
 }
 
 // dialHostServer dials addr <host>:<port> using TCP if cfg.TLS is
