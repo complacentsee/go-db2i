@@ -123,6 +123,54 @@ func isConnLevelErr(err error) bool {
 	return false
 }
 
+// Ping implements driver.Pinger. database/sql routes db.Ping /
+// db.PingContext here so callers can verify the connection is alive
+// with a real wire round-trip rather than a flag check. Unlike
+// IsValid (which only inspects c.closed and never touches the
+// socket), Ping issues a cheap `VALUES 1` SELECT so a silently-dead
+// idle socket -- one the peer dropped without us noticing -- is
+// detected and the conn retired instead of handed to the caller.
+//
+// The round-trip mirrors result.go's `VALUES IDENTITY_VAL_LOCAL()`
+// liveness query: open a static cursor, close it immediately. We
+// don't read any rows -- a successful OPEN already proves the wire
+// is healthy end-to-end (PREPARE_DESCRIBE + OPEN_DESCRIBE_FETCH made
+// it to the server and a well-formed reply came back).
+//
+// Error handling matches the rest of the driver:
+//
+//   - A TCP-level failure (EOF, RST, deadline) runs through
+//     classifyConnErr, which marks the conn dead and wraps the cause
+//     so it satisfies errors.Is(err, driver.ErrBadConn). database/sql
+//     then evicts the conn from the pool. Per database/sql's contract
+//     a Pinger that returns driver.ErrBadConn makes the pool retry on
+//     a fresh conn, so this is the right signal for a dead socket.
+//   - A ctx cancellation / deadline is surfaced via resolveCtxErr so
+//     callers get context.Canceled / context.DeadlineExceeded rather
+//     than the transport-level i/o error that delivered it.
+//   - A non-fatal server-side error (unlikely for a constant SELECT)
+//     is returned as-is; the conn stays usable.
+func (c *Conn) Ping(ctx context.Context) error {
+	if c == nil || c.closed {
+		return driver.ErrBadConn
+	}
+
+	cleanup := withContextDeadlineDefault(ctx, c.conn, c.socketTimeout())
+	defer cleanup()
+
+	cursor, err := hostserver.OpenSelectStatic(c.conn, "VALUES 1", c.nextCorrFunc())
+	if err != nil {
+		return resolveCtxErr(ctx, c.classifyConnErr(err))
+	}
+	// The OPEN succeeded -- the conn is alive. Close the cursor to
+	// release the server-side RPB; a Close failure is itself a
+	// connection-health signal, so route it through the same path.
+	if cerr := cursor.Close(); cerr != nil {
+		return resolveCtxErr(ctx, c.classifyConnErr(cerr))
+	}
+	return nil
+}
+
 // IsValid implements driver.Validator. database/sql calls this
 // before handing the conn to a caller; returning false makes the
 // pool discard the conn without using it. Cheap (just a flag
