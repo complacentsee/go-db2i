@@ -793,6 +793,15 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
+	// IN-parameter graphic fixup (issue #13): a []byte/string bind into a
+	// CCSID-65535 ("bit data") GRAPHIC/VARGRAPHIC predicate defaults to a
+	// VARCHAR shape the server won't cast (SQL-332 / 57017). Adopt the
+	// column's declared graphic shape from the PMF so the value ships
+	// verbatim through the native graphic encoder. No-op for
+	// non-65535-graphic targets and non-[]byte/string binds. Mirrors the
+	// Exec/IUD path so SELECT/Query predicates get the same fixup.
+	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
+
 	// IN-parameter NULL fixup (issue #11): adopt the column's declared
 	// shape for any nil bind so a NULL predicate against a native
 	// BINARY/VARBINARY column is assignable rather than failing the
