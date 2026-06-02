@@ -105,6 +105,52 @@ func TestConnClassifyConnErrMarksDead(t *testing.T) {
 	}
 }
 
+// TestConnImplementsPinger confirms *Conn satisfies driver.Pinger at
+// compile time. Without it, database/sql's db.Ping / db.PingContext
+// fall back to a no-op that only checks the pool's flag and never
+// touches the wire -- a silently-dead idle socket would pass. If a
+// future refactor drops the Ping method, this stops compiling.
+func TestConnImplementsPinger(t *testing.T) {
+	var _ driver.Pinger = (*Conn)(nil)
+}
+
+// TestConnPing exercises driver.Pinger. The cheap `VALUES 1` round-
+// trip can't reach a real server in a unit test, so we drive the two
+// offline-observable contracts:
+//
+//   - A conn already flagged closed short-circuits to
+//     driver.ErrBadConn without touching the wire.
+//   - A conn whose socket is dead (peer dropped it; reads return EOF
+//     mid-handshake) surfaces an error that satisfies
+//     errors.Is(err, driver.ErrBadConn) AND marks the conn dead, so
+//     database/sql evicts it from the pool and retries on a fresh one.
+func TestConnPing(t *testing.T) {
+	t.Run("closed conn -> ErrBadConn, no wire", func(t *testing.T) {
+		c := &Conn{cfg: &Config{}, log: silentLogger, closed: true}
+		if err := c.Ping(context.Background()); !errors.Is(err, driver.ErrBadConn) {
+			t.Errorf("closed Conn.Ping = %v, want driver.ErrBadConn", err)
+		}
+	})
+
+	t.Run("dead socket -> ErrBadConn + conn marked dead", func(t *testing.T) {
+		// fakeNetConn with no queued replies accepts the PREPARE write
+		// then returns io.EOF on the reply read -- the canonical
+		// "peer dropped the idle socket" failure. isConnLevelErr
+		// classifies EOF as a connection-level error.
+		c := &Conn{conn: newFakeNetConn(), cfg: &Config{}, log: silentLogger}
+		err := c.Ping(context.Background())
+		if err == nil {
+			t.Fatal("Ping on dead socket returned nil, want error")
+		}
+		if !errors.Is(err, driver.ErrBadConn) {
+			t.Errorf("Ping on dead socket = %v, want errors.Is(..., driver.ErrBadConn)", err)
+		}
+		if !c.closed {
+			t.Error("Ping on a conn-level failure should mark the conn dead (closed=true)")
+		}
+	})
+}
+
 // TestConnIsValidAndResetSession exercises the database/sql interface
 // hooks that gate pool reuse. A live conn passes; a closed/dead conn
 // fails IsValid and returns driver.ErrBadConn from ResetSession.
