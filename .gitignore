@@ -15,6 +15,9 @@ vendor/
 .vscode/
 *.iml
 
+# Claude Code local artifacts (agent worktrees, etc.)
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

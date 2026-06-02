@@ -11,7 +11,29 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added: Conn.InsertReturning generated-keys helper (issue #42)
+
+A driver-typed `(*db2i.Conn).InsertReturning` (reached via
+`sql.Conn.Raw`) wraps an INSERT in `SELECT ... FROM FINAL TABLE
+(INSERT ...)` (IBM i V7R3+) and returns every generated column
+(IDENTITY, ROWID, GENERATED ALWAYS expressions, column DEFAULTs) for
+every inserted row -- the JT400 `getGeneratedKeys` capability that
+database/sql's single-value `LastInsertId` cannot express. Parity is
+functional only; the wire mechanism is go-db2i-original (a client-side
+FINAL TABLE rewrite, not JT400's RETURN_GENERATED_KEYS attribute).
+Live-validated on PUB400 V7R5M0.
+
+### Added: result-type decode coverage (issue #39)
+
+The row-decode path gains ROWID (904/905), DATALINK (396/397), XML, and
+NCHAR/NVARCHAR/NCLOB handling, plus DECFLOAT NaN-sign and SNaN
+preservation, a strict odd-length-graphic reject, and scale-aware
+SMALLINT/INTEGER decode (BIGINT renders raw, matching JT400). Result
+types without a decoder (ARRAY, etc.) now surface a typed
+`UnsupportedResultType` error (`errors.As`-detectable, naming the SQL
+type) instead of an opaque message. ROWID decodes as a fixed-width slot
+matching JT400's row stepping, so it never shifts following columns.
+Live-validated on PUB400 V7R5M0.
 
 ## [0.7.22] - 2026-06-02
 

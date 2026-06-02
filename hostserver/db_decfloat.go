@@ -362,7 +362,13 @@ func decodeDecimal64(b []byte) (string, error) {
 	msd, expMSB, kind := decodeCombination(combo)
 	switch kind {
 	case classNaN:
-		return "NaN", nil
+		// The bit immediately after the 5-bit combination field (bit
+		// 57, the MSB of the exponent continuation) flags signaling
+		// vs quiet NaN: 1 = sNaN, 0 = qNaN. JT400's
+		// AS400DecFloat.toObject masks it with
+		// DEC_FLOAT_16_SIGNAL_MASK (0x0200... >> 57) and emits
+		// "SNaN"/"-SNaN" vs "NaN"/"-NaN".
+		return nanString(sign == 1, (hi>>57)&1 == 1), nil
 	case classInf:
 		if sign == 1 {
 			return "-Infinity", nil
@@ -404,7 +410,12 @@ func decodeDecimal128(b []byte) (string, error) {
 	msd, expMSB, kind := decodeCombination(combo)
 	switch kind {
 	case classNaN:
-		return "NaN", nil
+		// Bit 57 of the hi word (MSB of the 12-bit exponent
+		// continuation, the bit right after the combination field)
+		// flags signaling vs quiet NaN, same position and
+		// DEC_FLOAT_34_SIGNAL_MASK (0x0200...) as decimal64 in
+		// JT400's AS400DecFloat.toObject.
+		return nanString(sign == 1, (hi>>57)&1 == 1), nil
 	case classInf:
 		if sign == 1 {
 			return "-Infinity", nil
@@ -479,6 +490,26 @@ func decodeCombination(combo byte) (msd, expMSB byte, class decimalClass) {
 	expMSB = (combo >> 1) & 0x03
 	msd = 8 + (combo & 0x01)
 	return msd, expMSB, classFinite
+}
+
+// nanString returns JT400's DECFLOAT toString spelling for a NaN,
+// honouring the sign bit and the signaling flag: "NaN" / "-NaN" for a
+// quiet NaN and "SNaN" / "-SNaN" for a signaling NaN. Mirrors
+// AS400DecFloat.toObject, which switches on (sign, nanSignal) and
+// throws the matching string. The Infinity case already lives inline
+// in the decoders (it has no signaling variant); this keeps the NaN
+// four-way fan-out in one place.
+func nanString(negative, signaling bool) string {
+	switch {
+	case negative && signaling:
+		return "-SNaN"
+	case negative:
+		return "-NaN"
+	case signaling:
+		return "SNaN"
+	default:
+		return "NaN"
+	}
 }
 
 // formatDecimalFloat takes the unscaled coefficient digits + the

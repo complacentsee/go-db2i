@@ -2,12 +2,50 @@ package hostserver
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"unicode/utf16"
 
 	"github.com/complacentsee/go-db2i/ebcdic"
 )
+
+// ErrUnsupportedResultType is the sentinel wrapped by every
+// UnsupportedResultTypeError, so a caller can classify "the row
+// decoder has no branch for this column's SQL type" with
+// errors.Is(err, ErrUnsupportedResultType) without reaching for the
+// concrete struct. The concrete error (reachable via errors.As)
+// names the offending SQL type, length, and CCSID.
+var ErrUnsupportedResultType = errors.New("hostserver: unsupported result SQL type")
+
+// UnsupportedResultTypeError is returned by decodeColumn when a
+// column's SQL type has no decode branch (e.g. XML 988/989, ARRAY,
+// or a DATALINK whose payload shape we won't guess at). It carries
+// the descriptor fields a caller needs to report the gap or special-
+// case the type, and wraps ErrUnsupportedResultType so both
+// errors.Is(err, ErrUnsupportedResultType) and
+// errors.As(err, &UnsupportedResultTypeError{}) work.
+//
+// Before this typed error existed the decoder returned a bare
+// fmt.Errorf, so a single un-decodable column turned the whole-row
+// decode into an opaque, unclassifiable failure. The message keeps
+// the same informative shape (SQL type + column length + CCSID) as
+// the old default so existing text-matching callers still recognise
+// it.
+type UnsupportedResultTypeError struct {
+	SQLType uint16
+	Length  uint32
+	CCSID   uint16
+}
+
+func (e *UnsupportedResultTypeError) Error() string {
+	return fmt.Sprintf("unsupported SQL type %d (col len=%d, ccsid=%d)", e.SQLType, e.Length, e.CCSID)
+}
+
+// Unwrap lets errors.Is(err, ErrUnsupportedResultType) succeed for
+// the typed error.
+func (e *UnsupportedResultTypeError) Unwrap() error { return ErrUnsupportedResultType }
 
 // decodeGraphicLOB renders a UCS-2 BE / UTF-16 BE byte slice as a
 // Go UTF-8 string. Used for inline DBCLOB columns (SQL types
@@ -24,6 +62,21 @@ func decodeGraphicLOB(b []byte) string {
 		codes = append(codes, uint16(b[i])<<8|uint16(b[i+1]))
 	}
 	return string(utf16.Decode(codes))
+}
+
+// decodeGraphicStrict is decodeGraphicLOB with an explicit reject for
+// an odd payload length. A GRAPHIC / VARGRAPHIC / DBCLOB payload is
+// UTF-16 / UCS-2, exactly 2 bytes per code unit, so an odd byte count
+// is malformed (a misaligned column slot or a corrupt SL). The lenient
+// decodeGraphicLOB silently drops the trailing odd byte; for the
+// row-decode path that drop would mask a slot shift, so the
+// decodeColumn graphic cases route through here and surface the error
+// instead. The inline-LOB streaming path keeps the lenient helper.
+func decodeGraphicStrict(b []byte) (string, error) {
+	if len(b)%2 != 0 {
+		return "", fmt.Errorf("graphic payload %d bytes is odd (UTF-16/UCS-2 needs an even byte count)", len(b))
+	}
+	return decodeGraphicLOB(b), nil
 }
 
 // ccsidBinary is the IBM i sentinel CCSID for "no conversion /
@@ -328,6 +381,19 @@ func nullSkipWidth(col SelectColumn, fixedSlots bool) int {
 // 2-byte SL. The decodeColumn graphic cases and this classifier
 // must agree, or a NULL GRAPHIC column in a VLF row would null-skip
 // 2 bytes instead of col.Length and shift subsequent columns.
+//
+// DATALINK (396/397) is VARCHAR-family: JT400's SQLDatalink IS named in
+// JDServerRow.setRowIndex's variable-length switch, so a NULL DATALINK
+// in a VLF row null-skips its 2-byte SL rather than col.Length.
+//
+// ROWID (904/905) is deliberately NOT here. Although a ROWID VALUE
+// carries a 2-byte SL prefix (read by SQLRowID.convertFromRawBytes),
+// JT400's setRowIndex steps ROWID by the FIXED getFieldLength -- ROWID
+// is not in its var-length switch. Classifying it var-length would make
+// a NULL ROWID null-skip 2 bytes (instead of the fixed slot) and a
+// non-null ROWID advance by 2+SL (instead of the fixed slot), shifting
+// every subsequent column. The decode case 904/905 reads the SL-prefixed
+// value from within the fixed slot and advances by col.Length.
 func isVarLengthSQLType(sqlType uint16) bool {
 	switch sqlType {
 	case 448, 449, // VARCHAR (also covers VARCHAR FOR BIT DATA when CCSID=65535)
@@ -335,6 +401,7 @@ func isVarLengthSQLType(sqlType uint16) bool {
 		460, 461, // LONG_VARCHAR_FOR_BIT_DATA (rare; typically same shape as 456/457)
 		464, 465, // VARGRAPHIC (graphic, 2-byte SL of char-count)
 		472, 473, // LONG_VARGRAPHIC
+		396, 397, // DATALINK (VARCHAR-family, 2-byte SL of bytes)
 		908, 909: // VARBINARY (JT400 SQLVarbinary.getNativeType -> 908)
 		return true
 	}
@@ -515,7 +582,11 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			copy(out, b[2:2+nbytes])
 			return out, 2 + nbytes, nil
 		}
-		return decodeGraphicLOB(b[2 : 2+nbytes]), 2 + nbytes, nil
+		s, err := decodeGraphicStrict(b[2 : 2+nbytes])
+		if err != nil {
+			return nil, 0, err
+		}
+		return s, 2 + nbytes, nil
 
 	case 468, 469: // GRAPHIC (fixed-length) -- NN / nullable
 		// Fixed-length graphic (DBCS / Unicode) columns. Unlike
@@ -536,7 +607,11 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			copy(out, b[:col.Length])
 			return out, int(col.Length), nil
 		}
-		return decodeGraphicLOB(b[:col.Length]), int(col.Length), nil
+		s, err := decodeGraphicStrict(b[:col.Length])
+		if err != nil {
+			return nil, 0, err
+		}
+		return s, int(col.Length), nil
 
 	case 912, 913:
 		// BINARY (fixed-length) -- NN / nullable. JT400's
@@ -578,6 +653,73 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		copy(out, b[2:2+n])
 		return out, 2 + n, nil
 
+	case 904, 905: // ROWID -- NN / nullable
+		// ROWID is the opaque row-identifier type. JT400's
+		// SQLRowID.convertFromRawBytes reads a 2-byte BE unsigned-short
+		// length prefix then copies `length` payload bytes (max 40) and
+		// surfaces them as a byte[] -- getObject returns the raw bytes,
+		// getString hexifies them. We mirror the byte[] shape and return
+		// the payload as []byte.
+		//
+		// CRUCIAL: ROWID is a FIXED-width slot for row stepping (JT400's
+		// setRowIndex advances by getFieldLength, not by the value's SL),
+		// so it is NOT in isVarLengthSQLType and we advance by col.Length
+		// -- the value's 2-byte SL is read from WITHIN that fixed slot.
+		// Returning 2+n here (as a var-length type would) is what shifts
+		// subsequent columns; do not.
+		//
+		// ASSUMPTION (verified live on PUB400 V7R5): the server reports a
+		// fixed field length that budgets the 2-byte SL plus payload. The
+		// guards below tolerate either a 40- or 42-byte reported slot.
+		if int(col.Length) < 2 {
+			return nil, 0, fmt.Errorf("rowid slot %d too small for 2-byte SL", col.Length)
+		}
+		if len(b) < int(col.Length) {
+			return nil, 0, fmt.Errorf("rowid wants %d bytes (fixed slot), have %d", col.Length, len(b))
+		}
+		n := int(binary.BigEndian.Uint16(b[:2]))
+		if 2+n > int(col.Length) {
+			return nil, 0, fmt.Errorf("rowid value length %d + 2-byte SL exceeds slot %d", n, col.Length)
+		}
+		out := make([]byte, n)
+		copy(out, b[2:2+n])
+		return out, int(col.Length), nil
+
+	case 396, 397: // DATALINK -- NN / nullable
+		// DATALINK is a VARCHAR-family link/URL value. JT400's
+		// SQLDatalink.convertFromRawBytes reads a 2-byte BE
+		// unsigned-short length prefix then decodes `length` payload
+		// bytes through the column CCSID converter to a String (which
+		// it then wraps in a java.net.URL). We surface the decoded
+		// link string directly. CCSID picks the codec exactly like
+		// VARCHAR: 65535 -> raw []byte, 1208 -> UTF-8 passthrough,
+		// else EBCDIC SBCS via ebcdicForCCSID. Listed in
+		// isVarLengthSQLType so a NULL DATALINK null-skips its 2-byte
+		// SL in a VLF row.
+		if len(b) < 2 {
+			return nil, 0, fmt.Errorf("datalink header wants 2 bytes, have %d", len(b))
+		}
+		n := int(binary.BigEndian.Uint16(b[:2]))
+		if n > int(col.Length) {
+			return nil, 0, fmt.Errorf("datalink declared length %d exceeds column max %d", n, col.Length)
+		}
+		if len(b) < 2+n {
+			return nil, 0, fmt.Errorf("datalink wants %d bytes (header+data), have %d", 2+n, len(b))
+		}
+		if col.CCSID == ccsidBinary {
+			out := make([]byte, n)
+			copy(out, b[2:2+n])
+			return out, 2 + n, nil
+		}
+		if col.CCSID == 1208 {
+			return string(b[2 : 2+n]), 2 + n, nil
+		}
+		s, err := ebcdicForCCSID(col.CCSID).Decode(b[2 : 2+n])
+		if err != nil {
+			return nil, 0, fmt.Errorf("decode datalink ccsid %d: %w", col.CCSID, err)
+		}
+		return s, 2 + n, nil
+
 	case 2436, 2437: // BOOLEAN NN / nullable (V7R5+ native BOOLEAN type)
 		// One byte on the wire; JT400's SQLBoolean.convertFromRawBytes
 		// treats 0xF0 (EBCDIC '0') as false and anything else as
@@ -594,18 +736,29 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		if len(b) < 4 {
 			return nil, 0, fmt.Errorf("integer wants 4 bytes, have %d", len(b))
 		}
-		return int32(binary.BigEndian.Uint32(b[:4])), 4, nil
+		v := int64(int32(binary.BigEndian.Uint32(b[:4])))
+		if col.Scale != 0 {
+			return scaledIntegerString(v, int(col.Scale)), 4, nil
+		}
+		return int32(v), 4, nil
 
 	case SQLTypeSmallInt, 501: // 500 NN, 501 nullable
 		if len(b) < 2 {
 			return nil, 0, fmt.Errorf("smallint wants 2 bytes, have %d", len(b))
 		}
-		return int16(binary.BigEndian.Uint16(b[:2])), 2, nil
+		v := int64(int16(binary.BigEndian.Uint16(b[:2])))
+		if col.Scale != 0 {
+			return scaledIntegerString(v, int(col.Scale)), 2, nil
+		}
+		return int16(v), 2, nil
 
 	case SQLTypeBigInt, 493: // 492 NN, 493 nullable
 		if len(b) < 8 {
 			return nil, 0, fmt.Errorf("bigint wants 8 bytes, have %d", len(b))
 		}
+		// No scale branch: JT400's SQLBigint has no scale parameter and
+		// never applies movePointLeft -- a BIGINT type code always
+		// renders as the raw int64 (only SQLInteger/SQLSmallint scale).
 		return int64(binary.BigEndian.Uint64(b[:8])), 8, nil
 
 	case 996, 997: // DECFLOAT -- type 996/997 covers BOTH precision-16
@@ -793,7 +946,53 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, fmt.Errorf("float type 480 has unexpected length %d (want 4 or 8)", col.Length)
 		}
 	}
-	return nil, 0, fmt.Errorf("unsupported SQL type %d (col len=%d, ccsid=%d)", col.SQLType, col.Length, col.CCSID)
+	// No decode branch for this SQL type (e.g. XML 988/989, ARRAY, or
+	// a DATALINK whose payload shape we won't guess at). Return the
+	// typed UnsupportedResultTypeError so the whole-row decode fails
+	// classifiably (errors.As / errors.Is) instead of opaquely, while
+	// keeping the original informative message shape.
+	return nil, 0, &UnsupportedResultTypeError{SQLType: col.SQLType, Length: col.Length, CCSID: col.CCSID}
+}
+
+// scaledIntegerString renders a binary integer with a nonzero column
+// scale as a fixed-point decimal string. IBM i can store a
+// DECIMAL/NUMERIC(p, s) as a binary SMALLINT/INTEGER/BIGINT when the
+// precision fits the integer width; the descriptor then carries the
+// real type's Scale, and the raw integer is the unscaled value (so a
+// stored 12345 with Scale=2 is the number 123.45). JT400's SQLData
+// for the binary types divides by 10^scale; we render the same value
+// as a decimal string ("[-]int[.frac]") to avoid the float rounding a
+// /10^s division would introduce. A scale at or above the digit count
+// pads "0." with leading fraction zeros, mirroring decodePackedBCD.
+func scaledIntegerString(v int64, scale int) string {
+	if scale <= 0 {
+		return strconv.FormatInt(v, 10)
+	}
+	neg := v < 0
+	// Format the magnitude; strconv handles math.MinInt64 cleanly via
+	// the unsigned-on-overflow path, but take the absolute value as a
+	// string to stay correct at the boundary.
+	mag := strconv.FormatInt(v, 10)
+	if neg {
+		mag = mag[1:] // drop the '-'
+	}
+	digits := []byte(mag)
+	var out []byte
+	if neg {
+		out = append(out, '-')
+	}
+	if scale >= len(digits) {
+		out = append(out, '0', '.')
+		for i := 0; i < scale-len(digits); i++ {
+			out = append(out, '0')
+		}
+		out = append(out, digits...)
+	} else {
+		out = append(out, digits[:len(digits)-scale]...)
+		out = append(out, '.')
+		out = append(out, digits[len(digits)-scale:]...)
+	}
+	return string(out)
 }
 
 // decodePackedBCD turns DB2 for i's packed-BCD bytes into a decimal

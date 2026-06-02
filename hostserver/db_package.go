@@ -726,6 +726,21 @@ func parsePackageSQLDADataFormat(raw []byte) ([]SelectColumn, error) {
 		precision := uint16(raw[base+sqldaFieldPrecision])
 		scale := uint16(raw[base+sqldaFieldScale])
 		ccsid := be.Uint16(raw[base+sqldaFieldCCSID : base+sqldaFieldCCSID+2])
+		// Precision/Scale share the 2-byte "length" field in the SQLDA
+		// (high byte = precision, low byte = scale). For packed/zoned
+		// decimal that split is the type identity; for every other type
+		// the same bytes redundantly encode the storage width, so the
+		// decoded Precision/Scale are storage-width garbage. JT400 emits
+		// 0/0 for non-decimal SQLTypes, and the row decoder's
+		// scaled-binary-integer path (decodeColumn) treats a nonzero
+		// Scale on INTEGER/SMALLINT/BIGINT as a DECIMAL-stored-as-binary
+		// signal -- so a stray Scale=4 on a plain INTEGER (FieldLength=4)
+		// would otherwise mis-render `7` as `0.0007` on cache-hit SELECT.
+		// Mirror the same zeroing preparedParamsFromCached applies.
+		if !isDecimalNumericSQLType(sqlType) {
+			precision = 0
+			scale = 0
+		}
 		col := SelectColumn{
 			SQLType:   sqlType,
 			Length:    normalizeSQLDALength(sqlType, length),

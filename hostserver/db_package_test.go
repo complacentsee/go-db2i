@@ -542,6 +542,54 @@ func TestParsePackageSQLDA_VarcharLengthNormalized(t *testing.T) {
 	}
 }
 
+// TestParsePackageSQLDA_NonDecimalScaleZeroed guards the interaction
+// between the package-SQLDA decode and the scaled-binary-integer
+// row-decode path (issue #39 item 7). The SQLDA packs precision/scale
+// into the 2-byte length field (high byte = precision, low byte =
+// scale); for a plain INTEGER(FieldLength=4) the low byte is 0x04, so
+// a naive decode would surface Scale=4. decodeColumn now treats a
+// nonzero Scale on a binary INTEGER as a DECIMAL-stored-as-binary
+// signal -- which would mis-render a cache-hit INTEGER `7` as
+// `0.0007`. parsePackageSQLDADataFormat must zero Precision/Scale for
+// non-decimal types (mirroring JT400 and preparedParamsFromCached),
+// while keeping them for genuine packed/zoned DECIMAL.
+func TestParsePackageSQLDA_NonDecimalScaleZeroed(t *testing.T) {
+	be := binary.BigEndian
+	mk := func(sqlType uint16, lengthField uint16) []byte {
+		raw := make([]byte, sqldaHeaderLen+sqldaFieldRecordLen)
+		copy(raw[0:8], []byte{0xe2, 0xd8, 0xd3, 0xc4, 0xc1, 0x40, 0x40, 0x40})
+		be.PutUint32(raw[8:12], uint32(len(raw)))
+		be.PutUint16(raw[sqldaNumberOfFieldsHigh:sqldaNumberOfFieldsHigh+2], 1)
+		base := sqldaHeaderLen
+		be.PutUint16(raw[base+sqldaFieldSQLType:base+sqldaFieldSQLType+2], sqlType)
+		// length field = precision high byte | scale low byte.
+		be.PutUint16(raw[base+sqldaFieldLength:base+sqldaFieldLength+2], lengthField)
+		return raw
+	}
+
+	// INTEGER nullable (497), FieldLength=4 -> length field 0x0004,
+	// which a naive split reads as precision=0, scale=4.
+	cols, err := parsePackageSQLDADataFormat(mk(497, 0x0004))
+	if err != nil {
+		t.Fatalf("parsePackageSQLDADataFormat(INTEGER): %v", err)
+	}
+	if cols[0].Scale != 0 || cols[0].Precision != 0 {
+		t.Errorf("INTEGER col precision/scale = %d/%d, want 0/0 (storage-width bytes must not leak as scale)",
+			cols[0].Precision, cols[0].Scale)
+	}
+
+	// DECIMAL(5,2) nullable (485) keeps its real precision/scale:
+	// length field 0x0502 -> precision=5, scale=2.
+	cols, err = parsePackageSQLDADataFormat(mk(485, 0x0502))
+	if err != nil {
+		t.Fatalf("parsePackageSQLDADataFormat(DECIMAL): %v", err)
+	}
+	if cols[0].Precision != 5 || cols[0].Scale != 2 {
+		t.Errorf("DECIMAL(5,2) col precision/scale = %d/%d, want 5/2",
+			cols[0].Precision, cols[0].Scale)
+	}
+}
+
 // TestParsePackageInfo_EmptyPackage covers the brand-new *PGM case:
 // the package header is intact but statement_count = 0. JT400 ships
 // a CP 0x380B with just the 42-byte header in that case, and we
