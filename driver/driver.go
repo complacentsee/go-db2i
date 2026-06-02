@@ -616,6 +616,62 @@ func resolveTracer(t trace.Tracer) trace.Tracer {
 	return noopTracer
 }
 
+// dsnKeyRoster is the canonical, ordered list of every query-string
+// key parseDSN recognises -- the single source of truth for the
+// documented-key allow-list. Every key parsed below via q.Get(...)
+// MUST appear here; TestParseDSNKeyRosterMatchesParser pins the two
+// in sync. Kept in DSN-doc order for a readable "recognised keys"
+// error message.
+var dsnKeyRoster = []string{
+	"tls",
+	"tls-insecure-skip-verify",
+	"tls-server-name",
+	"signon-port",
+	"library",
+	"libraries",
+	"naming",
+	"date",
+	"date-separator",
+	"time-format",
+	"time-separator",
+	"decimal-separator",
+	"isolation",
+	"lob",
+	"lob-threshold",
+	"ccsid",
+	"charset-strict",
+	"extended-metadata",
+	"block-size",
+	"extended-dynamic",
+	"package",
+	"package-library",
+	"package-cache",
+	"package-error",
+	"package-criteria",
+	"package-ccsid",
+	"package-add",
+	"package-clear",
+	"query-optimize-goal",
+	"login-timeout",
+	"socket-timeout",
+}
+
+// dsnKeys is the allow-list set derived from dsnKeyRoster, used by
+// parseDSN's unknown-key guard.
+var dsnKeys = func() map[string]bool {
+	m := make(map[string]bool, len(dsnKeyRoster))
+	for _, k := range dsnKeyRoster {
+		m[k] = true
+	}
+	return m
+}()
+
+// knownDSNKeysList renders the recognised-key roster for the
+// unknown-key error message.
+func knownDSNKeysList() string {
+	return strings.Join(dsnKeyRoster, ", ")
+}
+
 func parseDSN(dsn string) (*Config, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -648,6 +704,20 @@ func parseDSN(dsn string) (*Config, error) {
 	}
 
 	q := u.Query()
+
+	// Reject unrecognised query keys before parsing any of them.
+	// JT400 traces extra JDBC URL properties (JDProperties sets its
+	// extra_ flag and logs `Extra property: "<name>"`) rather than
+	// silently dropping them; go-db2i is stricter and errors, so a
+	// misspelled or JT400-spelled key surfaces at parse time instead
+	// of being a silent no-op -- a frequent JT400 -> go-db2i
+	// migration trap. dsnKeys is the single source of truth for the
+	// documented-key roster.
+	for k := range q {
+		if !dsnKeys[k] {
+			return nil, fmt.Errorf("unknown DSN key %q (recognised keys: %s)", k, knownDSNKeysList())
+		}
+	}
 
 	// TLS knobs are parsed before the port defaults so a tls=true
 	// DSN can override-then-default to 9476 / 9471 in one pass.

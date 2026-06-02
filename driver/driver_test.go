@@ -3,7 +3,9 @@ package driver
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1339,5 +1341,72 @@ func TestParseDSN_SocketTimeout(t *testing.T) {
 				t.Errorf("SocketTimeout: got %v want %v", cfg.SocketTimeout, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseDSNRejectsUnknownKeys pins the unknown-key guard: a
+// misspelled or JT400-spelled query property errors at parse time
+// instead of being silently dropped (issue #36). Each case carries a
+// DSN whose only query key is unrecognised.
+func TestParseDSNRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"typo (libary)":        "db2i://u:p@h/?libary=MYLIB",
+		"JT400 spelling":       "db2i://u:p@h/?errors=full",
+		"JT400 prompt":         "db2i://u:p@h/?prompt=false",
+		"JT400 secure":         "db2i://u:p@h/?secure=true",
+		"JT400 naming spelled": "db2i://u:p@h/?nameing=system",
+		"unknown bool key":     "db2i://u:p@h/?cursorhold=true",
+		"bogus":                "db2i://u:p@h/?nonsense=1",
+		"valid plus unknown":   "db2i://u:p@h/?library=MYLIB&unknownkey=x",
+	}
+	for name, dsn := range cases {
+		dsn := dsn
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseDSN(dsn)
+			if err == nil {
+				t.Fatalf("expected error for %q, got nil", dsn)
+			}
+			if !strings.Contains(err.Error(), "unknown DSN key") {
+				t.Errorf("error %q does not mention unknown DSN key", err)
+			}
+		})
+	}
+}
+
+// TestParseDSNKeyRosterMatchesParser asserts the dsnKeys allow-list
+// is the single source of truth: every key parseDSN actually reads
+// via q.Get("...") appears in the roster, and the roster carries no
+// keys the parser ignores. Reads driver.go off disk and extracts the
+// q.Get literals so the two can't silently drift (issue #36).
+func TestParseDSNKeyRosterMatchesParser(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("driver.go")
+	if err != nil {
+		t.Fatalf("read driver.go: %v", err)
+	}
+	re := regexp.MustCompile(`q\.Get\("([^"]+)"\)`)
+	parserKeys := make(map[string]bool)
+	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+		parserKeys[m[1]] = true
+	}
+	if len(parserKeys) == 0 {
+		t.Fatal("found no q.Get(...) keys in driver.go -- regexp out of date?")
+	}
+	for k := range parserKeys {
+		if !dsnKeys[k] {
+			t.Errorf("parser reads %q via q.Get but it is missing from the dsnKeys allow-list", k)
+		}
+	}
+	for k := range dsnKeys {
+		if !parserKeys[k] {
+			t.Errorf("dsnKeys allow-list carries %q but parseDSN never reads it via q.Get", k)
+		}
+	}
+	// The roster slice and the derived set must agree in size (no
+	// duplicate entries silently collapsing in the map).
+	if len(dsnKeyRoster) != len(dsnKeys) {
+		t.Errorf("dsnKeyRoster has %d entries but dsnKeys has %d -- duplicate roster entry?", len(dsnKeyRoster), len(dsnKeys))
 	}
 }
