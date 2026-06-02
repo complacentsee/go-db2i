@@ -3602,7 +3602,7 @@ func TestDb2ErrorPredicates(t *testing.T) {
 // uses CP 0x380E (commitment control level) per the isolation
 // constants in hostserver/db_attributes.go.
 func TestDSNIsolationLevels(t *testing.T) {
-	for _, iso := range []string{"none", "cs", "all", "rs", "rr"} {
+	for _, iso := range []string{"none", "cs", "chg", "all", "rr"} {
 		iso := iso
 		t.Run("isolation="+iso, func(t *testing.T) {
 			db, err := sql.Open("db2i", dsnWithExtras(t, "isolation="+iso))

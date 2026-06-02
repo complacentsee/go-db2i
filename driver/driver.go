@@ -318,7 +318,7 @@ type Config struct {
 	//   ,    comma   (index 1)
 	DecimalSeparator string
 	DateFormat       byte  // hostserver.DateFormat* constant; 0 = JOB
-	Isolation        int16 // hostserver.Isolation* constant; -1 = default (CS)
+	Isolation        int16 // hostserver.Isolation* constant; IsolationDefault (-1) = unset -> *NONE on connect, *CS at Begin()
 
 	// TLS controls whether the driver wraps the as-signon and
 	// as-database sockets in crypto/tls. When true, the dial uses
@@ -560,21 +560,24 @@ type Config struct {
 // given key. Public so callers can construct Configs programmatically
 // and only override the fields they care about.
 //
-// Isolation defaults to *NONE (commitNone). This matches IBM i Db2's
-// autocommit-permissive default and allows DML against non-journaled
-// tables without a transaction wrapper. Callers that need real
-// transactions opt in via db.Begin() -- the driver's Begin handler
+// Isolation defaults to IsolationDefault (the "unset" sentinel). On
+// connect this still sends *NONE on CP 0x380E (wire value 0), matching
+// IBM i Db2's autocommit-permissive default and JT400's autocommit-mode
+// behaviour, so DML against non-journaled tables needs no transaction
+// wrapper. The sentinel matters at db.Begin() time: the Begin handler
 // flips to *CS for the duration of the transaction (see
-// hostserver.AutocommitOff) and back to *NONE on Commit/Rollback.
+// hostserver.AutocommitOffWithIsolation) rather than re-sending *NONE,
+// which would leave COMMIT/ROLLBACK failing with SQL -211.
 //
 // Override via the DSN "isolation" query key if you specifically want
-// the connection to start in a different commitment-control level.
+// the connection to start in a different commitment-control level; an
+// explicit isolation=none keeps Begin() at *NONE.
 func DefaultConfig() Config {
 	return Config{
 		DBPort:     8471,
 		SignonPort: 8476,
 		DateFormat: hostserver.DateFormatJOB,
-		Isolation:  hostserver.IsolationCommitNone,
+		Isolation:  hostserver.IsolationDefault,
 		// Package-cache defaults: PACKAGE_LIBRARY="QGPL",
 		// PACKAGE_ERROR="warning", PACKAGE_CRITERIA="default",
 		// PACKAGE_CCSID=13488. The gating flags ExtendedDynamic +
@@ -867,19 +870,23 @@ func parseDSN(dsn string) (*Config, error) {
 		}
 	}
 	if v := q.Get("isolation"); v != "" {
+		// Accept both the IBM i commitment-control short names and
+		// JT400's "transaction isolation" JDBC URL vocabulary (the
+		// JDBC level names). The IBM i name and the JDBC name on the
+		// same line select the same CP 0x380E wire value.
 		switch strings.ToLower(v) {
 		case "none":
 			cfg.Isolation = hostserver.IsolationCommitNone
-		case "cs":
+		case "cs", "read committed":
 			cfg.Isolation = hostserver.IsolationReadCommitted
-		case "all":
-			cfg.Isolation = hostserver.IsolationAllCS
-		case "rr":
-			cfg.Isolation = hostserver.IsolationRepeatableRd
-		case "rs":
+		case "chg", "read uncommitted":
+			cfg.Isolation = hostserver.IsolationReadUncommitted
+		case "all", "repeatable read":
+			cfg.Isolation = hostserver.IsolationRepeatableRead
+		case "rr", "serializable":
 			cfg.Isolation = hostserver.IsolationSerializable
 		default:
-			return nil, fmt.Errorf("invalid isolation %q (want none|cs|all|rr|rs)", v)
+			return nil, fmt.Errorf("invalid isolation %q (want none|cs|chg|all|rr or the JT400 names read committed|read uncommitted|repeatable read|serializable)", v)
 		}
 	}
 	if v := q.Get("lob"); v != "" {

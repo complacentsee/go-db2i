@@ -220,3 +220,49 @@ func TestAutocommitOffOnFrameShape(t *testing.T) {
 		})
 	}
 }
+
+// TestAutocommitOffWithIsolationWireValues pins the CP 0x380E
+// commitment-control integer for every isolation level go-db2i can
+// request, against JT400's server-side commit-mode mapping
+// (JDTransactionManager.mapLevelToCommitMode + getIsolationLevel; CP
+// 0x380E values: *CS=1, *CHG=2, *ALL=3, *RR=4, *NONE=0). The
+// isolation byte lives at payload[33:35] -- the same slot the
+// AutocommitOff frame test reads.
+//
+// IsolationDefault is the value Begin()/BeginTx() pass when the DSN
+// left isolation unset; the "default" case asserts it resolves to
+// *CS (wire 1), NOT *NONE (wire 0) -- the regression that left
+// db.Begin() followed by COMMIT failing with SQL -211.
+func TestAutocommitOffWithIsolationWireValues(t *testing.T) {
+	cases := []struct {
+		name      string
+		isolation int16
+		wantWire  uint16
+	}{
+		{"default->CS", IsolationDefault, 1}, // Begin-not-NONE contract
+		{"commit none", IsolationCommitNone, 0},
+		{"read committed *CS", IsolationReadCommitted, 1},
+		{"read uncommitted *CHG", IsolationReadUncommitted, 2},
+		{"repeatable read *ALL", IsolationRepeatableRead, 3},
+		{"serializable *RR", IsolationSerializable, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := newFakeConn(buildSuccessReply(1, uint16(ReqDBSetSQLAttributes)))
+			if err := AutocommitOffWithIsolation(conn, 1, tc.isolation); err != nil {
+				t.Fatalf("AutocommitOffWithIsolation(%d): %v", tc.isolation, err)
+			}
+			_, payload, err := ReadFrame(bytes.NewReader(conn.written.Bytes()))
+			if err != nil {
+				t.Fatalf("ReadFrame: %v", err)
+			}
+			// Param 2 is CP 0x380E; isolation int16 at payload[33:35].
+			if cp := binary.BigEndian.Uint16(payload[31:33]); cp != 0x380E {
+				t.Fatalf("param[1] CP = 0x%04X, want 0x380E", cp)
+			}
+			if got := binary.BigEndian.Uint16(payload[33:35]); got != tc.wantWire {
+				t.Errorf("isolation %d -> wire 0x380E = %d, want %d", tc.isolation, got, tc.wantWire)
+			}
+		})
+	}
+}

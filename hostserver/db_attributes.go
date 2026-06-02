@@ -251,17 +251,28 @@ func dbParamLOBThreshold(threshold uint32) DBParam {
 	return DBParam{CodePoint: 0x3822, Data: b}
 }
 
-// CommitmentControlLevel values for DBAttributesOptions.IsolationLevel.
-// CP 0x380E (short). Maps the standard JDBC isolation constants to
-// IBM i's commitment control names; values per JT400's
-// DBSQLAttributesDS.setCommitmentControlLevelParserOption.
+// CommitmentControlLevel values for DBAttributesOptions.IsolationLevel,
+// sent on CP 0x380E (short) in SET_SQL_ATTRIBUTES. These are the
+// *server* commit-mode integers JT400 puts on the wire via
+// JDTransactionManager.getIsolationLevel() (not the client-side
+// COMMIT_MODE_* constants, which swap *CS and *CHG before send).
+//
+// Note IBM i's commitment-control names map to the JDBC isolation
+// constants by *behaviour*, not by name, which inverts the obvious
+// pairing (see AS400JDBCConnection's commit-mode table):
+//
+//	*NONE -> TRANSACTION_NONE                wire 0
+//	*CS   -> TRANSACTION_READ_COMMITTED      wire 1
+//	*CHG  -> TRANSACTION_READ_UNCOMMITTED    wire 2
+//	*ALL  -> TRANSACTION_REPEATABLE_READ     wire 3
+//	*RR   -> TRANSACTION_SERIALIZABLE        wire 4
 const (
-	IsolationDefault       int16 = -1 // don't send the CP -- server picks
-	IsolationCommitNone    int16 = 0  // *NONE -- no isolation, no journaling
-	IsolationReadCommitted int16 = 1  // *CS   -- cursor stability (JDBC TRANSACTION_READ_COMMITTED)
-	IsolationAllCS         int16 = 2  // *ALL  -- read uncommitted (TRANSACTION_READ_UNCOMMITTED, ish)
-	IsolationRepeatableRd  int16 = 3  // *RR   -- repeatable read
-	IsolationSerializable  int16 = 4  // *RS   -- serializable
+	IsolationDefault         int16 = -1 // don't pick a level -- sends wire 0; server default
+	IsolationCommitNone      int16 = 0  // *NONE -- no commitment control (TRANSACTION_NONE)
+	IsolationReadCommitted   int16 = 1  // *CS   -- cursor stability (TRANSACTION_READ_COMMITTED)
+	IsolationReadUncommitted int16 = 2  // *CHG  -- uncommitted read (TRANSACTION_READ_UNCOMMITTED)
+	IsolationRepeatableRead  int16 = 3  // *ALL  -- read stability (TRANSACTION_REPEATABLE_READ)
+	IsolationSerializable    int16 = 4  // *RR   -- repeatable read (TRANSACTION_SERIALIZABLE)
 )
 
 // QueryOptimizeGoal values for DBAttributesOptions.QueryOptimizeGoal.
