@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"database/sql/driver"
 	"testing"
 )
@@ -29,10 +30,10 @@ func TestConnImplementsQueryerContext(t *testing.T) {
 // of which dispatch path database/sql picks.
 func TestConnShortcutsRejectClosedConn(t *testing.T) {
 	c := &Conn{cfg: &Config{}, log: silentLogger, closed: true}
-	if _, err := c.ExecContext(nil, "SELECT 1", nil); err != driver.ErrBadConn {
+	if _, err := c.ExecContext(context.Background(), "SELECT 1", nil); err != driver.ErrBadConn {
 		t.Errorf("closed Conn.ExecContext = %v, want driver.ErrBadConn", err)
 	}
-	if _, err := c.QueryContext(nil, "SELECT 1", nil); err != driver.ErrBadConn {
+	if _, err := c.QueryContext(context.Background(), "SELECT 1", nil); err != driver.ErrBadConn {
 		t.Errorf("closed Conn.QueryContext = %v, want driver.ErrBadConn", err)
 	}
 }

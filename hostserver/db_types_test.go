@@ -184,14 +184,4 @@ func valuesEqual(got, want any) bool {
 	return fmt.Sprint(got) == fmt.Sprint(want)
 }
 
-// goldenForRowCol returns the i-th column of the first row in the
-// golden file, fail-fast if the shape isn't what we expect. Used by
-// individual subtests when only one column matters.
-func (g *goldenJSON) firstRowCol(i int) any {
-	if len(g.ResultSets) == 0 || len(g.ResultSets[0].Rows) == 0 || len(g.ResultSets[0].Rows[0]) <= i {
-		return nil
-	}
-	return g.ResultSets[0].Rows[0][i]
-}
-
 var _ = bytes.Equal // keep `bytes` imported for future use without disruption

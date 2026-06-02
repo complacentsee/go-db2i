@@ -1,7 +1,6 @@
 package hostserver
 
 import (
-	"encoding/binary"
 	"testing"
 )
 
@@ -141,45 +140,4 @@ func syntheticCachedSelectInt() *PackageStatement {
 			{SQLType: 497, FieldLength: 4, ParamType: 0xF0},
 		},
 	}
-}
-
-// scannedParams collects the CPs observed in a request payload's
-// parameter section.
-type scannedParams struct {
-	cps  []uint16
-	data map[uint16][]byte
-}
-
-func (s *scannedParams) has(cp uint16) bool { _, ok := s.data[cp]; return ok }
-func (s *scannedParams) dataFor(cp uint16) []byte {
-	if b, ok := s.data[cp]; ok {
-		return b
-	}
-	return nil
-}
-
-// scanRequestParams walks the LL/CP records past the 20-byte
-// DBRequestTemplate header and returns every CP + data block.
-func scanRequestParams(t *testing.T, payload []byte) *scannedParams {
-	t.Helper()
-	if len(payload) < 20 {
-		t.Fatalf("request payload too short: %d bytes", len(payload))
-	}
-	out := &scannedParams{data: map[uint16][]byte{}}
-	off := 20 // skip template
-	be := binary.BigEndian
-	for off+6 <= len(payload) {
-		ll := be.Uint32(payload[off : off+4])
-		if ll < 6 || int(ll) > len(payload)-off {
-			t.Fatalf("malformed LL=%d at off=%d (payload=%d)", ll, off, len(payload))
-		}
-		cp := be.Uint16(payload[off+4 : off+6])
-		out.cps = append(out.cps, cp)
-		data := payload[off+6 : off+int(ll)]
-		clone := make([]byte, len(data))
-		copy(clone, data)
-		out.data[cp] = clone
-		off += int(ll)
-	}
-	return out
 }

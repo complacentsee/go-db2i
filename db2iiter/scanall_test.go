@@ -48,7 +48,6 @@ func (s *fakeStmt) Query(args []driver.Value) (driver.Rows, error) {
 type row struct {
 	id   int64
 	name string
-	err  error // if non-nil, Next returns this row but Scan-side helper should error
 }
 
 type fakeRows struct {

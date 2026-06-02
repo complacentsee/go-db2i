@@ -225,11 +225,11 @@ func TestConnResetSession_DirtySessionDiscards(t *testing.T) {
 	}
 
 	c.sessionDirty = true
-	if c.IsValid() {
-		// IsValid stays true -- the dirty bit doesn't make the
-		// conn unusable, it just signals "don't share me with the
-		// next pool borrower." A dirty conn can still be used by
-		// its current owner.
+	// IsValid stays true -- the dirty bit doesn't make the conn
+	// unusable, it just signals "don't share me with the next pool
+	// borrower." A dirty conn can still be used by its current owner.
+	if !c.IsValid() {
+		t.Error("a dirty but live conn should still report IsValid()=true")
 	}
 	err := c.ResetSession(context.Background())
 	if !errors.Is(err, driver.ErrBadConn) {

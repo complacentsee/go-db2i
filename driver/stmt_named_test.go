@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"database/sql/driver"
 	"strings"
 	"testing"
@@ -96,7 +97,7 @@ func TestResolveNamedArgs_NoNamedArgsFastPath(t *testing.T) {
 		conn:  &Conn{cfg: &Config{}, log: silentLogger},
 		query: "INSERT INTO t VALUES (?)",
 	}
-	got, err := s.resolveNamedArgs(nil, []driver.NamedValue{
+	got, err := s.resolveNamedArgs(context.Background(), []driver.NamedValue{
 		mkArg(1, "", 1), mkArg(2, "", 2), mkArg(3, "", 3),
 	})
 	if err != nil {
@@ -119,7 +120,7 @@ func TestResolveNamedArgs_RejectsNonCall(t *testing.T) {
 		conn:  &Conn{cfg: &Config{}, log: silentLogger},
 		query: "SELECT * FROM t WHERE id = ?",
 	}
-	_, err := s.resolveNamedArgs(nil, []driver.NamedValue{mkArg(1, "id", 42)})
+	_, err := s.resolveNamedArgs(context.Background(), []driver.NamedValue{mkArg(1, "id", 42)})
 	if err == nil {
 		t.Fatal("expected reject for named binding on SELECT")
 	}
@@ -137,7 +138,7 @@ func TestResolveNamedArgs_RejectsMixedNamedAndPositional(t *testing.T) {
 		conn:  &Conn{cfg: &Config{}, log: silentLogger},
 		query: "CALL lib.proc(?, ?)",
 	}
-	_, err := s.resolveNamedArgs(nil, []driver.NamedValue{
+	_, err := s.resolveNamedArgs(context.Background(), []driver.NamedValue{
 		mkArg(1, "", 1), mkArg(2, "X", 2),
 	})
 	if err == nil {

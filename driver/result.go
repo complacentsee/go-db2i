@@ -93,7 +93,7 @@ func (r *Result) fetchLastInsertId() (int64, error) {
 	if err != nil {
 		return 0, r.conn.classifyConnErr(err)
 	}
-	defer cursor.Close()
+	defer func() { _ = cursor.Close() }()
 	row, err := cursor.Next()
 	if errors.Is(err, io.EOF) {
 		return 0, ErrNoLastInsertId

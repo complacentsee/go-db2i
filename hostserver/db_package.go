@@ -954,12 +954,9 @@ func ebcdicVarStringBytes(s string, ccsid uint16) ([]byte, error) {
 	// SBCS EBCDIC pages, so a single asciiToEBCDIC37 helper covers
 	// every CCSID we accept. If we ever expand the accepted name
 	// charset we'll need a proper conversion table.
-	if ccsid != 37 && ccsid != 13488 {
-		// 13488 is JT400's `package-ccsid` default but on the
-		// CREATE_PACKAGE wire the name is sent in JOB CCSID, not
-		// 13488. Allow the call to proceed; caller is responsible
-		// for picking the right ccsid value.
-	}
+	// Non-37/13488 ccsid values (e.g. JT400's package-ccsid default of
+	// 13488, which on the CREATE_PACKAGE wire is actually sent in JOB
+	// CCSID) are accepted as-is; the caller picks the right value.
 	out := make([]byte, len(s))
 	for i, r := range []byte(s) {
 		b, err := asciiToEBCDIC37(r)

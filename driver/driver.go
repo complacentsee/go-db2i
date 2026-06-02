@@ -152,6 +152,7 @@
 package driver
 
 import (
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
@@ -189,7 +190,7 @@ func (d *Driver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.Connect(nil)
+	return c.Connect(context.Background())
 }
 
 // OpenConnector parses the DSN into a Connector that can spawn fresh

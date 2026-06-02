@@ -424,21 +424,6 @@ func (c *Conn) nextCorr() uint32 {
 	return atomic.AddUint32(&c.corrCount, 100)
 }
 
-// nextCorrFunc returns a closure that mints fresh correlation IDs
-// from the same atomic counter as nextCorr but one ID at a time
-// (no block reservation). Used by streaming flows (OpenSelectStatic
-// and friends) where the driver and a long-lived *hostserver.Cursor
-// need to share the counter across multiple Next / Close calls.
-// selectOptions returns the hostserver.SelectOption slice the
-// per-Stmt SELECT entry points should pass. Folds in connection-
-// level knobs (ExtendedMetadata today; future per-conn select
-// behaviours land here). Returns nil when no options are active so
-// the OpenSelectStatic / OpenSelectPrepared call sites stay zero-
-// allocation for the common path.
-func (c *Conn) selectOptions() []hostserver.SelectOption {
-	return c.selectOptionsFor("", false)
-}
-
 // selectOptionsFor is the per-statement variant of selectOptions.
 // It applies the cfg.PackageCriteria filter before deciding whether
 // to emit the extended-dynamic CP 0x3804 marker for THIS sql --

@@ -348,7 +348,7 @@ func (s *Stmt) loadParamNames(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("db2i: sql.Named: prepare QSYS2.SYSPARMS lookup: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	rowsAny, err := stmt.(driver.StmtQueryContext).QueryContext(ctx, []driver.NamedValue{
 		{Ordinal: 1, Value: schema},
 		{Ordinal: 2, Value: name},
@@ -356,7 +356,7 @@ func (s *Stmt) loadParamNames(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("db2i: sql.Named: QSYS2.SYSPARMS lookup for %s.%s: %w", schema, name, err)
 	}
-	defer rowsAny.Close()
+	defer func() { _ = rowsAny.Close() }()
 
 	names := map[string]int{}
 	seenSpecificName := ""
@@ -1024,9 +1024,6 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 	elem := destVal.Elem()
 	// IN side of an INOUT binds the current value at the destination.
 	var inValue any
-	if out.In {
-		inValue = elem.Interface()
-	}
 	switch elem.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
 		shape := hostserver.PreparedParam{
