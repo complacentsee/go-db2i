@@ -1,0 +1,93 @@
+name: Live conformance (PUB400)
+
+# Manual-trigger only (for now).
+#
+# The canonical live target is a shared PUB400 V7R5 free-tier LPAR. It is
+# intermittently unavailable -- the *SQLPKG package subsystem can hang on
+# CREATE PACKAGE (stalling the suite's TestMain prime step), and CREATE
+# TABLE/INSERT hit SQL-904 57011 resource limits under load -- which made
+# it an unreliable *gate* on every push / PR / nightly. The offline build/
+# vet/test + golangci-lint tracks in ci.yml remain the automatic gate; run
+# this suite on demand (Actions -> "Live conformance (PUB400)" -> "Run
+# workflow") once the target is known-healthy.
+#
+# Required repo secrets (mirror the gitignored .env.pub400-v7r5 file):
+#   DB2I_DSN, DB2I_SCHEMA                     -- PUB400 V7R5 (canonical)
+# SQL-package filing/cache-hit tests run by default (PUB400 supports it);
+# set repo variable DB2I_TEST_FILING=0 to disable on a non-capable target.
+# Optional repo secrets/vars that unlock additional gated tests:
+#   secret DB2I_SCHEMA_B                      -- second library tests
+#   secret DB2I_TLS_TARGET                    -- TLS connectivity test
+#   secret DB2I_TEST_CCSID13488_TABLE         -- strict UCS-2 DBCLOB test
+#   var    DB2I_PROC_SCHEMA                   -- dedicated stored-proc library
+#                                                (else uses DB2I_SCHEMA)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  live-conformance:
+    name: live conformance (PUB400 V7R5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: live conformance suite
+        env:
+          DB2I_DSN: ${{ secrets.DB2I_DSN }}
+          DB2I_SCHEMA: ${{ secrets.DB2I_SCHEMA }}
+          # SQL-package filing/cache-hit tests: ON by default because the
+          # canonical PUB400 target supports filing in the user library
+          # (a large extended-dynamic subsystem otherwise left uncovered).
+          # Set the repo variable DB2I_TEST_FILING=0 to disable on a target
+          # that lacks CREATE/DELETE *SQLPKG authority.
+          DB2I_TEST_FILING: ${{ vars.DB2I_TEST_FILING || '1' }}
+          # Optional gated extras (each test t.Skips when its var is empty).
+          DB2I_SCHEMA_B: ${{ secrets.DB2I_SCHEMA_B }}
+          DB2I_TLS_TARGET: ${{ secrets.DB2I_TLS_TARGET }}
+          DB2I_TEST_CCSID13488_TABLE: ${{ secrets.DB2I_TEST_CCSID13488_TABLE }}
+          # Host the stored-proc fixtures in a dedicated library if set;
+          # otherwise they go in DB2I_SCHEMA (works without CREATE SCHEMA).
+          DB2I_PROC_SCHEMA: ${{ vars.DB2I_PROC_SCHEMA }}
+        run: |
+          if [ -z "$DB2I_DSN" ]; then
+            echo "::notice::DB2I_DSN secret unset; live tests will skip cleanly."
+          fi
+          # Coverage scoped to the packages the conformance suite targets
+          # (driver + hostserver + ebcdic), so the reported number reflects
+          # the code under test rather than diluting with CLI tools, the
+          # DES auth path, wirelog, etc.
+          go test -tags=conformance -v -timeout 30m \
+            -coverpkg=./driver/...,./hostserver/...,./ebcdic/... \
+            -coverprofile=coverage-conformance-pub400.out \
+            -covermode=atomic \
+            ./test/conformance/...
+
+      - name: coverage summary
+        if: always()
+        run: |
+          if [ -f coverage-conformance-pub400.out ]; then
+            go tool cover -func=coverage-conformance-pub400.out | tail -1
+            total="$(go tool cover -func=coverage-conformance-pub400.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')"
+            echo "### Live conformance coverage (PUB400 V7R5): ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-conformance-pub400
+          path: coverage-conformance-pub400.out
+          if-no-files-found: ignore
