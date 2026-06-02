@@ -132,5 +132,10 @@ func parseDSNFuzzSeeds() []string {
 		"db2i://u:p@h/?block-size=513",    // reject
 		"db2i://u:p@h/?block-size=-1",     // reject
 		"db2i://u:p@h/?block-size=notnum", // reject
+		// Unknown-key guard (issue #36): misspelled / JT400-spelled
+		// keys must error, not silently drop.
+		"db2i://u:p@h/?libary=MYLIB",            // reject (typo)
+		"db2i://u:p@h/?errors=full",             // reject (JT400 key)
+		"db2i://u:p@h/?library=MYLIB&prompt=no", // reject (one unknown among valid)
 	}
 }
