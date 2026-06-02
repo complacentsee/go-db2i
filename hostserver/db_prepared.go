@@ -789,6 +789,9 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 			}
 		}
 	}
+	// Stamp the negotiated date/time formats so the row decoder
+	// normalises DATE/TIME values to ISO by format, not by shape.
+	stampDateTimeFormat(cols, opts)
 	pmf, err := prepRep.findSuperExtendedParameterMarkerFormat()
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
@@ -847,7 +850,7 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: encode input parameter data: %w", err)
 	}
 	if isCallStmt(sql) {
-		return executeCallAndAttachFirstSet(conn, sql, paramShapes, dataPayload, cols, nextCorr)
+		return executeCallAndAttachFirstSet(conn, sql, paramShapes, dataPayload, cols, nextCorr, opts)
 	}
 	return openDescribeFetchSelect(conn, sql, dataPayload, cols, nextCorr, opts)
 }
@@ -970,7 +973,7 @@ func openDescribeFetchSelect(conn io.ReadWriter, sql string, dataPayload []byte,
 // sent #18 (FETCH). The Cursor's MoreResultSets / AdvanceResultSet
 // pair drains subsequent result sets through the same OPEN_DESCRIBE
 // + FETCH pattern on later getMoreResults equivalents.
-func executeCallAndAttachFirstSet(conn io.ReadWriter, sql string, paramShapes []PreparedParam, dataPayload []byte, _ []SelectColumn, nextCorr func() uint32) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
+func executeCallAndAttachFirstSet(conn io.ReadWriter, sql string, paramShapes []PreparedParam, dataPayload []byte, _ []SelectColumn, nextCorr func() uint32, opts selectOpts) ([]SelectColumn, []SelectRow, fetchOutcome, error) {
 	// --- a) EXECUTE the CALL.
 	// ORSBitmap exactly matches JT400's EXECUTE for CALL in
 	// prepared_call_multi_set.trace sent #14: RETURN_DATA + SQLCA +
@@ -1079,6 +1082,9 @@ func executeCallAndAttachFirstSet(conn io.ReadWriter, sql string, paramShapes []
 		_ = deleteRPB(conn, nextCorr())
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: parse CALL result-set column descriptors: %w", err)
 	}
+	// Stamp the negotiated date/time formats so the row decoder
+	// normalises DATE/TIME values to ISO by format, not by shape.
+	stampDateTimeFormat(rsCols, opts)
 
 	// --- c) FETCH the first row batch using JT400's CALL-cursor
 	// param set (FetchScrollOption + BlockingFactor).

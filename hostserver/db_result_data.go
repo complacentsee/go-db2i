@@ -381,11 +381,15 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 
 	case SQLTypeDate, SQLTypeDateNN:
 		// PUB400 default date format is YMD ("YY-MM-DD" = 8 chars);
-		// JDBC always returns ISO ("YYYY-MM-DD"). Translate
-		// inline using the 1940 century boundary JTOpen uses
-		// (YY 00..39 -> 20YY, 40..99 -> 19YY). When we wire up
-		// SET_SQL_ATTRIBUTES date-format negotiation in M5, this
-		// fall-through will land iff the server still picks YMD.
+		// JDBC always returns ISO ("YYYY-MM-DD"). When the session
+		// negotiated a concrete date format via SET_SQL_ATTRIBUTES we
+		// decode by that format (col.DateFormat), mirroring JT400's
+		// SQLDate.stringToDate switch on settings.getDateFormat() --
+		// this is the only way to disambiguate MDY from DMY, which
+		// share an 8-char "NN/NN/NN" wire shape. With no negotiated
+		// format (DateFormatJOB / zero) we fall back to shape-sniffing
+		// via ymdToISODate, which defaults the ambiguous 8-char shape
+		// to MDY.
 		if len(b) < int(col.Length) {
 			return nil, 0, fmt.Errorf("date wants %d bytes, have %d", col.Length, len(b))
 		}
@@ -393,12 +397,18 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("decode date ebcdic: %w", err)
 		}
-		return ymdToISODate(s), int(col.Length), nil
+		return dateStringToISO(s, col.DateFormat), int(col.Length), nil
 
 	case SQLTypeTime, SQLTypeTimeNN:
 		// ISO time format on the wire: "HH:MM:SS" (8 EBCDIC chars).
-		// IBM-format ("HH.MM.SS") shows up if the connection asked
-		// for it via SET_SQL_ATTRIBUTES; not currently exposed.
+		// When the session negotiated a concrete time format via
+		// SET_SQL_ATTRIBUTES we normalise by that format
+		// (col.TimeFormat), mirroring JT400's SQLTime.stringToTime
+		// switch on settings.getTimeFormat() -- USA ships AM/PM
+		// ("HH:MM AM"), EUR/ISO ship "HH.MM.SS" with '.' separators.
+		// With no negotiated format (TimeFormat <= 0, i.e. unset or
+		// hms) the wire is already canonical "HH:MM:SS" and we return
+		// it verbatim.
 		if len(b) < int(col.Length) {
 			return nil, 0, fmt.Errorf("time wants %d bytes, have %d", col.Length, len(b))
 		}
@@ -406,7 +416,7 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("decode time ebcdic: %w", err)
 		}
-		return s, int(col.Length), nil
+		return timeStringToISO(s, col.TimeFormat), int(col.Length), nil
 
 	case SQLTypeChar, 453, SQLTypeCharNonBlank, 461:
 		// 452 = CHAR NN, 453 = CHAR nullable, 460/461 = CHAR with
@@ -960,6 +970,111 @@ func ymdToISODate(s string) string {
 		return century + s[6:8] + "-" + s[0:2] + "-" + s[3:5]
 	}
 	return s
+}
+
+// dateStringToISO normalises a server-formatted DATE string into ISO
+// "YYYY-MM-DD" using the session's negotiated date format. It mirrors
+// JT400's SQLDate.stringToDate, which switches on
+// settings.getDateFormat() rather than guessing from the string shape
+// -- the only way to tell MDY ("MM/DD/YY") from DMY ("DD/MM/YY"),
+// which are byte-shape-identical.
+//
+// format is a DateFormat* byte constant. The unset values
+// (DateFormatJOB 0xF0 and the zero value) mean the format was not
+// negotiated; in that case we fall back to ymdToISODate's
+// shape-sniffing, preserving the pre-negotiation behaviour. Any input
+// whose length doesn't match the format also falls through to
+// shape-sniffing so a misconfigured session degrades gracefully
+// rather than slicing out of range.
+//
+// The 8-char (YMD/MDY/DMY) variants carry a 2-digit year; we apply
+// the same 1940 century boundary JT400 uses (00..39 -> 20YY,
+// 40..99 -> 19YY).
+func dateStringToISO(s string, format byte) string {
+	// Each branch checks both length and separators so a wire string
+	// that doesn't match the negotiated format degrades to the
+	// shape-sniffer rather than slicing the wrong fields.
+	switch format {
+	case DateFormatISO, DateFormatJIS:
+		if len(s) == 10 && s[4] == '-' && s[7] == '-' {
+			return s // already YYYY-MM-DD
+		}
+	case DateFormatUSA:
+		if len(s) == 10 && s[2] == '/' && s[5] == '/' { // MM/DD/YYYY
+			return s[6:10] + "-" + s[0:2] + "-" + s[3:5]
+		}
+	case DateFormatEUR:
+		if len(s) == 10 && s[2] == '.' && s[5] == '.' { // DD.MM.YYYY
+			return s[6:10] + "-" + s[3:5] + "-" + s[0:2]
+		}
+	case DateFormatMDY:
+		if len(s) == 8 && s[2] == '/' && s[5] == '/' { // MM/DD/YY
+			return centuryFromYY(s[6:8]) + s[6:8] + "-" + s[0:2] + "-" + s[3:5]
+		}
+	case DateFormatDMY:
+		if len(s) == 8 && s[2] == '/' && s[5] == '/' { // DD/MM/YY
+			return centuryFromYY(s[6:8]) + s[6:8] + "-" + s[3:5] + "-" + s[0:2]
+		}
+	case DateFormatYMD:
+		if len(s) == 8 && s[2] == '-' && s[5] == '-' { // YY-MM-DD
+			return centuryFromYY(s[0:2]) + s[0:2] + "-" + s[3:5] + "-" + s[6:8]
+		}
+	}
+	// Not negotiated (DateFormatJOB / zero), or a wire shape that
+	// doesn't match the negotiated format -- sniff the shape.
+	return ymdToISODate(s)
+}
+
+// centuryFromYY returns the "19"/"20" century prefix for a 2-digit
+// year string using JT400's 1940 cutover (00..39 -> 20YY,
+// 40..99 -> 19YY). yy must be 2 bytes; a non-digit or short input
+// defaults to "20".
+func centuryFromYY(yy string) string {
+	if len(yy) == 2 && yy[0] >= '4' {
+		return "19"
+	}
+	return "20"
+}
+
+// timeStringToISO normalises a server-formatted TIME string into ISO
+// "HH:MM:SS" using the session's negotiated time format. It mirrors
+// JT400's SQLTime.stringToTime, which switches on
+// settings.getTimeFormat(): the USA format ships "HH:MM AM"/"HH:MM PM"
+// (12-hour clock, no seconds) while EUR/JIS/ISO ship "HH.MM.SS" with
+// '.' separators. HMS is already canonical "HH:MM:SS".
+//
+// format is JT400's TIME_FORMAT choice index (hms=0, usa=1, iso=2,
+// eur=3, jis=4). Values <= 0 (unset sentinel or hms) mean the wire is
+// already canonical and we return it verbatim. An input whose shape
+// doesn't match the negotiated format is returned unchanged so a
+// misconfigured session degrades gracefully.
+func timeStringToISO(s string, format int8) string {
+	switch format {
+	case 1: // USA: "HH:MM AM" / "HH:MM PM" (12-hour, no seconds)
+		if len(s) == 8 && (s[6] == 'A' || s[6] == 'P') {
+			hh := (int(s[0]-'0'))*10 + int(s[1]-'0')
+			if s[6] == 'A' {
+				if hh == 12 {
+					hh = 0
+				}
+			} else if hh != 12 { // PM
+				hh += 12
+			}
+			return twoDigit(hh) + ":" + s[3:5] + ":00"
+		}
+	case 2, 3, 4: // ISO / EUR / JIS: "HH.MM.SS" (dotted separators)
+		if len(s) == 8 && s[2] == '.' && s[5] == '.' {
+			return s[0:2] + ":" + s[3:5] + ":" + s[6:8]
+		}
+	}
+	// hms (0) / unset, or a shape that doesn't match -- already
+	// canonical "HH:MM:SS" on the wire.
+	return s
+}
+
+// twoDigit renders 0..99 as a zero-padded 2-char string.
+func twoDigit(n int) string {
+	return string([]byte{byte('0' + (n/10)%10), byte('0' + n%10)})
 }
 
 // ibmTimestampToISO converts IBM i's wire timestamp string
