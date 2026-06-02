@@ -111,6 +111,15 @@ func (h *Header) UnmarshalBinary(b []byte) error {
 // bytes than are available on the wire.
 var ErrShortFrame = errors.New("hostserver: short DSS frame")
 
+// maxFrameLength caps the payload we'll preallocate for a single DSS
+// frame. The Length field is a server-controlled uint32, so a corrupt
+// or hostile reply can claim up to ~4 GiB and fatal-OOM the process at
+// make([]byte, ...) before a single byte of the bogus payload is even
+// read. 64 MiB mirrors the compressed-reply decompression ceiling
+// (db_reply.go) and sits far above any real host-server frame go-db2i
+// has captured.
+const maxFrameLength = HeaderLength + 64*1024*1024
+
 // ReadFrame reads one complete DSS frame from r and returns the parsed
 // header plus the payload bytes that followed it (Length-20 bytes).
 //
@@ -128,6 +137,9 @@ func ReadFrame(r io.Reader) (Header, []byte, error) {
 	}
 	if hdr.Length < HeaderLength {
 		return hdr, nil, fmt.Errorf("hostserver: header Length %d < HeaderLength %d", hdr.Length, HeaderLength)
+	}
+	if hdr.Length > maxFrameLength {
+		return hdr, nil, fmt.Errorf("hostserver: header Length %d exceeds frame cap %d", hdr.Length, maxFrameLength)
 	}
 	payload := make([]byte, hdr.Length-HeaderLength)
 	if len(payload) > 0 {
