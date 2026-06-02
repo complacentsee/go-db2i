@@ -284,6 +284,11 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 			if err != nil {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
+			// A time.Time bind always produces the 26-char IBM
+			// timestamp "YYYY-MM-DD-HH.MM.SS.ffffff" (driver/stmt.go);
+			// on a DATE cache-hit the PMF says DATE so slice down to
+			// the leading date portion before encoding (issue #23).
+			s = reshapeTimestampForDate(s)
 			wire, err := encodeDateForParam(s, int(p.FieldLength), p.DateFormat)
 			if err != nil {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
@@ -299,6 +304,11 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 			if err != nil {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
 			}
+			// Same reshape as DATE: a time.Time bind arrives as the
+			// 26-char IBM timestamp; a TIME cache-hit needs just the
+			// "HH.MM.SS" portion (issue #23). encodeTimeString accepts
+			// both '.' and ':' separators.
+			s = reshapeTimestampForTime(s)
 			wire, err := encodeTimeString(s, int(p.FieldLength))
 			if err != nil {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
@@ -1371,6 +1381,31 @@ func encodeDateStringForFormat(iso string, format byte) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown date format byte 0x%02X", format)
 	}
+}
+
+// reshapeTimestampForDate slices a 26-char IBM timestamp
+// "YYYY-MM-DD-HH.MM.SS.ffffff" down to its leading 10-char date
+// "YYYY-MM-DD" so a time.Time bound into a DATE column encodes
+// correctly on the cache-hit path (issue #23). Any other length is
+// passed through untouched -- a caller that already supplied a bare
+// date / TIME string keeps its existing behaviour.
+func reshapeTimestampForDate(s string) string {
+	if len(s) == 26 && s[10] == '-' {
+		return s[:10]
+	}
+	return s
+}
+
+// reshapeTimestampForTime slices a 26-char IBM timestamp down to its
+// 8-char time portion "HH.MM.SS" (offsets 11..19) for a time.Time
+// bound into a TIME column on the cache-hit path (issue #23).
+// encodeTimeString normalises the '.' separators to ':'. Non-26-char
+// input is passed through untouched.
+func reshapeTimestampForTime(s string) string {
+	if len(s) == 26 && s[10] == '-' {
+		return s[11:19]
+	}
+	return s
 }
 
 // encodeTimeString converts ISO time "HH:MM:SS" into the wire form.

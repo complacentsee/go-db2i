@@ -68,6 +68,31 @@ func TestBindArgsToPreparedParams(t *testing.T) {
 	}
 }
 
+// TestBindTimePreservesWallClock pins issue #23: a non-UTC time.Time
+// bind must keep the caller's wall clock, matching JT400's
+// default-calendar semantics (SQLTimestamp.stringToTimestamp via
+// AS400Calendar.getGregorianInstance -- never forced to GMT). The old
+// code called v.UTC().Format(...), which shifted the date across
+// midnight for non-UTC values (off-by-one day). The fixture below sits
+// just after midnight in a +05:00 zone: .UTC() would roll it back to
+// the previous day (2026-05-06 20:30); the fix must emit 2026-05-07.
+func TestBindTimePreservesWallClock(t *testing.T) {
+	loc := time.FixedZone("UTC+5", 5*60*60)
+	ts := time.Date(2026, 5, 7, 1, 30, 0, 0, loc)
+	_, values, _, err := bindArgsToPreparedParams([]driver.Value{ts}, 37)
+	if err != nil {
+		t.Fatalf("bindArgsToPreparedParams: %v", err)
+	}
+	got, ok := values[0].(string)
+	if !ok {
+		t.Fatalf("bound value is %T, want string", values[0])
+	}
+	const want = "2026-05-07-01.30.00.000000"
+	if got != want {
+		t.Errorf("bound timestamp = %q, want %q (wall clock must not shift to UTC)", got, want)
+	}
+}
+
 // TestBindArgsToPreparedParamsRejectsUnsupportedType pins the error
 // path for any Go type outside the driver.Value union (e.g. someone
 // trying to push an *int through a NamedValueChecker before
