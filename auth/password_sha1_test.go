@@ -41,6 +41,70 @@ func TestEncryptPasswordSHA1Determinism(t *testing.T) {
 	}
 }
 
+// TestTrimUnicodeSpace pins go-db2i's password trim to JT400's
+// AS400ImplRemote.trimUnicodeSpace: trailing-only, over exactly the
+// three code points {U+0000, U+0020, U+3000}. This catches the prior
+// strings.TrimSpace behaviour, which stripped leading runs and a much
+// broader Unicode whitespace set (\t \n \v \f \r U+0085 U+00A0 ...).
+func TestTrimUnicodeSpace(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"trailing ascii space", "secret  ", "secret"},
+		{"trailing nul", "secret\x00\x00", "secret"},
+		{"trailing ideographic space", "secret　　", "secret"},
+		{"mixed trailing trio", "secret \x00　", "secret"},
+		{"leading space preserved", "  secret", "  secret"},
+		{"interior space preserved", "se cret  ", "se cret"},
+		{"leading and trailing", "  secret  ", "  secret"},
+		// strings.TrimSpace would have stripped these; trimUnicodeSpace
+		// must not -- they are not in the {U+0000,U+0020,U+3000} set.
+		{"trailing tab kept", "secret\t", "secret\t"},
+		{"trailing newline kept", "secret\n", "secret\n"},
+		{"trailing nbsp kept", "secret ", "secret "},
+		{"all spaces", "\x00 　", ""},
+		{"empty", "", ""},
+		{"no trim needed", "secret", "secret"},
+	}
+	for _, c := range cases {
+		if got := trimUnicodeSpace(c.in); got != c.want {
+			t.Errorf("%s: trimUnicodeSpace(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+// TestEncryptPasswordSHA1PreservesLeadingSpace confirms the trim
+// change is wired into the encryption path: a leading space is
+// significant (JT400 keeps it), so "secret" and " secret" must hash
+// differently, while a trailing space is trimmed away so "secret" and
+// "secret " hash identically.
+func TestEncryptPasswordSHA1PreservesLeadingSpace(t *testing.T) {
+	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	serverSeed := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+
+	base, err := EncryptPasswordSHA1("USER", "secret", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("base: %v", err)
+	}
+	leading, err := EncryptPasswordSHA1("USER", " secret", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("leading: %v", err)
+	}
+	if bytes.Equal(base, leading) {
+		t.Error("leading space was trimmed: \"secret\" and \" secret\" hashed identically")
+	}
+
+	trailing, err := EncryptPasswordSHA1("USER", "secret ", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("trailing: %v", err)
+	}
+	if !bytes.Equal(base, trailing) {
+		t.Error("trailing space was NOT trimmed: \"secret\" and \"secret \" hashed differently")
+	}
+}
+
 func TestEncryptPasswordSHA1RejectsBadInputs(t *testing.T) {
 	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	serverSeed := []byte{8, 7, 6, 5, 4, 3, 2, 1}

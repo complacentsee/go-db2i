@@ -131,6 +131,50 @@ func TestEncryptPasswordPBKDF2Deterministic(t *testing.T) {
 	}
 }
 
+// TestPaddedUserIDUTF16BETruncates pins the over-long-userID handling
+// to JT400's generateSha512Substitute, which feeds
+// (userProfile + "          ").substring(0, 10) to the digest -- i.e.
+// it truncates to the first 10 chars rather than erroring (the prior
+// go-db2i behaviour). A >10-char userID and its first-10-char prefix
+// must therefore produce identical bytes, and uppercasing still applies.
+func TestPaddedUserIDUTF16BETruncates(t *testing.T) {
+	long := paddedUserIDUTF16BE("ABCDEFGHIJKLMNOP") // 16 chars
+	short := paddedUserIDUTF16BE("ABCDEFGHIJ")      // first 10
+	if !bytes.Equal(long, short) {
+		t.Errorf("over-long userID not truncated to 10 chars\n long:  %x\n short: %x", long, short)
+	}
+	if len(long) != 20 {
+		t.Errorf("padded userID = %d bytes, want 20 (10 chars UTF-16BE)", len(long))
+	}
+	// Lower case is folded to upper before truncation.
+	lower := paddedUserIDUTF16BE("abcdefghijklmnop")
+	if !bytes.Equal(lower, short) {
+		t.Errorf("lower-case over-long userID not folded+truncated\n got: %x\n want: %x", lower, short)
+	}
+}
+
+// TestEncryptPasswordPBKDF2OverlongUserIDTruncates confirms the
+// truncation is wired through the full encryption path: an over-long
+// userID no longer returns an error, and it encrypts identically to
+// its first-10-char prefix. Before this change EncryptPasswordPBKDF2
+// returned "userID ... is N chars (max 10)" for any userID > 10 chars.
+func TestEncryptPasswordPBKDF2OverlongUserIDTruncates(t *testing.T) {
+	clientSeed := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	serverSeed := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+
+	long, err := EncryptPasswordPBKDF2("LONGUSERNAME12", "synthpwd99", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("over-long userID errored (want truncate): %v", err)
+	}
+	trunc, err := EncryptPasswordPBKDF2("LONGUSERNA", "synthpwd99", clientSeed, serverSeed)
+	if err != nil {
+		t.Fatalf("truncated userID: %v", err)
+	}
+	if !bytes.Equal(long, trunc) {
+		t.Errorf("over-long userID did not encrypt as its first-10-char prefix\n long:  %x\n trunc: %x", long, trunc)
+	}
+}
+
 // TestPBKDF2SaltDerivation confirms our SHA-256 salt step matches a
 // hand-computed value. SHA-256 of the 28-byte salt input for
 // userID "TEST" + password "pw" is fixed; compute once with

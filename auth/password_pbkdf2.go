@@ -74,12 +74,10 @@ func EncryptPasswordPBKDF2(userID, password string, clientSeed, serverSeed []byt
 	// pass UTF-8 here, not UTF-16BE. (UTF-16BE is still correct for
 	// the salt construction in step 1+2 above.) Live-validated 2026-05-08.
 	pwToken := pbkdf2HMACSHA512([]byte(password), salt, 10022, 64)
+	defer zero(pwToken)
 
 	// Step 5: SHA-512 substitute.
-	userIDBytes, err := paddedUserIDUTF16BE(userID)
-	if err != nil {
-		return nil, err
-	}
+	userIDBytes := paddedUserIDUTF16BE(userID)
 	sequence := []byte{0, 0, 0, 0, 0, 0, 0, 1}
 	h := sha512.New()
 	h.Write(pwToken)
@@ -131,17 +129,23 @@ func buildPBKDF2SaltInput(userID, password string) []byte {
 // to upper case at AS400.connect() (see AS400.java toUpperCase
 // calls). We do the equivalent here so callers can pass any case
 // and the salt+substitute paths see consistent inputs.
-func paddedUserIDUTF16BE(userID string) ([]byte, error) {
+//
+// An over-long userID is truncated to its first 10 chars rather than
+// rejected, matching JT400's generateSha512Substitute, which feeds
+// (userProfile + "          ").substring(0, 10) to the digest (see
+// AS400ImplRemote line ~5249). buildPBKDF2SaltInput already truncates
+// the same way, so both salt and substitute stay consistent.
+func paddedUserIDUTF16BE(userID string) []byte {
 	runes := []rune(strings.ToUpper(userID))
 	if len(runes) > 10 {
-		return nil, fmt.Errorf("auth: userID %q is %d chars (max 10)", userID, len(runes))
+		runes = runes[:10]
 	}
 	padded := make([]rune, 10)
 	for i := range padded {
 		padded[i] = ' '
 	}
 	copy(padded, runes)
-	return utf16BERunes(padded), nil
+	return utf16BERunes(padded)
 }
 
 // utf16BERunes encodes a slice of runes as UTF-16 BE without a BOM.
