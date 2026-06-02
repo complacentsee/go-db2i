@@ -16,6 +16,7 @@ import (
 var documentedDSNKeys = []string{
 	"block-size",
 	"ccsid",
+	"charset-strict",
 	"date",
 	"date-separator",
 	"decimal-separator",
@@ -95,6 +96,6 @@ func TestDocumentedDSNKeysMatchParser(t *testing.T) {
 		t.Errorf("documentedDSNKeys list %d key(s) the parser no longer reads: %v -- remove them from the roster and MIGRATING.md", len(missingFromParser), missingFromParser)
 	}
 	if len(parserKeys) != len(documentedDSNKeys) {
-		t.Errorf("parser key count = %d, documented roster count = %d; MIGRATING.md says 'Supported (30 DSN keys)' -- keep all three in sync", len(parserKeys), len(documentedDSNKeys))
+		t.Errorf("parser key count = %d, documented roster count = %d; MIGRATING.md says 'Supported (31 DSN keys)' -- keep all three in sync", len(parserKeys), len(documentedDSNKeys))
 	}
 }

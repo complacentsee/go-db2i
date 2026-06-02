@@ -64,6 +64,13 @@
 //	             bind encoder can faithfully tag and encode. Any other
 //	             value is rejected at parse so the descriptor tag and
 //	             the encoded bytes never disagree.
+//	charset-strict  true|false (default false). The driver implements
+//	             SBCS EBCDIC tables only for CCSID 37 and 273; any
+//	             other SBCS CCSID decodes through CCSID 37 by default
+//	             (with a one-shot warning), which can corrupt non-US
+//	             text. Set true to raise a hard error on an unsupported
+//	             CCSID instead, matching JT400's
+//	             UnsupportedEncodingException.
 //
 // # Connection lifecycle
 //
@@ -368,6 +375,16 @@ type Config struct {
 	// -- the per-column CCSID always wins. CCSID is for the
 	// "untagged" / connection-default case.
 	CCSID uint16
+
+	// CharsetStrict promotes the unknown-CCSID fallback from a
+	// one-shot warning to a hard error. The driver implements EBCDIC
+	// tables only for CCSID 37 (US) and 273 (German); any other SBCS
+	// CCSID decodes/encodes through CCSID 37 by default, which can
+	// silently corrupt non-US text. With CharsetStrict set, those
+	// columns/params raise an error instead (matching JT400's
+	// UnsupportedEncodingException). Set via DSN ?charset-strict=true.
+	// Default false keeps pre-1.0 callers non-breaking.
+	CharsetStrict bool
 
 	// LOBThreshold is the byte count below which the server returns
 	// LOB columns inline in row data (and accepts inline LOB shapes
@@ -818,6 +835,13 @@ func parseDSN(dsn string) (*Config, error) {
 		default:
 			return nil, fmt.Errorf("unsupported ccsid %d (encoder honours 37, 273, 1208, 65535 only)", n)
 		}
+	}
+	if v := q.Get("charset-strict"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid charset-strict %q (want true|false): %w", v, err)
+		}
+		cfg.CharsetStrict = b
 	}
 	if v := q.Get("lob-threshold"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 32)

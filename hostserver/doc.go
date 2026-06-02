@@ -79,6 +79,12 @@
 // need to override the connection-default for untagged columns;
 // tagged columns always win on the read side.
 //
+// Only CCSID 37 (US) and 273 (German stand-in) have real SBCS tables;
+// any other SBCS CCSID falls back to the CCSID-37 byte table. That
+// fallback emits a one-shot slog.Warn per CCSID by default; the
+// driver's `?charset-strict=true` knob ([SetCCSIDStrict]) promotes it
+// to a hard error instead (matching JT400's UnsupportedEncodingException).
+//
 // # LOB compression
 //
 // V7R6 servers respond to RetrieveLOBData with a whole-datastream

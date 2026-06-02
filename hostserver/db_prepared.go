@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/complacentsee/go-db2i/ebcdic"
 )
@@ -1551,15 +1554,79 @@ func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
 	return out, nil
 }
 
+// ccsidStrict, when set, promotes the unknown-CCSID fallback in
+// ebcdicForCCSID from a one-shot warning to a hard error. It is a
+// process-level toggle (granularity matches ucs2NonBMPWarnOnce: the
+// hostserver layer has no stable handle to the *sql.DB the call
+// originated from). The driver flips it from the DSN knob
+// ?charset-strict=true via SetCCSIDStrict during connect.
+var ccsidStrict atomic.Bool
+
+// SetCCSIDStrict toggles strict-CCSID mode for the whole process.
+// When true, ebcdicForCCSID rejects any CCSID it has no real table
+// for instead of silently standing in CCSID 37; when false (the
+// default), it warns once per unknown CCSID and uses CCSID 37 so
+// pre-1.0 callers on default-locale systems keep working. The driver
+// calls this from the connect path when ?charset-strict=true is set.
+func SetCCSIDStrict(strict bool) { ccsidStrict.Store(strict) }
+
+// ccsidWarnOnce keys a per-CCSID sync.Once so each unknown CCSID
+// warns exactly once per process (a single map.Store-of-Once never
+// re-fires), keeping the log readable when a query streams thousands
+// of rows under an unsupported CCSID.
+var ccsidWarnOnce sync.Map // uint16 -> *sync.Once
+
 // ebcdicForCCSID picks the EBCDIC converter for a parameter's CCSID.
 // M3 ships CCSID 37 (US) and 273 (German -- PUB400 default;
 // currently a CCSID-37-table stand-in, see ebcdic.CCSID273 docs).
 // Other CCSIDs (5026 Japan, 1140 Euro, ...) land with M4.
+//
+// For any CCSID outside the implemented set the converter falls back
+// to CCSID 37's byte table, which silently corrupts non-US text.
+// JT400 raises UnsupportedEncodingException here instead. To stay
+// non-breaking for pre-1.0 callers the default path keeps the 037
+// stand-in but emits a one-shot slog.Warn per unknown CCSID; setting
+// ?charset-strict=true (SetCCSIDStrict) promotes the fallback to a
+// hard error surfaced through the returned codec's Decode/Encode.
 func ebcdicForCCSID(ccsid uint16) ebcdic.Codec {
 	switch ccsid {
+	case 37:
+		return ebcdic.CCSID37
 	case 273:
 		return ebcdic.CCSID273
 	default:
+		if ccsidStrict.Load() {
+			return unsupportedCCSIDCodec{ccsid: ccsid}
+		}
+		once, _ := ccsidWarnOnce.LoadOrStore(ccsid, &sync.Once{})
+		once.(*sync.Once).Do(func() {
+			slog.Warn("go-db2i: unsupported CCSID, decoding/encoding as CCSID 37 (US English) -- non-US text may be corrupted; set ?charset-strict=true to hard-error instead",
+				"ccsid", ccsid,
+				"fallback_ccsid", 37,
+				"note", "first occurrence for this CCSID; subsequent uses silent",
+			)
+		})
 		return ebcdic.CCSID37
 	}
+}
+
+// unsupportedCCSIDCodec is the strict-mode placeholder ebcdicForCCSID
+// hands back for a CCSID it has no real table for. Both directions
+// fail with an UnsupportedEncodingException-style error (mirroring
+// JT400) so the existing call sites, which already wrap and propagate
+// the Decode/Encode error, surface it without any per-site change.
+type unsupportedCCSIDCodec struct{ ccsid uint16 }
+
+func (c unsupportedCCSIDCodec) CCSID() uint32 { return uint32(c.ccsid) }
+
+func (c unsupportedCCSIDCodec) Encode(string) ([]byte, error) {
+	return nil, c.err()
+}
+
+func (c unsupportedCCSIDCodec) Decode([]byte) (string, error) {
+	return "", c.err()
+}
+
+func (c unsupportedCCSIDCodec) err() error {
+	return fmt.Errorf("unsupported CCSID %d (charset-strict): no converter table; remove ?charset-strict=true to fall back to CCSID 37", c.ccsid)
 }
