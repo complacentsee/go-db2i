@@ -49,6 +49,26 @@ func TestUnmarshalRejectsBadSanityByte(t *testing.T) {
 	}
 }
 
+// TestReadFrameRejectsOversizedLength pins the frame-size ceiling
+// added for issue #27: a corrupt/hostile reply whose 32-bit Length
+// field claims ~4 GiB must be rejected with an error rather than
+// driving make([]byte, Length-20) into a fatal process OOM. We hand
+// the reader only the 20-byte header so a parser that ignored the cap
+// would block on io.ReadFull after a huge allocation; the cap makes it
+// fail before allocating.
+func TestReadFrameRejectsOversizedLength(t *testing.T) {
+	hdr := make([]byte, HeaderLength)
+	binary.BigEndian.PutUint32(hdr[0:4], 0xFFFFFFFF) // ~4 GiB frame
+	hdr[6] = 0xE0                                    // sanity byte
+	_, _, err := ReadFrame(bytes.NewReader(hdr))
+	if err == nil {
+		t.Fatal("expected error for oversized frame length, got nil")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("frame cap")) {
+		t.Errorf("error = %q, want it to mention the frame cap", err)
+	}
+}
+
 // TestParseConnectOnlyFirstSent decodes the first sent frame from the
 // connect_only fixture (which is JTOpen's SignonExchangeAttributeReq)
 // and validates every header field plus the parameter layout.

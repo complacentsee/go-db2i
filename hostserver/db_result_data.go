@@ -99,17 +99,46 @@ func parseExtendedResultData(data []byte, cols []SelectColumn, vlfCompressed boo
 	indicatorSize := int(be.Uint16(data[10:12]))
 	rowSize := int(be.Uint32(data[16:20]))
 
+	// indicatorSize is a per-column NULL-indicator short: the server
+	// sends either 0 (no indicators) or 2 (one BE int16 per column).
+	// decodeRow reads exactly 2 bytes per indicator (be.Uint16), so an
+	// odd or oversized value would slice a 2-byte window out of a
+	// 1-byte (or misaligned) slot and panic. JT400's DBExtendedData
+	// only ever writes 0 or 2 here; reject anything else up front.
+	if indicatorSize != 0 && indicatorSize != 2 {
+		return nil, fmt.Errorf("hostserver: result data indicator size %d (want 0 or 2)", indicatorSize)
+	}
 	if colCount != len(cols) {
 		return nil, fmt.Errorf("hostserver: result data column count %d != format column count %d", colCount, len(cols))
 	}
 	if rowCount == 0 {
 		return nil, nil
 	}
-
-	indicatorBytes := indicatorSize * colCount * rowCount
-	if fixedLen+indicatorBytes > len(data) {
-		return nil, fmt.Errorf("hostserver: indicators (%d bytes) past end of result data (%d bytes)", indicatorBytes, len(data))
+	// rowCount, colCount, and rowSize are all server-controlled and can
+	// each be up to ~4 billion off a hostile or corrupt reply. Cap them
+	// before the indicator/row arithmetic below: the products feed both
+	// a make([]SelectRow, rowCount) and a slice bound, so an unchecked
+	// rowCount fatal-OOMs the process and the int multiplication can
+	// overflow into a small/negative value that defeats the
+	// past-end-of-data check. maxResultRows mirrors the 64 MiB ceiling
+	// the compressed-reply path uses (db_reply.go) -- two orders of
+	// magnitude above any real fetch block.
+	const maxResultRows = 64 * 1024 * 1024
+	if rowCount < 0 || rowCount > maxResultRows {
+		return nil, fmt.Errorf("hostserver: result data row count %d exceeds cap %d", rowCount, maxResultRows)
 	}
+	if rowSize < 0 {
+		return nil, fmt.Errorf("hostserver: result data negative row size %d", rowSize)
+	}
+
+	// Compute the indicator-block size in int64 so the colCount * rowCount
+	// * indicatorSize product can't wrap a 32-bit-ish int; only commit to
+	// an int once we know it fits inside the actual payload.
+	indicatorBytes64 := int64(indicatorSize) * int64(colCount) * int64(rowCount)
+	if int64(fixedLen)+indicatorBytes64 > int64(len(data)) {
+		return nil, fmt.Errorf("hostserver: indicators (%d bytes) past end of result data (%d bytes)", indicatorBytes64, len(data))
+	}
+	indicatorBytes := int(indicatorBytes64)
 	indicators := data[fixedLen : fixedLen+indicatorBytes]
 
 	// Pick layout. The reliable signal is the response ORS bitmap
@@ -144,6 +173,16 @@ func parseExtendedResultData(data []byte, cols []SelectColumn, vlfCompressed boo
 			return nil, fmt.Errorf("hostserver: row info array entry %d overruns result data", i)
 		}
 		rowOff := rowInfoHeaderStart + int(be.Uint32(data[offEntry:offEntry+4]))
+		// The row-info array is server-controlled: a hostile or corrupt
+		// entry can point anywhere. JT400 leans on the JVM's array bounds
+		// check (getRowDataOffset returns a raw offset and the caller's
+		// rawBytes[off] throws ArrayIndexOutOfBoundsException on a bad
+		// one); Go's data[rowOff:] panics with no recover() between here
+		// and database/sql, so bound rowOff into [rowInfoHeaderStart,
+		// len(data)] before slicing.
+		if rowOff < rowInfoHeaderStart || rowOff > len(data) {
+			return nil, fmt.Errorf("hostserver: row %d data offset %d out of range [%d, %d]", i, rowOff, rowInfoHeaderStart, len(data))
+		}
 		row, _, err := decodeRow(data[rowOff:], cols, indicators[i*colCount*indicatorSize:(i+1)*colCount*indicatorSize], indicatorSize, false)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", i, err)
@@ -233,6 +272,16 @@ func decodeRow(rowBytes []byte, cols []SelectColumn, indicators []byte, indicato
 			//     ("slice bounds out of range [52:12]").
 			off += nullSkipWidth(col, fixedSlots)
 			continue
+		}
+		// off is driven by server-controlled slot widths (and, in the
+		// non-VLF path, by a server-controlled rowSize that bounds the
+		// rowBytes window). A rowSize smaller than the summed column
+		// widths -- or a corrupt slot width -- walks off past the end
+		// of the slice and rowBytes[off:] panics. Bound it here; the
+		// per-type decoders already length-check from off forward, but
+		// the slice expression itself must be in range first.
+		if off < 0 || off > len(rowBytes) {
+			return nil, 0, fmt.Errorf("column %d (%q, sql_type=%d): row offset %d past end of %d-byte row", i, col.Name, col.SQLType, off, len(rowBytes))
 		}
 		val, n, err := decodeColumn(rowBytes[off:], col)
 		if err != nil {
