@@ -53,6 +53,65 @@ func TestWithContextDeadlineCancelUnblocks(t *testing.T) {
 	t.Errorf("ctx cancel did not call SetDeadline with a past time; last=%v", conn.lastDeadline())
 }
 
+// TestWithContextDeadlineDefault_cleanupWinsCancelRace pins the
+// issue #30 AfterFunc-residual-deadline fix deterministically: a
+// cancellation whose AfterFunc fires concurrently with cleanup() must
+// never leave a past (1970) deadline armed on the conn -- doing so would
+// spuriously kill the connection's NEXT pool operation (the conn is
+// handed back with a stuck deadline). Before the fix the AfterFunc fired
+// SetDeadline(1970) unconditionally, with no synchronisation against
+// cleanup's SetDeadline(zero), so the 1970 value could land last and
+// persist. The fix serialises both under a mutex + done flag so the
+// clear always wins.
+//
+// We force the exact bad interleaving instead of hoping the scheduler
+// lands it. A gating recorder pauses the AfterFunc's SetDeadline(1970)
+// write right after it begins (recording "arrived" first). The test
+// then launches cleanup() concurrently and only releases the gate
+// afterwards, so the 1970 write always resolves AFTER cleanup has run.
+//
+//   - With the fix: the AfterFunc holds the production mutex across its
+//     (gated) 1970 write, so cleanup blocks until the write is released
+//     and the AfterFunc returns; cleanup's zero-time clear is therefore
+//     guaranteed to run last, and the final deadline is zero.
+//   - Without the fix: nothing orders the two writes. cleanup clears to
+//     zero immediately, then the released 1970 write lands last and
+//     persists -- the recorder ends on a past deadline and the test
+//     fails.
+//
+// Deterministic with or without -race.
+func TestWithContextDeadlineDefault_cleanupWinsCancelRace(t *testing.T) {
+	conn := newGatingRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cleanup := withContextDeadlineDefault(ctx, conn, 0)
+
+	// Fire the cancellation. The AfterFunc's SetDeadline(1970) call hits
+	// the recorder's gate: the recorder records "arrived" and blocks.
+	cancel()
+	conn.waitArrived() // AfterFunc is now poised on its 1970 write.
+
+	// Run cleanup concurrently. With the fix it blocks on the mutex the
+	// gated AfterFunc holds; without the fix it completes immediately.
+	cleanupDone := make(chan struct{})
+	go func() {
+		cleanup()
+		close(cleanupDone)
+	}()
+
+	// Let cleanup reach its blocking point / complete, then release the
+	// gate so the 1970 write resolves -- always after cleanup's clear.
+	time.Sleep(20 * time.Millisecond)
+	conn.release()
+
+	<-cleanupDone
+	conn.waitDone() // the 1970 write (if any) has fully resolved.
+
+	if last := conn.lastDeadline(); !last.IsZero() {
+		t.Fatalf("deadline left armed after cleanup: %v (1970 re-arm race -- would kill next op)", last)
+	}
+}
+
 // TestWithContextDeadlineDefault_armsDefaultWhenCtxHasNone pins the
 // v0.7.16 SocketTimeout safety net: with a background ctx (no
 // deadline) and a positive default, the conn's deadline is set to
@@ -217,3 +276,74 @@ func (d *deadlineRecorder) Write(b []byte) (int, error)        { return len(b), 
 func (d *deadlineRecorder) Close() error                       { return nil }
 func (d *deadlineRecorder) LocalAddr() net.Addr                { return nil }
 func (d *deadlineRecorder) RemoteAddr() net.Addr               { return nil }
+
+// gatingRecorder is a net.Conn stub that lets a test pause the
+// AfterFunc's SetDeadline(past) write at a chosen moment so the
+// cancel-vs-cleanup ordering can be forced deterministically. A write
+// of a past (non-zero) time signals `arrived` and blocks until
+// release() is called; a write of the zero time (cleanup's clear) is
+// recorded without blocking. lastDeadline reports whatever was recorded
+// last.
+type gatingRecorder struct {
+	mu      sync.Mutex
+	last    time.Time
+	arrived chan struct{}
+	gate    chan struct{}
+	done    chan struct{}
+}
+
+func newGatingRecorder() *gatingRecorder {
+	return &gatingRecorder{
+		arrived: make(chan struct{}, 1),
+		gate:    make(chan struct{}),
+		done:    make(chan struct{}, 1),
+	}
+}
+
+func (g *gatingRecorder) SetDeadline(t time.Time) error {
+	if t.IsZero() {
+		// cleanup's clear -- record without gating.
+		g.mu.Lock()
+		g.last = t
+		g.mu.Unlock()
+		return nil
+	}
+	// AfterFunc's past-time write -- announce arrival, then block on the
+	// gate so the test controls when this resolves relative to cleanup.
+	select {
+	case g.arrived <- struct{}{}:
+	default:
+	}
+	<-g.gate
+	g.mu.Lock()
+	g.last = t
+	g.mu.Unlock()
+	select {
+	case g.done <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (g *gatingRecorder) waitArrived() { <-g.arrived }
+func (g *gatingRecorder) release()     { close(g.gate) }
+
+// waitDone returns once the gated past-time write has resolved. If the
+// fixed code skipped the write entirely (done flag), the write still
+// resolves after release() -- the gate unblocks and the recorder runs
+// to completion -- so done always fires once release() has been called.
+func (g *gatingRecorder) waitDone() { <-g.done }
+
+func (g *gatingRecorder) lastDeadline() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.last
+}
+
+func (g *gatingRecorder) SetReadDeadline(t time.Time) error  { return nil }
+func (g *gatingRecorder) SetWriteDeadline(t time.Time) error { return nil }
+func (g *gatingRecorder) Read(b []byte) (int, error)         { return 0, nil }
+func (g *gatingRecorder) Write(b []byte) (int, error)        { return len(b), nil }
+func (g *gatingRecorder) Close() error                       { return nil }
+func (g *gatingRecorder) LocalAddr() net.Addr                { return nil }
+func (g *gatingRecorder) RemoteAddr() net.Addr               { return nil }
