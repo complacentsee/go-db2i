@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -26,6 +27,20 @@ type Rows struct {
 	conn     *Conn
 	closeErr error // sticky -- so repeated Close calls return the same value
 	closed   bool
+
+	// ctx is the query's context, retained so each Next / Close
+	// re-arms the per-read deadline around the continuation-FETCH /
+	// CLOSE wire I/O. QueryContext can't keep its deadline armed past
+	// the OPEN -- its defer cleanup() fires before the caller iterates
+	// -- so without this a multi-batch SELECT against a hung-but-alive
+	// server would block forever, ignoring ctx cancellation. Mirrors
+	// JT400's connection-lifetime SO_TIMEOUT, which applies to every
+	// socket read including result-set fetches (setSoTimeout in
+	// AS400JDBCConnectionImpl). nil ctx (legacy non-context callers)
+	// disables the per-read arming; the SocketTimeout default below
+	// then governs alone when positive.
+	ctx           context.Context
+	socketTimeout time.Duration
 }
 
 // Columns returns the per-column names parsed from the
@@ -48,7 +63,13 @@ func (r *Rows) Close() error {
 		return r.closeErr
 	}
 	r.closed = true
+	// CLOSE emits CLOSE + RPB DELETE on the wire (db_cursor.go); re-arm
+	// the deadline so a cancellation or SocketTimeout unblocks it the
+	// same way it would an Exec/Query. cleanup runs before the conn is
+	// handed back to the pool, restoring the zero deadline.
+	cleanup := r.armDeadline()
 	r.closeErr = r.cursor.Close()
+	cleanup()
 	if r.closeErr != nil && r.conn != nil {
 		// If RPB cleanup itself failed, the wire is in an
 		// indeterminate state. Mark the conn dead so the pool
@@ -56,6 +77,27 @@ func (r *Rows) Close() error {
 		_ = r.conn.classifyConnErr(r.closeErr)
 	}
 	return r.closeErr
+}
+
+// armDeadline re-arms the connection's read/write deadline for one
+// piece of cursor wire I/O (a continuation FETCH or the CLOSE frame),
+// returning a cleanup func the caller invokes once the I/O completes.
+// It threads r.ctx + r.socketTimeout through the same
+// withContextDeadlineDefault path the Stmt entry points use, so the
+// cancellation + SocketTimeout semantics are identical whether the
+// trigger lands during the initial OPEN or a later batch fetch.
+//
+// Returns a no-op cleanup when there's no conn (offline test path) or
+// nothing to arm (nil ctx and zero SocketTimeout).
+func (r *Rows) armDeadline() func() {
+	if r.conn == nil || r.conn.conn == nil {
+		return func() {}
+	}
+	ctx := r.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return withContextDeadlineDefault(ctx, r.conn.conn, r.socketTimeout)
 }
 
 // Next copies the next row into dest. Returns io.EOF when exhausted
@@ -69,11 +111,20 @@ func (r *Rows) Close() error {
 // time.Time is convertible both ways through database/sql's
 // convertAssign.
 func (r *Rows) Next(dest []driver.Value) error {
+	// Re-arm the deadline around the continuation FETCH: QueryContext's
+	// own deadline was torn down when it returned, so without this the
+	// per-batch wire read would ignore ctx cancellation entirely.
+	cleanup := r.armDeadline()
 	row, err := r.cursor.Next()
+	cleanup()
 	if errors.Is(err, io.EOF) {
 		return io.EOF
 	}
 	if err != nil {
+		// A cancellation / deadline that fired mid-FETCH surfaces as an
+		// i/o timeout; substitute the real ctx cause so callers can
+		// errors.Is(err, context.Canceled) just like on Exec/Query.
+		err = resolveCtxErr(r.ctx, err)
 		if r.conn != nil {
 			return r.conn.classifyConnErr(err)
 		}

@@ -144,6 +144,16 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 		s.recordSpanError(span, err)
 		return nil, err
 	}
+	// Hand the ctx + SocketTimeout to the streaming Rows so each
+	// continuation FETCH / Close re-arms the read deadline. The defer
+	// cleanup() above tears the OPEN-time deadline down the instant
+	// QueryContext returns; Rows.Next runs afterwards, so the cursor
+	// would otherwise pull every later batch with no deadline armed and
+	// ignore ctx cancellation. See issue #30.
+	if r, ok := rows.(*Rows); ok {
+		r.ctx = ctx
+		r.socketTimeout = s.conn.socketTimeout()
+	}
 	return rows, nil
 }
 

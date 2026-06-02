@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -64,7 +65,25 @@ func withContextDeadlineDefault(ctx context.Context, conn net.Conn, defaultDur t
 		_ = conn.SetDeadline(time.Now().Add(defaultDur))
 	}
 
+	// mu + done guard against the AfterFunc racing cleanup: without it
+	// a cancellation that fires just as cleanup() runs could re-arm a
+	// past (1970) deadline *after* cleanup cleared it, which would
+	// spuriously kill the connection's NEXT operation. cleanup takes mu,
+	// sets done, then clears the deadline; the AfterFunc takes the same
+	// mu and short-circuits once done is set. Holding mu across the
+	// SetDeadline calls makes the "clear wins over re-arm" ordering
+	// total, not just best-effort -- stop() alone can't, since it
+	// returns false once the func has already begun running.
+	var (
+		mu   sync.Mutex
+		done bool
+	)
 	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if done {
+			return
+		}
 		// Force any pending read/write to unblock with a deadline
 		// error. The caller's ctx.Err() check then surfaces the
 		// real cancellation reason.
@@ -73,7 +92,10 @@ func withContextDeadlineDefault(ctx context.Context, conn net.Conn, defaultDur t
 
 	return func() {
 		stop()
+		mu.Lock()
+		done = true
 		_ = conn.SetDeadline(time.Time{})
+		mu.Unlock()
 	}
 }
 
