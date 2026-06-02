@@ -56,3 +56,83 @@ func TestSignOnUppercasesUserID(t *testing.T) {
 		t.Errorf("SignOn leaked lowercase userID onto the wire (%x)", wantLower)
 	}
 }
+
+// extractUserIDCP scans a written request stream for the 10-byte
+// EBCDIC user-ID CP (0x1104) and returns its payload. Both the
+// as-signon (SignonInfoRequest) and as-database (StartServerRequest)
+// flows emit this exact CP, so the same scanner works for both.
+func extractUserIDCP(t *testing.T, written []byte) []byte {
+	t.Helper()
+	// CP layout on the wire: LL(4) = 0x00000010, CP(2) = 0x1104,
+	// data(10). Find the CP marker (LL prefix + CP) and slice the data.
+	marker := []byte{0x00, 0x00, 0x00, 0x10, 0x11, 0x04}
+	i := bytes.Index(written, marker)
+	if i < 0 {
+		t.Fatalf("user-ID CP (0x1104) not found in written bytes")
+	}
+	start := i + len(marker)
+	if start+10 > len(written) {
+		t.Fatalf("user-ID CP truncated: only %d bytes after marker", len(written)-start)
+	}
+	return append([]byte(nil), written[start:start+10]...)
+}
+
+// TestSignOnAndStartDatabaseUserIDBytesMatch is the offline
+// acceptance check for issue #33: a mixed-case DSN userID must be
+// normalised to the SAME uppercase bytes by BOTH the as-signon (8476)
+// and as-database (8471) handshakes. Before the fix, SignOn
+// uppercased but StartDatabaseService did not, so the two services
+// hashed different bytes and a mixed-case user that signed on then
+// failed the database auth.
+//
+// We drive both flows with userID="GoTest" using each service's own
+// captured replies, pull the on-wire user-ID CP (0x1104) out of each,
+// and assert they are byte-identical (uppercase EBCDIC "GOTEST    ").
+// Because EncryptPasswordSHA1 hashes this same normalised userID,
+// equal user-ID CP bytes imply equal auth-hash inputs across flows.
+func TestSignOnAndStartDatabaseUserIDBytesMatch(t *testing.T) {
+	const mixedUser = "GoTest"
+
+	// as-signon replies: the first two Received frames overall.
+	frames := wirelog.Consolidate(loadFixture(t, "connect_only.trace"))
+	var signonReplies [][]byte
+	for _, f := range frames {
+		if f.Direction == wirelog.Received {
+			signonReplies = append(signonReplies, f.Bytes)
+			if len(signonReplies) == 2 {
+				break
+			}
+		}
+	}
+	if len(signonReplies) < 2 {
+		t.Fatalf("need >= 2 as-signon received frames, got %d", len(signonReplies))
+	}
+
+	signonConn := newFakeConn(signonReplies[0], signonReplies[1])
+	if _, _, err := SignOn(signonConn, mixedUser, "any-password"); err != nil {
+		t.Fatalf("SignOn err: %v", err)
+	}
+	signonUserBytes := extractUserIDCP(t, signonConn.written.Bytes())
+
+	// as-database replies: the as-database connection's frames.
+	dbReceiveds := dbReceivedsFromFixture(t, "connect_only.trace")
+	dbConn := newFakeConn(dbReceiveds[0].Bytes, dbReceiveds[1].Bytes)
+	if _, _, err := StartDatabaseService(dbConn, mixedUser, "any-password"); err != nil {
+		t.Fatalf("StartDatabaseService err: %v", err)
+	}
+	dbUserBytes := extractUserIDCP(t, dbConn.written.Bytes())
+
+	// EBCDIC "GOTEST    " (CCSID 37): uppercase + 4 spaces.
+	wantUpper := []byte{0xC7, 0xD6, 0xE3, 0xC5, 0xE2, 0xE3, 0x40, 0x40, 0x40, 0x40}
+
+	if !bytes.Equal(signonUserBytes, dbUserBytes) {
+		t.Errorf("user-ID bytes differ across flows:\n  SignOn               = %x\n  StartDatabaseService = %x",
+			signonUserBytes, dbUserBytes)
+	}
+	if !bytes.Equal(signonUserBytes, wantUpper) {
+		t.Errorf("SignOn user-ID bytes = %x, want uppercase EBCDIC %x", signonUserBytes, wantUpper)
+	}
+	if !bytes.Equal(dbUserBytes, wantUpper) {
+		t.Errorf("StartDatabaseService user-ID bytes = %x, want uppercase EBCDIC %x", dbUserBytes, wantUpper)
+	}
+}

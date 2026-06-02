@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/complacentsee/go-db2i/auth"
 )
@@ -34,6 +35,14 @@ func StartDatabaseService(conn io.ReadWriter, userID, password string) (
 	*StartServerReply,
 	error,
 ) {
+	// IBM i user profiles are stored uppercase; mirror SignOn (and
+	// JT400's AS400.setUserId toUpperCase) so the auth-hash input and
+	// the StartServer user-ID CP match the as-signon flow byte-for-byte
+	// when a caller passes a mixed-case ID. Without this, as-signon
+	// (8476) and as-database (8471) hash different bytes and the
+	// database service rejects an otherwise-valid sign-on.
+	userID = strings.ToUpper(userID)
+
 	clientSeed := make([]byte, 8)
 	if _, err := rand.Read(clientSeed); err != nil {
 		return nil, nil, fmt.Errorf("hostserver: generate client seed: %w", err)
