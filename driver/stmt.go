@@ -967,7 +967,16 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			// IBM i timestamp: 26 chars "YYYY-MM-DD-HH.MM.SS.ffffff".
 			// encodeTimestampString maps this to wire form via
 			// CCSID-37 EBCDIC.
-			s := v.UTC().Format("2006-01-02-15.04.05.000000")
+			//
+			// Format the caller's wall clock as-is -- do NOT force
+			// .UTC(). JT400 reads the value's fields through the
+			// default (local) calendar (SQLTimestamp.stringToTimestamp
+			// / AS400Calendar.getGregorianInstance), never shifting the
+			// wall clock to GMT; .UTC() here moved the date across
+			// midnight for non-UTC values (issue #23). On a DATE/TIME
+			// cache-hit the PMF reshapes this 26-char string down to the
+			// column width in encodeRowData.
+			s := v.Format("2006-01-02-15.04.05.000000")
 			shapes[i] = hostserver.PreparedParam{SQLType: 393, FieldLength: 26}
 			values[i] = s
 		case nil:
