@@ -684,7 +684,13 @@ func parseDSN(dsn string) (*Config, error) {
 		return nil, fmt.Errorf("DSN missing user info -- expected db2i://USER:PWD@HOST/...")
 	}
 	cfg := DefaultConfig()
-	cfg.User = u.User.Username()
+	// IBM i user profiles are stored uppercase. Normalise once here, at
+	// the DSN boundary, so every downstream consumer (both the as-signon
+	// and as-database handshakes) sees identical bytes -- mirroring
+	// JT400's AS400.setUserId, which uppercases userId_ once on the way
+	// in. strings.ToUpper is locale-independent (no Turkish-i hazard for
+	// the ASCII profile names IBM i allows).
+	cfg.User = strings.ToUpper(u.User.Username())
 	if pwd, ok := u.User.Password(); ok {
 		cfg.Password = pwd
 	}

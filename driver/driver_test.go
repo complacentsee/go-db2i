@@ -212,6 +212,20 @@ func TestParseDSNUppercasesLibrary(t *testing.T) {
 	}
 }
 
+func TestParseDSNUppercasesUser(t *testing.T) {
+	// IBM i user profiles are stored uppercase. Normalising the userID
+	// at the DSN boundary keeps the as-signon (8476) and as-database
+	// (8471) handshakes hashing identical bytes for a mixed-case input
+	// -- see issue #33. Mirrors JT400's AS400.setUserId toUpperCase.
+	cfg, err := parseDSN("db2i://GoTest:p@h/?library=mylib")
+	if err != nil {
+		t.Fatalf("parseDSN: %v", err)
+	}
+	if cfg.User != "GOTEST" {
+		t.Errorf("User = %q, want GOTEST (uppercased)", cfg.User)
+	}
+}
+
 // TestParseDSNLibraries pins parsing of the multi-library DSN
 // knob, including the JT400-style separator set (`,` ` ` `:` `;`),
 // canonicalisation to uppercase, and the prepend-default-schema
