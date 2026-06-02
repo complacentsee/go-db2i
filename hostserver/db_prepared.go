@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/complacentsee/go-db2i/ebcdic"
@@ -350,7 +351,13 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 			}
 			zoned, err := encodeZonedBCD(s, int(p.Precision), int(p.Scale))
 			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): %w", i, p.Precision, p.Scale, err)
+				// A value that won't fit the column shape (magnitude
+				// or scale overflow) is recoverable on the cache-hit
+				// path: the driver binds float64/etc as DOUBLE on a
+				// plain PREPARE_DESCRIBE and lets the server cast.
+				// Wrap as ErrUnsupportedCachedParamType so cache-hit
+				// dispatch falls back there instead of hard-erroring. See #22.
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
 			}
 			if uint32(len(zoned)) != p.FieldLength {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
@@ -365,7 +372,11 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 			}
 			packed, err := encodePackedBCD(s, int(p.Precision), int(p.Scale))
 			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): %w", i, p.Precision, p.Scale, err)
+				// See the numeric arm above: an out-of-range value is
+				// recoverable via the DOUBLE PREPARE_DESCRIBE fallback,
+				// so flag it as ErrUnsupportedCachedParamType rather
+				// than propagating a hard error on cache-hit. See #22.
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
 			}
 			if uint32(len(packed)) != p.FieldLength {
 				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
@@ -1222,7 +1233,14 @@ func toDecimalString(v any) (string, error) {
 	case int64:
 		return fmt.Sprintf("%d", x), nil
 	case float64:
-		return fmt.Sprintf("%g", x), nil
+		// FormatFloat with 'f' (never 'e'/scientific) and -1 precision
+		// (shortest round-trippable form). %g would emit exponent
+		// notation for large/small magnitudes (e.g. 1e+06), which the
+		// packed/zoned BCD encoders reject as non-digit input -- the
+		// failure only surfaces on the cache-hit path, where the
+		// *PGM-stored shape is the native DECIMAL type rather than the
+		// DOUBLE the driver binds float64 as on first PREPARE. See #22.
+		return strconv.FormatFloat(x, 'f', -1, 64), nil
 	default:
 		return "", fmt.Errorf("cannot bind %T as DECIMAL (need string or numeric)", v)
 	}
