@@ -6,14 +6,23 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 The driver is **pre-1.0** while wire compatibility is being built up
 across IBM i versions; expect the public API surface to settle at
-0.5+ once LOB bind, slog observability, and OTel spans all land.
+1.0 once that compatibility is locked (LOB bind, slog observability,
+and OTel spans have already landed).
 
 ## [Unreleased]
 
-The 39 commits below are tagged-pending past v0.7.21: the June-1
-bind/decode bug-fix sweep (issues #3/#5/#11/#12/#13/#14) and the
-test-suite + CI build-out. Docs/comment hygiene is folded in here
-too. No version banner bump until the maintainer cuts the release.
+_Nothing yet._
+
+## [0.7.22] - 2026-06-02
+
+v0.7.22 collects 48 non-merge commits since v0.7.21 in two waves: (1)
+the June-1 bind/decode bug-fix sweep (issues #3/#5/#11/#12/#13/#14)
+plus the test-suite + CI build-out, and (2) a JT400-parity
+compatibility audit (issues #21–#59) that closed a batch of decode /
+bind / transaction / auth correctness gaps. Documentation was reframed
+to read as a first-class Go `database/sql` driver, with a consolidated
+`ROADMAP.md` and the milestone history archived under
+`internal/history/`.
 
 ### Added: GitHub Actions CI, golangci-lint, and a Makefile
 
@@ -65,6 +74,58 @@ erroring with SQL-332 (`5661a1d`).
 LOB-bind INSERTs file into the `*PGM` but cannot take the cache-hit
 fast path; a test + doc note pin this as a server-side constraint,
 not a driver bug (`4e48498`).
+
+### Fixed: decode correctness (TIMESTAMP, DATE/TIME, DECIMAL, CCSID)
+
+TIMESTAMP columns decode at every precision, not only TIMESTAMP(6)
+(`82a5f15`). DATE / TIME columns decode by the session's negotiated
+format instead of sniffing the string shape (`c7d2fe2`). `float64`
+binds into DECIMAL columns serialise as plain decimal (not `%g`
+scientific notation) so they round-trip on the cache-hit path
+(`763e896`). An unsupported `?ccsid=` override is now rejected at
+parse time (`ce27f8b`), and an unsupported column / job CCSID warns
+once and falls back to CCSID 37 — or hard-errors under the new
+`?charset-strict=true` — instead of silently standing in CCSID 37
+(`98a1a48`).
+
+### Fixed: transactions, binds, and time values
+
+`db.Begin()` no longer sends `*NONE`; the CP 0x380E isolation wire
+values are corrected so COMMIT / ROLLBACK behave as expected
+(`f044a58`). `time.Time` binds preserve their wall-clock value and
+reshape correctly for DATE / TIME cache-hit dispatch (`1b3b0de`).
+Graphic bit-data binds are fixed up on the SELECT path (`a1ac4b1`).
+
+### Fixed: connection robustness and authentication
+
+The driver implements `driver.Pinger`, so `db.Ping` performs a real
+liveness check (`7f08f7e`). Context cancellation is honoured across
+streaming `Rows.Next` / `Close` (`50abef1`), non-idempotent writes
+are no longer replayed after a post-send transport loss (`b8c9a3c`),
+and the result-data parser is bounds-checked against malformed
+replies (`be76997`). Mixed-case user IDs are upper-cased for the
+as-database handshake (`ca5cf8d`), and SHA-1 / PBKDF2 / TLS hygiene is
+aligned with JT400 (`71a1101`).
+
+### Changed: DSN parsing and verb dispatch
+
+`parseDSN` rejects unknown DSN query keys instead of ignoring them
+(`78481de`). Verb dispatch skips leading SQL comments before
+classifying a statement (`10d21e3`).
+
+### Changed: CI split, lint, and documentation
+
+The live PUB400 conformance suite moved to a manual-dispatch-only
+workflow so an intermittently-unavailable shared LPAR no longer gates
+every push / PR / nightly; the offline build / vet / test +
+golangci-lint tracks remain the automatic gate (`04a69a2`,
+`4c7646e`). The pre-existing golangci-lint findings were cleared
+(`7039c73`). The documentation was reframed to read as a first-class
+Go `database/sql` driver rather than a JT400-sidecar replacement: a
+positive Features list in the README, a consolidated `ROADMAP.md`,
+the milestone history archived under `internal/history/`, removal of
+the stale checked-in godoc snapshots (in favour of pkg.go.dev), and a
+sweep of stale version / count / API facts across `docs/`.
 
 ## [0.7.21] - 2026-05-12
 
@@ -2811,7 +2872,7 @@ diffrunner) drives a breaking call.
   rejection), CP 0x381F `RowCount > 1` batched LOB INSERT,
   JT400's `lob threshold` inline-small-LOB optimisation, and
   RLE-decompression on read. Each is documented with workaround
-  + fix-path notes in [`docs/lob-known-gaps.md`](docs/lob-known-gaps.md);
+  + fix-path notes in [`docs/lob-behavior.md`](docs/lob-behavior.md);
   none affects the BLOB / CLOB CCSID 273 / single-row paths the
   conformance suite exercises live.
 - TLS sign-on / database (ports 9476 / 9471) (M7).

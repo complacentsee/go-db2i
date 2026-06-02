@@ -25,9 +25,12 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `date-separator`             | (job)        | v0.7.11. One of `job`, `/`, `-`, `.`, `,`, `space` (or named aliases `slash`/`dash`/`period`/`comma`/`space`). Maps to CP `0x3808` (DateSeparatorParserOption); overrides the date-format-inferred default. |
 | `time-separator`             | (job)        | v0.7.11. One of `job`, `:`, `.`, `,`, `space` (or `colon`/`period`/`comma`/`space`). Maps to CP `0x380A`. |
 | `decimal-separator`          | (job)        | v0.7.11. One of `job`, `.`, `,` (or `period`/`comma`). Maps to CP `0x380B`. |
-| `isolation`                  | `none`       | One of `none`, `cs`, `all`, `rs`, `rr`. `db.Begin()` flips to `cs`.   |
+| `isolation`                  | `none`       | One of `none`, `cs` (read committed), `chg` (read uncommitted), `all` (repeatable read), `rr` (serializable). `db.Begin()` flips to `cs`. |
 | `lob`                        | `materialise`| Or `stream` to get `*db2i.LOBReader`.                             |
+| `lob-threshold`              | `0` (=32768) | Byte cutoff for inline-vs-locator LOB delivery; sent via `SET_SQL_ATTRIBUTES` CP `0x3822`. `0` uses the server default (32768); the server caps at 15,728,640. See [`lob-behavior.md`](./lob-behavior.md). |
 | `ccsid`                      | `0` (auto)   | Override the connection-level application-data CCSID. See [`ccsid-support.md`](./ccsid-support.md) for the supported list and workarounds for unsupported CCSIDs. |
+| `charset-strict`             | `false`      | When `true`, an unsupported column/job CCSID is a hard error instead of the default (decode as CCSID 37 after a one-time `slog.Warn`). See [`ccsid-support.md`](./ccsid-support.md). |
+| `extended-metadata`          | `false`      | When `true`, requests extended column metadata (CP `0x3811` + `0x3829=0xF1`) so `Rows.ColumnTypeSchemaName` / `…TableName` / `…BaseColumnName` / `…Label` populate. |
 | `tls`                        | `false`      | Wraps both sockets in `crypto/tls`. Flips default ports to 9471/9476. |
 | `tls-insecure-skip-verify`   | `false`      | Disable cert verification (self-signed certs without SANs).           |
 | `tls-server-name`            | `host`       | Override the SNI / cert-verify hostname.                              |
@@ -39,7 +42,7 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 | `package-criteria`           | `default`    | One of `default`, `select`, `extended`. `select` adds unparameterised SELECT statements; `extended` (v0.7.7) adds `CALL` / `VALUES` / `WITH` instead. See [`package-caching.md`](./package-caching.md#eligibility--package-criteria) for the full matrix. |
 | `package-ccsid`              | `13488`      | CCSID for package-stored SQL text. Accepts `13488` (UCS-2 BE), `1200` (UTF-16 LE), or `0` (job default). |
 | `package-add`                | (ignored)    | Accepted but no-op (driver always adds). Present for JT400 DSN compatibility so a migrated URL can be re-used verbatim. |
-| `package-clear`              | (warn)       | Accepted but emits a slog `WARN` line and does nothing; programmatic clear is not implemented. Present for JT400 DSN compatibility. |
+| `package-clear`              | (ignored)    | Accepted and shape-validated, then ignored — currently a no-op with no warning emitted (the server manages clearing). Present for JT400 DSN compatibility; see [`../ROADMAP.md`](../ROADMAP.md). |
 | `block-size`                 | `32`         | v0.7.12 (range tightened in v0.7.13). KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 8-512 KiB; canonical values are 8/16/32/64/128/256/512. |
 | `query-optimize-goal`        | (unset)      | v0.7.17. Server-side optimizer goal on CP 0x3833 in SET_SQL_ATTRIBUTES. One of `firstio` (= `first`; EBCDIC 'F') for time-to-first-row, `allio` (= `all`; EBCDIC 'A') for total throughput. Unset omits the CP -- server uses its job default. |
 | `login-timeout`              | `30s`        | v0.7.16. Dial-plus-handshake timeout when `db.Conn(ctx)` is called without a deadline in `ctx`. Accepts integer seconds (`?login-timeout=5`) or Go duration form (`?login-timeout=2m500ms`). Negatives reject. An explicit `ctx` deadline still wins. |

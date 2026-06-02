@@ -3,7 +3,7 @@
 This guide maps every [JTOpen JDBC URL property](https://www.ibm.com/docs/en/i/7.5?topic=jdbc-properties)
 to its go-db2i DSN equivalent (or to "not supported, here's why"). It
 is honest about coverage gaps: JT400 ships ~109 connection properties;
-go-db2i exposes roughly a dozen. The rest are either out of scope
+go-db2i exposes 31 (one per recognised DSN key). The rest are either out of scope
 (client-side reroute, BiDi text reordering, JDBC SQL escape extensions)
 or simply haven't been wired through yet.
 
@@ -26,7 +26,7 @@ db2i://USER:PASSWORD@HOST[:PORT]/?key=value&key=value
 - Default schema goes in `?library=`, **not** the URL path component.
 - Default ports: `8471` (as-database) / `8476` (as-signon); when `?tls=true` they flip to `9471` / `9476`.
 
-See [`docs/configuration.md`](./configuration.md) for the complete DSN reference.
+See [`docs/configuration.md`](./docs/configuration.md) for the complete DSN reference.
 
 ## Property mapping
 
@@ -66,7 +66,7 @@ the *Notes* column says why.
 | `time format` | `time-format` | M11. Values: `job` (default) / `hms` / `usa` / `iso` / `eur` / `jis`. Maps to CP `0x3809` (TimeFormatParserOption). *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string` or cast the column to `VARCHAR` in the SQL. |
 | `date separator` / `time separator` / `decimal separator` | `date-separator` / `time-separator` / `decimal-separator` | M11. Each accepts the literal separator character (`/`, `-`, `.`, `,`, `:`, ` `) or a named alias (`slash`, `dash`, `period`, `comma`, `colon`, `space`). `job` (default) leaves the CP off so the server picks. Maps to CP `0x3808` / `0x380A` / `0x380B` respectively. |
 | `naming` | `naming` | M11. `sql` (default; period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`). go-db2i and JT400 share the same `sql` default (JT400 `JDProperties` `defaults_[NAMING] = NAMING_SQL`). Set to `system` when migrating RPG/CL apps whose embedded SQL uses slash qualifiers. Maps to CP `0x380C` (NamingConventionParserOption). |
-| `transaction isolation` / `commitment control` | `isolation` | Values: `none` (default, matches IBM i Db2 autocommit-permissive baseline) / `cs` / `all` / `rr` / `rs`. `db.Begin()` flips to `cs` transparently. |
+| `transaction isolation` / `commitment control` | `isolation` | Values: `none` (default, matches IBM i Db2 autocommit-permissive baseline) / `cs` (read committed) / `chg` (read uncommitted) / `all` (repeatable read) / `rr` (serializable). `db.Begin()` flips to `cs` transparently. |
 | `libraries` | `libraries` | M11. Comma- or space-separated list (e.g. `?libraries=APPLIB,DATALIB,QGPL`). The first entry is tagged with EBCDIC indicator `'C'` (current SQL schema); the rest with `'L'` (back of `*LIBL`). When both `library=X` and `libraries=A,B,C` are set and X is not in the list, X is prepended (JT400 prepend-default-schema rule). |
 | `qaqqinilib` | — | Custom optimizer attribute library not plumbed. |
 | `prompt` | — (always off) | We never prompt; missing credentials surface as `parseDSN` errors. |
@@ -75,14 +75,15 @@ the *Notes* column says why.
 
 JT400 ships ~50 SBCS EBCDIC CCSIDs plus DBCS coverage for
 Japanese, Korean, and Chinese. go-db2i covers a smaller subset
-today (6 CCSIDs in v0.7.21, expanding to ~24 in v0.7.22). See
-[`ccsid-support.md`](./ccsid-support.md) for the full supported /
+today (6 CCSIDs in v0.7.21); broader SBCS coverage is on the
+[roadmap](./ROADMAP.md). See
+[`ccsid-support.md`](./docs/ccsid-support.md) for the full supported /
 unsupported matrix and migration workarounds; the table below is
 only the DSN-knob parity view.
 
 | JT400 | go-db2i | Notes |
 |---|---|---|
-| `ccsid` | `ccsid` | Same semantics: overrides the application-data CCSID (`SET_SQL_ATTRIBUTES` ClientCCSID). 0 = auto (1208 / UTF-8 on V7R3+, falls back to 37 / US English EBCDIC on older). Driver-side decode coverage is narrower than JT400's -- see [`ccsid-support.md`](./ccsid-support.md). |
+| `ccsid` | `ccsid` | Same semantics: overrides the application-data CCSID (`SET_SQL_ATTRIBUTES` ClientCCSID). 0 = auto (1208 / UTF-8 on V7R3+, falls back to 37 / US English EBCDIC on older). Driver-side decode coverage is narrower than JT400's -- see [`ccsid-support.md`](./docs/ccsid-support.md). |
 | `translate binary` | — | We always treat CCSID 65535 columns as raw `[]byte`; JT400's "interpret as character data" path is intentionally not mirrored. |
 | `translate boolean` | — | Native BOOLEAN columns decode to Go `bool`; "Y"/"N" CHAR(1) columns stay strings. |
 | `translate hex` | — | Binary columns decode as `[]byte`; callers can `hex.EncodeToString` them if they want the JT400 "interpret as hex" rendering. |
@@ -102,17 +103,17 @@ only the DSN-knob parity view.
 | `extended dynamic` | `extended-dynamic` | M10. When `true` together with `package=<NAME>`, the driver tells the server to keep PREPAREd statements in a persistent `*PGM` so co-tenant reconnects skip the PREPARE round-trip. |
 | `package` | `package` | M10. 1-6 chars from the IBM-i object-name set (`A-Z 0-9 _ # @ $`). The 10-char wire name is the base + a 4-char options-derived suffix, byte-equal to JT400 (`hostserver.BuildPackageName`). |
 | `package library` | `package-library` | M10. Library the `*PGM` lives in; default `QGPL`. Up to 10 chars from the same charset. |
-| `package cache` | `package-cache` | M10 + v0.7.1. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses `PREPARE_DESCRIBE` on a client-side cache hit (`ExecutePreparedCached` / `OpenSelectPreparedCached`). See [`package-caching.md`](./package-caching.md) for the wire flow and observability. |
+| `package cache` | `package-cache` | M10 + v0.7.1. When `true` (requires `extended-dynamic=true`), the driver issues `RETURN_PACKAGE` on connect to download the server's cached statement entries and then bypasses `PREPARE_DESCRIBE` on a client-side cache hit (`ExecutePreparedCached` / `OpenSelectPreparedCached`). See [`package-caching.md`](./docs/package-caching.md) for the wire flow and observability. |
 | `package error` | `package-error` | M10. `warning` (default) / `exception` / `none` — controls how the driver reacts to package-related server errors. |
 | `package criteria` | `package-criteria` | M10 + v0.7.7. `default` and `select` mirror JT400's two criteria from [`JDSQLStatement.java`](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDSQLStatement.java) byte-for-byte. `extended` (v0.7.7) is a **go-db2i-original** opt-in that additionally files `CALL` / `VALUES` / `WITH`; JT400 has no equivalent value. |
 | `package add` | `package-add` (accept-ignore) | M10. JT400's only documented value is `true`; go-db2i always adds when `extended-dynamic=true`, so `package-add=true` is accepted as a no-op for DSN-migration friendliness and `package-add=false` is rejected with a clear message. |
-| `package clear` | `package-clear` (accept-warn-log) | M10. Server-managed in go-db2i. Accepted for DSN-migration friendliness; the driver slog.Warns on connect when the key is set. |
+| `package clear` | `package-clear` (accept-ignore) | M10. Server-managed in go-db2i. Accepted and shape-validated for DSN-migration friendliness; currently a no-op — the value is ignored and no warning is emitted (programmatic clear is deferred; see [`ROADMAP.md`](./ROADMAP.md)). |
 
 ### Performance / blocking
 
 | JT400 | go-db2i | Notes |
 |---|---|---|
-| `block size` | `block-size` | v0.7.12. KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 1-512. Default 32, byte-identical to pre-v0.7.12. |
+| `block size` | `block-size` | v0.7.12 (range tightened in v0.7.13). KiB for the continuation-FETCH BufferSize (CP `0x3834`). Range 8-512. Default 32, byte-identical to pre-v0.7.12. |
 | `block criteria` | — | The cursor uses JT400's "fetch/close" path (M5+); no per-query tuning. |
 | `prefetch` | — (always on) | We always pre-fetch the first batch from `OPEN_DESCRIBE_FETCH`. |
 | `lazy close` | — (always lazy) | `Rows.Close()` skips an explicit CLOSE when the server signalled cursor auto-close. |
@@ -182,7 +183,7 @@ only the DSN-knob parity view.
 `tls`, `tls-insecure-skip-verify`, `tls-server-name`,
 `extended-dynamic`, `package`, `package-library`, `package-cache`,
 `package-error`, `package-criteria`, `package-ccsid`,
-`package-add` (accept-ignore), `package-clear` (accept-warn-log),
+`package-add` (accept-ignore), `package-clear` (accept-ignore),
 plus programmatic `Config.Logger` / `Config.LogSQL` /
 `Config.Tracer`.
 
@@ -200,8 +201,8 @@ db2iiter.ScanAll(rows, scanFn)` loops.
 ⏭️ **Deferred** (would benefit a future release): multi-factor
 auth and password levels 0/1 (DES) are documented gaps in the auth
 chapter, and CCSID coverage is narrower than JT400's (see
-[`ccsid-support.md`](./ccsid-support.md) and the Phase 1 SBCS
-roadmap in `internal/PLAN.md`). Everything else that callers
+[`ccsid-support.md`](./docs/ccsid-support.md) and the SBCS
+roadmap in [`ROADMAP.md`](./ROADMAP.md)). Everything else that callers
 exercise through `database/sql` is covered.
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
@@ -275,7 +276,7 @@ cache after first-time filing on the same connection, so the
 `RETURN_PACKAGE` refresh and subsequent calls hit the fast path
 without waiting for a fresh connect.
 
-See [`package-caching.md`](./package-caching.md) for setup,
+See [`package-caching.md`](./docs/package-caching.md) for setup,
 observability (slog DEBUG `"db2i: query cache-hit"` lines, OTel
 `db.operation.name=OPEN_SELECT_PREPARED_CACHED`), and
 `QSYS2.SYSPACKAGE` / `QSYS2.SYSPACKAGESTMT` verification.
@@ -283,7 +284,7 @@ observability (slog DEBUG `"db2i: query cache-hit"` lines, OTel
 ## Cross-references
 
 - [JT400 JDProperties.java](https://github.com/IBM/JTOpen/blob/main/src/main/java/com/ibm/as400/access/JDProperties.java) — the authoritative list of all 109 JT400 properties.
-- [`docs/configuration.md`](./configuration.md) — the full go-db2i DSN reference.
-- [`docs/package-caching.md`](./package-caching.md) — operator's guide for extended-dynamic + cache-hit dispatch.
-- [`docs/performance.md`](./performance.md) — tuning notes for connection-pool sizing, LOB streaming, CCSID choice.
-- [`driver/driver.go`](../driver/driver.go) — `Config` struct + `parseDSN` are the source of truth for what the driver accepts.
+- [`docs/configuration.md`](./docs/configuration.md) — the full go-db2i DSN reference.
+- [`docs/package-caching.md`](./docs/package-caching.md) — operator's guide for extended-dynamic + cache-hit dispatch.
+- [`docs/performance.md`](./docs/performance.md) — tuning notes for connection-pool sizing, LOB streaming, CCSID choice.
+- [`driver/driver.go`](./driver/driver.go) — `Config` struct + `parseDSN` are the source of truth for what the driver accepts.

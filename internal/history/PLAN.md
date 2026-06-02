@@ -1,12 +1,21 @@
-# go-db2i — implementation roadmap
+# go-db2i — milestone history (archived)
 
-This document is the post-M1 working plan for the pure-Go IBM i driver.
-It supersedes the original feasibility plan (which considered a
+> **Archived development record.** This file captures the M0–M12
+> milestone narrative from the driver's build-out. It is **history, not
+> a plan** — every milestone below has shipped (the driver is past
+> v0.7.21). For forward-looking work see
+> [`ROADMAP.md`](../../ROADMAP.md); for the release-by-release record
+> see [`CHANGELOG.md`](../../CHANGELOG.md). The "Where we are" / "up
+> next" notes and some relative paths below are preserved as originally
+> written and may be stale or unresolvable from this archived location.
+
+This document was the post-M1 working plan for the pure-Go IBM i driver.
+It superseded the original feasibility plan (which considered a
 DRDA-first path). Reality picked **host-server datastream over port
 8471/8476** because that's the protocol the captured fixtures speak,
 and the M1 sign-on smoke-tested clean against PUB400.
 
-## Where we are
+## Where we are (as of the M-series build-out)
 
 - ✅ **M0** — Fixture-capture harness (Java/Maven). 30 cases committed
   under `testdata/jtopen-fixtures/fixtures/`. Re-runnable against
@@ -958,7 +967,7 @@ sub-package) are purely additive; no breaking changes vs v0.7.11.
 Driver-side CCSID coverage is narrower than JT400's (6 in v0.7.21
 vs ~50 SBCS + DBCS in JT400). Expansion is split into phases by
 both effort cost and source-authority quality. User-facing
-reference: [`docs/ccsid-support.md`](./ccsid-support.md) (shipped
+reference: [`docs/ccsid-support.md`](../../docs/ccsid-support.md) (shipped
 2026-05-13).
 
 ### Phase A — Documentation (complete 2026-05-13)

@@ -1,8 +1,8 @@
 // Package driver registers go-db2i as a database/sql driver under
 // the name "db2i", letting Go applications talk to IBM i (Db2
 // for i) over the host-server datastream protocol on ports 8471
-// (as-database) and 8476 (as-signon) -- no CGo, no Java sidecar,
-// no IBM client libraries.
+// (as-database) and 8476 (as-signon) -- no CGo, no IBM client
+// libraries.
 //
 // # Quick start
 //

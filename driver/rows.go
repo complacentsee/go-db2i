@@ -268,7 +268,7 @@ func (r *Rows) materialiseLOB(loc hostserver.LOBLocator, colIdx int) (any, error
 // the column's CCSID. Mirrors the VARCHAR result-decode convention
 // (CCSID 65535 = raw passthrough, 1208 = UTF-8 passthrough, else
 // EBCDIC SBCS via the per-CCSID codec). Picks the right codec for
-// 273 (German) vs 37 (US) so the 17 divergent code points (e.g.
+// 273 (German) vs 37 (US) so the 22 divergent code points (e.g.
 // "!" = 0x5A in CCSID 37 but 0x4F in CCSID 273) round-trip.
 func decodeLOBChars(b []byte, ccsid uint16) (string, error) {
 	switch ccsid {

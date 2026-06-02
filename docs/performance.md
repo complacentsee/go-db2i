@@ -2,8 +2,8 @@
 
 Practical guidance for getting the most out of go-db2i against a real
 IBM i target. Every number below comes from a reproducible test in
-this repository or from a measured run against the IBM Cloud V7R6M0
-LPAR captured in `AUTH.md`; pointers are inline.
+this repository or from a measured run against our internal IBM Cloud
+V7R6M0 LPAR; pointers are inline.
 
 ## Sizing the `sql.DB` pool
 
@@ -24,7 +24,7 @@ shared-processor), read-only workload mix:
 | 50  | **~8,800 ops/sec (peak)** |
 | 100 | collapses (textbook saturation) |
 
-(See `AUTH.md` "Operational notes" for the measurement context.)
+(Read-only workload mix, measured on our internal V7R6M0 LPAR.)
 
 **Recommendation.** On a 1-CPU LPAR, cap `SetMaxOpenConns` at 50 and
 warm the pool serially before the workload starts:
@@ -44,9 +44,9 @@ for i := 0; i < 50; i++ {
 ```
 
 On a multi-CPU LPAR or one with `QZDASOINIT` prestart-jobs already
-warmed (see `AUTH.md` "Prestart-job pool tuning" for the recommended
-`STRPJ` settings), the collapse point shifts higher; benchmark before
-going past 50.
+warmed (tune the prestart-job pool with `CHGPJE` / `STRPJ` on the
+LPAR), the collapse point shifts higher; benchmark before going
+past 50.
 
 ## `?lob=stream` vs the materialise default
 
@@ -64,8 +64,8 @@ size regardless of LOB byte count.
 budget (e.g. multi-GB archives) or if you stream the bytes through
 straight to disk / an HTTP response without needing them resident.
 
-**Reference numbers** (from `TestRowsLazyMemoryBounded`,
-`test/conformance/conformance_test.go:1139`):
+**Reference numbers** (from `TestRowsLazyMemoryBounded` in
+`test/conformance/conformance_test.go`):
 
 | Path | Peak Go HeapAlloc | Notes |
 |---|---:|---|
@@ -109,24 +109,28 @@ ambiguity. Common choices:
 | 37 | US-English EBCDIC | Locked to a US-English job and you'd rather skip the V7R3 check. |
 | 273 | German EBCDIC | The job is a German locale (PUB400 default); pins binds to match the job's CCSID even if your client's auto-pick would have negotiated 1208. |
 
-**Transcoding cost.** The `ebcdic` package caches each codec at first
-use; per-call decode is a memcopy + table-lookup, no per-call decoder
-construction. CCSID 1208 paths are passthrough (no transcoding). For
-CCSID-bound workloads the cost is essentially the wire bytes; the
-codec layer disappears in the noise.
+**Transcoding cost.** The supported EBCDIC codecs (`ebcdic.CCSID37`,
+`ebcdic.CCSID273`) are compile-time `[256]rune` tables; per-call
+decode is a memcopy + table lookup, with no per-call decoder
+construction. CCSID 1208 (UTF-8) and 65535 (FOR BIT DATA) paths are
+passthrough (no transcoding). For CCSID-bound workloads the cost is
+essentially the wire bytes; the codec layer disappears in the noise.
 
 ## CCSID-aware decode hot path
 
-Per-column CCSID always wins on the read side. The cached codec map
-(`ebcdic.Codecs`) gets initialised lazily on first sighting of each
-CCSID; subsequent decodes go straight to the cached struct. This
-matters because IBM i jobs often mix CCSIDs across columns (a
-CHAR(10) tagged 37 + a CHAR(100) tagged 1208 + a DBCLOB tagged 13488
-in the same row).
+Per-column CCSID always wins on the read side. `ebcdicForCCSID` picks
+the codec for a column's CCSID with a small switch: 37 and 273 resolve
+to their compile-time `[256]rune` tables, 1208 / 65535 are passthrough,
+and any other CCSID falls back to CCSID 37 after a one-time
+`slog.Warn`. There is no per-call allocation or lazy map build, so a
+mixed-CCSID row (a CHAR(10) tagged 37 + a CHAR(100) tagged 1208 + a
+DBCLOB tagged 13488 in the same row) decodes without per-column
+overhead.
 
-No tuning knob exposed — the caching is automatic. If you see
-allocations show up in a `-trace` profile pointing at `ebcdicForCCSID`,
-file an issue (it indicates a CCSID that's not in the static map).
+No tuning knob is exposed. If a column carries a CCSID the driver has
+no codec for, it decodes as CCSID 37 (and logs the one-time warning);
+set `?charset-strict=true` to make that a hard error instead. See
+[`ccsid-support.md`](./ccsid-support.md).
 
 ## RLE compression on `RETRIEVE_LOB_DATA`
 
@@ -142,8 +146,9 @@ For high-repetition LOB content the wire savings are dramatic:
 | 1 MiB random bytes | 1,048,576 bytes | ~1,049,000 bytes | ~1× (server skips compression on incompressible data) |
 | 8 KiB English text CLOB | 8,192 bytes | ~6,300 bytes | ~1.3× |
 
-(Numbers from `stress-test/rlemeasure` against IBM Cloud V7R6M0
-and from the `TestDecompressDataStreamRLE` synthetic cases.)
+(Numbers from the RLE decompressor tests in
+`hostserver/db_lob_rle_test.go` and a measured run against our
+internal V7R6M0 LPAR.)
 
 The server-side compression decision is automatic — there's no
 "force compression" or "force no-compression" knob. The driver just
@@ -264,9 +269,9 @@ OTel users see the same signal via the span's
 `OPEN_SELECT_PREPARED_CACHED` on hit, `EXECUTE_PREPARED` /
 `OPEN_SELECT_PREPARED` on miss.
 
-Reference: `test/conformance/cache_hit_test.go` exercises 12
-scenarios across the JDBC type matrix and asserts the slog probe
-on each cache-hit dispatch.
+Reference: `test/conformance/cache_hit_test.go` exercises the
+cache-hit dispatch across the SQL type matrix and asserts the slog
+probe on each dispatch.
 
 ## Bulk IUD + MERGE via `Conn.BatchExec` (v0.7.9, v0.7.10)
 
@@ -324,11 +329,11 @@ regardless of result-set size.
 
 Reference: `TestRowsLazyMemoryBounded`. Walks ~50K rows of
 `QSYS2.SYSCOLUMNS` with peak `runtime.MemStats.HeapAlloc` ≤ 3.8 MiB
-(budget: 16 MiB). Pre-M5 the same query would have buffered ~50K
-`SelectRow` tuples (~40 MiB at our row width) before yielding the
+(budget: 16 MiB). An eager implementation would have buffered all
+~50K `SelectRow` tuples (~40 MiB at our row width) before yielding the
 first row.
 
-**No tuning required** — the lazy path is the only path in M7+. If
+**No tuning required** — the lazy path is the only path. If
 you need batch semantics (process N rows together before the next
 fetch), buffer in your loop, not in the driver.
 
@@ -363,11 +368,9 @@ the picture.
 
 ## Cross-references
 
-- `AUTH.md` — environment + LPAR-specific stress-test numbers + the
-  jump-host binaries used to generate them.
-- `test/conformance/conformance_test.go:1125` — `TestRowsLazyMemoryBounded`
+- `test/conformance/conformance_test.go` — `TestRowsLazyMemoryBounded`
   (lazy-iteration memory cap).
 - `hostserver/db_lob_rle_test.go` — RLE compression decompressor coverage.
-- `docs/lob-known-gaps.md` — the LOB-side history for the compression / threshold knobs.
+- `docs/lob-behavior.md` — the LOB-side history for the compression / threshold knobs.
 - `docs/configuration.md` — the full DSN reference.
 - `docs/package-caching.md` — operator's guide for extended-dynamic + cache-hit dispatch.

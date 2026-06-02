@@ -79,13 +79,13 @@ go-db2i fixture capture
   user:     YOURUSER
   schema:   YOURUSER
   fixtures: /path/to/go-db2i/testdata/jtopen-fixtures/fixtures
-  cases:    27
+  cases:    48
 
 [ connect_only ] ok
 [ select_dummy ] ok
 [ types_smallint ] ok
 ...
-Done. 27 ok, 0 failed.
+Done. 48 ok, 0 failed.
 ```
 
 ## Run a subset
@@ -122,7 +122,14 @@ ONLY=connect_only,select_dummy mvn -q exec:java
 | `prepared_call_multi_set`       | Same proc, both dynamic result sets via `getMoreResults` |
 | `prepared_call_inout`           | `CALL P_ROUNDTRIP(?)` with INOUT INTEGER       |
 | `error_syntax`, `error_table_not_found` | SQLException → SQLCARD mapping         |
+| `select_dummy_qog_firstio`, `_qog_allio` | `?query-optimize-goal` wire shape (CP 0x3833) |
+| `select_large_user_table_10k`   | Large continuation-FETCH over a fresh user table |
+| `prepared_package_first_use`, `_cache_download`, `_cache_hit` | Extended-dynamic package filing + cache-hit dispatch |
+| `prepared_package_filing_iud`, `_filing_lob_cache_hit` | Package filing for IUD + LOB-bind cache-miss-by-design |
+| `prepared_blob_threshold`, `_insert_large` | LOB inline-vs-locator threshold + large-BLOB path |
 
+The table is representative, not exhaustive — see
+`Cases.java` for the full registered set (48 fixtures committed).
 Add new cases by editing `src/main/java/.../Cases.java` and re-running.
 
 ## Adding a case

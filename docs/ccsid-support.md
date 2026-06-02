@@ -32,14 +32,20 @@ shops can use CCSID 273 directly; `?ccsid=1208` (UTF-8) remains an
 option for mixed-encoding data if the server supports it (V7R3+ in
 most configurations).
 
-## Unsupported (silent fallback to CCSID 37)
+## Unsupported (fallback to CCSID 37)
 
-Any CCSID not in the table above is silently decoded as CCSID 37.
-This means **wrong bytes without an error** when:
+Any CCSID not in the table above is decoded as CCSID 37 after a
+one-time `slog.Warn` per unknown CCSID. By default this is a
+best-effort fallback rather than a hard error, so you can still get
+**wrong bytes** (logged, but the call succeeds) when:
 
 - An IBM i job advertises an unsupported job CCSID and the driver
   inherits it.
 - A column carries an unsupported CCSID tag in its metadata.
+
+Set `?charset-strict=true` to turn this fallback into a hard, typed
+error instead of decoding as CCSID 37 — use it when silent corruption
+would be worse than a failed query.
 
 Common unsupported CCSIDs:
 
@@ -85,17 +91,16 @@ Common unsupported CCSIDs:
 
 ## Planned
 
-Additional CCSID coverage is rolled out in three phases. The
-roadmap and per-CCSID priority lives in
-[`../internal/PLAN.md`](../internal/PLAN.md). CCSID 273 already
-ships its real CDRA-sourced table (see above); Phase 1 adds the
-remaining common European SBCS pages (277, 278, 280, 284, 285,
-297, 500, 871, 1047, 1140-1149) and introduces an opt-in
-`?charset-strict=true` DSN knob that promotes
-unknown-CCSID fallback from silent to a hard error. Phase 2
-extends to Cyrillic / Greek / Turkish / Hebrew / Arabic plus
-legacy EBCDIC pages on a demand-driven basis; Phase 3 covers
-DBCS / mixed Japanese / Korean / Chinese encodings.
+Additional CCSID coverage is rolled out in phases; the per-CCSID
+priority lives in [`../ROADMAP.md`](../ROADMAP.md). CCSID 273 already
+ships its real CDRA-sourced table (see above), and the
+`?charset-strict=true` knob is already available (it promotes the
+unknown-CCSID fallback from a one-time warning to a hard error).
+Phase 1 adds the remaining common European SBCS pages (277, 278,
+280, 284, 285, 297, 500, 871, 1047, 1140-1149); later phases extend
+to Cyrillic / Greek / Turkish / Hebrew / Arabic plus legacy EBCDIC
+pages, and then DBCS / mixed Japanese / Korean / Chinese encodings,
+on a demand-driven basis.
 
 If you need a specific CCSID that's not yet supported, please
 open an issue with the CCSID number, sample column shape, and
@@ -131,18 +136,18 @@ the deployment context — that's what drives prioritization.
    err := db.QueryRow("SELECT col FROM YOURLIB.YOURTAB FETCH FIRST 1 ROW ONLY").Scan(&s)
    ```
 
-   Unsupported CCSIDs surface as visibly garbled text rather than
-   an error today — a hex-dump of the returned bytes against the
-   IBM CDRA table for your actual CCSID is the most reliable
-   diagnostic. The `?charset-strict=true` DSN knob (planned) will
-   convert these silent fallbacks into typed errors.
+   Unsupported CCSIDs decode as CCSID 37 (logged once per CCSID via
+   `slog.Warn`) rather than raising by default — a hex-dump of the
+   returned bytes against the IBM CDRA table for your actual CCSID is
+   the most reliable diagnostic. Set `?charset-strict=true` to convert
+   these fallbacks into typed errors instead.
 
 ## Related
 
 - [`docs/configuration.md`](./configuration.md) — `?ccsid=` DSN knob.
 - [`MIGRATING.md`](../MIGRATING.md) —
   JT400 ↔ go-db2i CCSID feature parity table.
-- [`docs/lob-known-gaps.md`](./lob-known-gaps.md) — DBCLOB
+- [`docs/lob-behavior.md`](./lob-behavior.md) — DBCLOB
   encoding (CCSID 13488 vs 1200) details.
 - `ebcdic` subpackage godoc — the public `Codec` interface and
   per-CCSID codecs that back the driver's encode / decode paths.

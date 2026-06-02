@@ -1354,7 +1354,7 @@ func TestCCSID1208RoundTrip(t *testing.T) {
 		// the column inline as SQL type 408/409 rather than as a
 		// locator. Pre-fix this hit "unsupported SQL type 409 (col
 		// len=4100, ccsid=1208)" and dropped the row. Closes bug
-		// #14 in docs/lob-known-gaps.md §5.
+		// #14 in docs/lob-behavior.md ("Pitfalls").
 		clobTbl := schema() + "." + tablePrefix + "utf8clob_small"
 		db.Exec("DROP TABLE " + clobTbl)
 		if _, err := db.Exec(fmt.Sprintf(

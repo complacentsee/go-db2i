@@ -286,7 +286,7 @@ RPB; there is no explicit FREE_LOB on the bind side.
   descriptor (CP `0x3813`, FieldCCSID = `0x0111`). JT400 pre-encodes
   the Java `String` to that CCSID before placing it in CP `0x381D`,
   and tags the data CCSID as 0xFFFF (binary). For the Go driver,
-  we transcode using the existing `internal/ebcdic` table for the
+  we transcode using the existing `ebcdic` table for the
   declared FieldCCSID, then send with CCSID 0xFFFF — no negotiation
   needed beyond reading FieldCCSID.
 
@@ -321,8 +321,9 @@ RPB; there is no explicit FREE_LOB on the bind side.
 
   go-db2i's existing per-`Exec` round trip is therefore wire-
   equivalent to JT400's `executeBatch` for LOB-column INSERTs —
-  there is no special multi-row CP `0x381F` path to mirror.
-  `docs/lob-known-gaps.md` §2 closes with this finding.
+  there is no special multi-row CP `0x381F` path to mirror. The
+  "Multi-row batched LOB INSERT" section of `docs/lob-behavior.md`
+  closes with this finding.
 
 ## Plan deltas
 

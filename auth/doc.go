@@ -6,9 +6,9 @@
 // [github.com/complacentsee/go-db2i/hostserver]); each level selects a
 // different algorithm:
 //
-//	Level 0, 1: DES-CBC  (legacy; not implemented yet)
-//	Level 2, 3: SHA-1    -> [EncryptPasswordSHA1]
-//	Level 4:    PBKDF2-HMAC-SHA-512 + SHA-256 salt (not implemented yet)
+//	Level 0, 1: DES-CBC                            -> [EncryptPasswordDES] (spec-validated only)
+//	Level 2, 3: SHA-1                              -> [EncryptPasswordSHA1]
+//	Level 4:    PBKDF2-HMAC-SHA-512 + SHA-256 salt -> [EncryptPasswordPBKDF2]
 //
 // All variants take the userID, password, client seed (random 8 bytes
 // the client picked for this connection), and server seed (random 8

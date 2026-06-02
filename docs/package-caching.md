@@ -159,7 +159,7 @@ On a reconnect with the same `package` name and `package-cache=true`:
 ## Eligibility — `package-criteria`
 
 Not every SQL string can be cached. The driver's gate matches
-IBM's ODBC / JDBC filing rule documented in the
+IBM's SQL package filing rule documented in the
 [SQL Package Questions and Answers](https://www.ibm.com/support/pages/sql-package-questions-and-answers)
 support page:
 
@@ -218,7 +218,7 @@ the same package on the same QZDASOINIT job. See the
 "NUMBER_STATEMENTS stays at 0" entry below for the gory details.
 
 End-to-end verified against IBM Cloud V7R6M0 and PUB400 V7R5M0
-(2026-05-11): all 17 JDBC types — INTEGER, BIGINT, SMALLINT,
+(2026-05-11): all 17 SQL column types — INTEGER, BIGINT, SMALLINT,
 DECIMAL, NUMERIC, REAL, DOUBLE, DECFLOAT, VARCHAR, CHAR, VARCHAR
 FOR BIT DATA, DATE, TIME, TIMESTAMP, BOOLEAN, BINARY, VARBINARY —
 round-trip through filing + cache-hit dispatch for SELECT and
@@ -365,8 +365,9 @@ DLTPGM PGM(MYLIB/APP9899)
 
 The driver re-creates the package on the next connect. There is
 **no** way to programmatically delete from the driver right now
-(`package-clear=true` accepts the key but logs a warning and
-does nothing; deferred to a future release).
+(`package-clear=true` accepts the key and shape-validates it but is a
+no-op — it emits no warning; programmatic clear is deferred, see
+[`../ROADMAP.md`](../ROADMAP.md)).
 
 **Connect returns an error mentioning the package.**
 

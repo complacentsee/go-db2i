@@ -29,7 +29,6 @@ Thumbs.db
 
 # Live credentials / private keys -- never commit
 AUTH.md
-LOB-ISSUE.md
 initial_rsa.prv
 *.pem
 *.key

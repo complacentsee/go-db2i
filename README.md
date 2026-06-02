@@ -2,9 +2,8 @@
 
 A pure-Go `database/sql` driver for **IBM i (DB2 for i)**. Speaks the
 IBM host-server datastream protocol directly over TCP. No CGo, no
-Java sidecar, no IBM client packages — just a Go binary that talks
-to the as-database (8471) and as-signon (8476) services on any
-IBM i.
+IBM client packages — just a Go binary that talks to the
+as-database (8471) and as-signon (8476) services on any IBM i.
 
 ```go
 import (
@@ -14,6 +13,32 @@ import (
 
 db, err := sql.Open("db2i", "db2i://USER:PWD@host.example.com:8471/?library=MYLIB")
 ```
+
+Full API reference:
+[pkg.go.dev/github.com/complacentsee/go-db2i](https://pkg.go.dev/github.com/complacentsee/go-db2i).
+
+## Features
+
+- **Pure Go** — one statically-linked binary; no CGo, no IBM client
+  packages, nothing to install on the client side.
+- Runs anywhere Go runs, including `linux/arm64` industrial gateways
+  and Apple Silicon dev boxes.
+- Talks to the **host-server ports only** (8471 as-database / 8476
+  as-signon; 9471 / 9476 under TLS) — no DRDA (port 446).
+- Password levels 0–4, including PBKDF2-HMAC-SHA-512 (levels 2–4
+  live-validated; see [Authentication](#authentication)).
+- The full `database/sql` surface: `Query` / `Exec`, prepared
+  statements, and transactions.
+- **Stored procedures** with `sql.Out` / `sql.InOut` parameters and
+  multiple result sets.
+- **LOBs** — inline BLOB / CLOB / DBCLOB binds, plus `?lob=stream` to
+  read multi-GB values without materialising them on the heap.
+- **Extended-dynamic SQL package caching** — files prepared statements
+  into a server-side `*PGM`, byte-compatible with JT400 so Go and Java
+  clients can share one package.
+- Typed `*hostserver.Db2Error` with SQLSTATE / SQLCODE predicate
+  helpers for retry logic.
+- Optional `slog` logging and OpenTelemetry span hooks.
 
 ## Install
 
@@ -34,7 +59,7 @@ db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 | `library`                  | (none)                           | Default schema for unqualified SQL names. Required if the user's job library list doesn't already contain it. |
 | `signon-port`              | 8476 (9476 if `tls=true`)        | as-signon service port. |
 | `date`                     | `job`                            | Session date format. One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. |
-| `isolation`                | `none`                           | Session commitment level. One of `none` (`*NONE`), `cs` (`*CS`), `all` (`*ALL`), `rs` (`*RS`), `rr` (`*RR`). The default `*NONE` matches IBM i Db2's autocommit-permissive baseline. `db.Begin()` flips to `*CS` for the duration of the transaction. |
+| `isolation`                | `none`                           | Session commitment level. One of `none` (`*NONE`), `cs` (`*CS`, read committed), `chg` (`*CHG`, read uncommitted), `all` (`*ALL`, repeatable read), `rr` (`*RR`, serializable). The default `*NONE` matches IBM i Db2's autocommit-permissive baseline. `db.Begin()` flips to `*CS` for the duration of the transaction. |
 | `tls`                      | `false`                          | Wrap both sockets in TLS. When `true`, the default ports flip to 9476 / 9471 (IBM i SSL host server pair). Accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`. Requires the IBM i target to have SSL host server configured via DCM. |
 | `tls-insecure-skip-verify` | `false`                          | Skip server-cert validation. IBM i certs are commonly self-signed and lack DNS SANs, in which case `crypto/tls` rejects them by default; set this to `true` to override. Use sparingly — disables MITM protection. |
 | `tls-server-name`          | (host)                           | Override the SNI / cert-verify hostname. Defaults to the URL host. Useful when the cert was issued for a different name than what you connect to (e.g. via tunnel). |
@@ -42,7 +67,7 @@ db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 The `DB_PORT` segment defaults to 8471 (as-database). Library names
 are upper-cased on parse — IBM i schema lookups are case-insensitive
 but the wire format expects EBCDIC uppercase. The full list of DSN
-keys (~28 in total, including LOB threshold, CCSID overrides,
+keys (31 in total, including LOB threshold, CCSID overrides,
 extended-dynamic packaging, naming convention, and diagnostics
 knobs) lives in [`docs/configuration.md`](./docs/configuration.md).
 
@@ -148,30 +173,19 @@ Kerberos / GSSAPI signon and MFA are not implemented.
 The `IDENTITY_VAL_LOCAL()` LastInsertId path is session-scoped; see
 the godoc on `Result.LastInsertId` for details.
 
-## Why pure Go?
-
-Deploying Go services that need to read or write IBM i Db2 usually
-runs into one of three friction points:
-
-1. **`go_ibm_db`** speaks DRDA on port 446, which is often firewalled
-   in industrial deployments where only the host-server ports are
-   open.
-2. **CGo + IBM i Access ODBC** isn't shipped for `linux/arm64`,
-   blocking deployment to ARM64 industrial gateways and Apple
-   Silicon dev boxes.
-3. **A JVM sidecar** running JTOpen works but adds a process boundary
-   and ~100 MB of runtime to a Go service.
-
-go-db2i implements the host-server datastream protocol natively in
-Go. The result is one statically-linked binary that runs anywhere
-Go runs.
-
 ## Coming from JT400?
 
 The driver covers the `database/sql` surface of JT400's JDBC driver
 (`com.ibm.as400.access.AS400JDBCDriver`). If your application talks
 to IBM i through `db.Query` / `db.Exec` / `tx.Begin` / stored-procedure
 calls today, the migration is a DSN rewrite.
+
+Compared with the other ways to reach Db2 for i from Go, go-db2i needs
+no DRDA port (unlike `go_ibm_db`, which speaks DRDA on the
+often-firewalled port 446), no CGo or IBM i Access ODBC (which has no
+`linux/arm64` build), and no JVM / JTOpen sidecar process — it is one
+pure-Go binary speaking the host-server protocol the LPAR already
+exposes.
 
 See [`MIGRATING.md`](./MIGRATING.md) for
 the JDBC-property-to-DSN-key mapping, recipes, and a list of JT400
