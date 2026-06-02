@@ -142,7 +142,7 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	repHdr, repPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
-		return nil, fmt.Errorf("hostserver: read cached EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: read cached EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 	if repHdr.ReqRepID != RepDBReply {
 		_ = deleteRPB(conn, nextCorr())
@@ -151,7 +151,7 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	rep, err := ParseDBReply(repPayload)
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())
-		return nil, fmt.Errorf("hostserver: parse cached EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: parse cached EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 
 	rc := int32(rep.ReturnCode)

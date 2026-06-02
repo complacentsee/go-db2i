@@ -1,11 +1,33 @@
 package hostserver
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/complacentsee/go-db2i/ebcdic"
 )
+
+// ErrRequestSent marks a transport failure that occurred AFTER a
+// write verb's EXECUTE frame was flushed to the server -- i.e. the
+// reply read (or reply parse) failed even though the request
+// provably reached the wire. The statement may have committed
+// server-side, so the caller MUST NOT let database/sql replay it on
+// a fresh connection (the replay would risk a duplicate
+// non-idempotent INSERT / UPDATE / DELETE / MERGE / CALL).
+//
+// The driver's classifyConnErr keys off this sentinel: a conn-level
+// error that wraps ErrRequestSent retires the socket from the pool
+// but is NOT wrapped as driver.ErrBadConn, so the sql package
+// surfaces it to the caller instead of silently re-running the
+// write. A pre-send failure (the EXECUTE frame never fully reached
+// the server) does NOT carry this sentinel, so it stays replayable.
+//
+// Only the write-exec functions (ExecuteImmediate, ExecutePreparedSQL,
+// ExecuteBatch, ExecutePreparedCached) attach it, and only on their
+// post-send reply paths. Read/cursor paths never wrap with it because
+// a SELECT is idempotent and safe to replay.
+var ErrRequestSent = errors.New("hostserver: request reached server before transport failure")
 
 // EXECUTE_IMMEDIATE function ID. Per JT400's
 // DBSQLRequestDS.FUNCTIONID_EXECUTE_IMMEDIATE -- runs a single SQL
@@ -79,14 +101,14 @@ func ExecuteImmediate(conn io.ReadWriter, sql string, nextCorrelation uint32) (*
 	}
 	repHdr, repPayload, err := ReadDBReplyMatching(conn, nextCorrelation, 4)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: read EXECUTE_IMMEDIATE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: read EXECUTE_IMMEDIATE reply: %w: %w", err, ErrRequestSent)
 	}
 	if repHdr.ReqRepID != RepDBReply {
 		return nil, fmt.Errorf("hostserver: EXECUTE_IMMEDIATE reply ReqRepID 0x%04X (want 0x%04X)", repHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(repPayload)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse EXECUTE_IMMEDIATE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: parse EXECUTE_IMMEDIATE reply: %w: %w", err, ErrRequestSent)
 	}
 	rc := int32(rep.ReturnCode)
 	// SQL +100 = "no rows found" (DELETE / UPDATE with no match) is
@@ -375,14 +397,14 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	}
 	execRepHdr, execRepPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: read EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: read EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 	if execRepHdr.ReqRepID != RepDBReply {
 		return nil, fmt.Errorf("hostserver: EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", execRepHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(execRepPayload)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: parse EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 	rc := int32(rep.ReturnCode)
 	// All exit paths -- success, +100 no-match, hard error -- must
@@ -605,14 +627,14 @@ func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, r
 	}
 	execRepHdr, execRepPayload, err := ReadDBReplyMatching(conn, execCorr, 8)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: read batch EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: read batch EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 	if execRepHdr.ReqRepID != RepDBReply {
 		return nil, fmt.Errorf("hostserver: batch EXECUTE reply ReqRepID 0x%04X (want 0x%04X)", execRepHdr.ReqRepID, RepDBReply)
 	}
 	rep, err := ParseDBReply(execRepPayload)
 	if err != nil {
-		return nil, fmt.Errorf("hostserver: parse batch EXECUTE reply: %w", err)
+		return nil, fmt.Errorf("hostserver: parse batch EXECUTE reply: %w: %w", err, ErrRequestSent)
 	}
 	cleanup := func() error { return deleteRPB(conn, corr) }
 	rc := int32(rep.ReturnCode)
