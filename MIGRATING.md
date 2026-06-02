@@ -65,7 +65,7 @@ the *Notes* column says why.
 | `date format` | `date` | Values: `job` / `iso` / `usa` / `eur` / `jis` / `mdy` / `dmy` / `ymd`. Default `job`. |
 | `time format` | `time-format` | M11. Values: `job` (default) / `hms` / `usa` / `iso` / `eur` / `jis`. Maps to CP `0x3809` (TimeFormatParserOption). *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string` or cast the column to `VARCHAR` in the SQL. |
 | `date separator` / `time separator` / `decimal separator` | `date-separator` / `time-separator` / `decimal-separator` | M11. Each accepts the literal separator character (`/`, `-`, `.`, `,`, `:`, ` `) or a named alias (`slash`, `dash`, `period`, `comma`, `colon`, `space`). `job` (default) leaves the CP off so the server picks. Maps to CP `0x3808` / `0x380A` / `0x380B` respectively. |
-| `naming` | `naming` | M11. `sql` (default; period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`; the JT400 default). Set to `system` when migrating RPG/CL apps whose embedded SQL uses slash qualifiers. Maps to CP `0x380C` (NamingConventionParserOption). |
+| `naming` | `naming` | M11. `sql` (default; period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`). go-db2i and JT400 share the same `sql` default (JT400 `JDProperties` `defaults_[NAMING] = NAMING_SQL`). Set to `system` when migrating RPG/CL apps whose embedded SQL uses slash qualifiers. Maps to CP `0x380C` (NamingConventionParserOption). |
 | `transaction isolation` / `commitment control` | `isolation` | Values: `none` (default, matches IBM i Db2 autocommit-permissive baseline) / `cs` / `all` / `rr` / `rs`. `db.Begin()` flips to `cs` transparently. |
 | `libraries` | `libraries` | M11. Comma- or space-separated list (e.g. `?libraries=APPLIB,DATALIB,QGPL`). The first entry is tagged with EBCDIC indicator `'C'` (current SQL schema); the rest with `'L'` (back of `*LIBL`). When both `library=X` and `libraries=A,B,C` are set and X is not in the list, X is prepended (JT400 prepend-default-schema rule). |
 | `qaqqinilib` | — | Custom optimizer attribute library not plumbed. |
@@ -158,7 +158,7 @@ only the DSN-knob parity view.
 | `decimal data errors` | — | Surfaces as `*Db2Error` from the server. |
 | `decimal separator` | — | We send `*BLANK` (server defaults). |
 | `decfloat rounding mode` | — | Job default. |
-| `errors` | — | Always `*FULL`; no `*BASIC` mode. |
+| `errors` | — | Always `*FULL` (full second-level message text); no `*BASIC` mode. Note JT400 itself defaults to `basic`, not `full` (JT400 `JDProperties` `defaults_[ERRORS] = ERRORS_BASIC`), so go-db2i surfaces more diagnostic text by default than a stock JT400 connection. |
 | `extended metadata` | `extended-metadata` | See above. |
 | `hold statements` | — | — |
 | `ignore warnings` | — | All `*Db2Error` records ship to the caller; non-fatal SQLCODEs come through as warnings via `Rows.Err()` after the result drains. |
@@ -174,10 +174,11 @@ only the DSN-knob parity view.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (28 DSN keys): `library`, `libraries`, `naming`,
+✅ **Supported** (30 DSN keys): `library`, `libraries`, `naming`,
 `signon-port`, `date`, `time-format`, `date-separator`,
 `time-separator`, `decimal-separator`, `isolation`, `lob`,
 `lob-threshold`, `ccsid`, `extended-metadata`, `block-size`,
+`query-optimize-goal`, `login-timeout`, `socket-timeout`,
 `tls`, `tls-insecure-skip-verify`, `tls-server-name`,
 `extended-dynamic`, `package`, `package-library`, `package-cache`,
 `package-error`, `package-criteria`, `package-ccsid`,
@@ -196,10 +197,12 @@ mirror `Connection.setSavepoint` etc.); `SetSchema` /
 `iter.Seq2[T, error]` over `*sql.Rows` for `for v, err := range
 db2iiter.ScanAll(rows, scanFn)` loops.
 
-⏭️ **Deferred** (would benefit a future release): nothing currently
-on the v0.7.x roadmap. Multi-factor auth and password levels 0/1
-(DES) are documented gaps in the auth chapter; everything else
-that callers exercise through `database/sql` is covered.
+⏭️ **Deferred** (would benefit a future release): multi-factor
+auth and password levels 0/1 (DES) are documented gaps in the auth
+chapter, and CCSID coverage is narrower than JT400's (see
+[`ccsid-support.md`](./ccsid-support.md) and the Phase 1 SBCS
+roadmap in `internal/PLAN.md`). Everything else that callers
+exercise through `database/sql` is covered.
 
 🚫 **Out of scope** (won't add): JT400-specific BiDi text reordering, JTOpen
 proxy server, XA, client-reroute / seamless failover (use Go's `sql.DB`

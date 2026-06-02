@@ -63,8 +63,8 @@ func newTableCodec(name string, ccsid uint32, forward [256]rune) *tableCodec {
 }
 
 // ccsid273Forward is the canonical CCSID 273 (German EBCDIC) byte
-// to Unicode mapping. Identical to CCSID 37 in 239 of 256
-// positions; the 17 divergent positions are the German-specific
+// to Unicode mapping. Identical to CCSID 37 in 234 of 256
+// positions; the 22 divergent positions are the German-specific
 // characters: § Ä Ö Ü ä ö ü ß plus reshuffled punctuation
 // (! @ # $ ^ [ ] { } ~ ` and others).
 //

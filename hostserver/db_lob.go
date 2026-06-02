@@ -223,11 +223,12 @@ func parseLOBReply(rep *DBReply) (*LOBData, error) {
 			// uncompressed payload is twice that; JT400 mirrors
 			// this by calling DBLobData.adjustForGraphic to double
 			// actualLen after retrieve.  We sidestep the
-			// graphic/non-graphic ambiguity by using the wire byte
-			// count for the equality check (graphic payloads are
-			// even-length and len(payload) == 2*actualLen, so the
-			// "compressed" trigger is simply `len(payload) <
-			// actualLen` rather than `!= actualLen`).
+			// graphic/non-graphic ambiguity below by deriving a
+			// single `expectedRaw` byte count (actualLen for
+			// non-graphic, 2*actualLen for graphic) and comparing
+			// the wire payload length against it: equal => raw,
+			// shorter => RLE-compressed.  The "compressed" trigger
+			// is `len(payload) < expectedRaw`, never `< actualLen`.
 			if len(p.Data) < 6 {
 				return nil, fmt.Errorf("hostserver: LOB data CP too short: %d bytes", len(p.Data))
 			}

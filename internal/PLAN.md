@@ -505,17 +505,23 @@ by force-closing the underlying `net.Conn` mid-pool: subsequent
 queries on the same `*sql.DB` succeeded transparently on a
 freshly-opened replacement.
 
-**Context cancellation ✅ wire-validated.** `Stmt.QueryContext` /
-`Stmt.ExecContext` plumb `ctx` through to `net.Conn.SetDeadline`,
-plus a `context.AfterFunc` that fires `SetDeadline(now)` on cancel
-to unblock any in-flight read/write. `resolveCtxErr` substitutes
-`ctx.Err()` for the I/O timeout when the cancellation was the
-real cause, so callers see `context.Canceled` /
-`context.DeadlineExceeded` rather than the transport error.
-Live-validated: a cross-join SELECT that takes the server several
-seconds to materialise canceled in 250ms (`WithTimeout`) and
-200ms (explicit `cancel()`); the pool then auto-recovered with a
-fresh connection.
+**Context cancellation ✅ wire-validated (statement-open scope).**
+`Stmt.QueryContext` / `Stmt.ExecContext` plumb `ctx` through to
+`net.Conn.SetDeadline`, plus a `context.AfterFunc` that fires
+`SetDeadline(now)` on cancel to unblock any in-flight read/write.
+`resolveCtxErr` substitutes `ctx.Err()` for the I/O timeout when
+the cancellation was the real cause, so callers see
+`context.Canceled` / `context.DeadlineExceeded` rather than the
+transport error. **Scope:** the deadline is installed for the
+duration of the EXECUTE / OPEN round-trip and is cleared (via the
+deferred `cleanup`) when the method returns -- it does *not* span
+the subsequent `Rows.Next()` streaming FETCHes, which run after
+`QueryContext` has returned. A `ctx` cancelled while iterating an
+open `*sql.Rows` is observed at the next `database/sql`-driven
+boundary, not mid-FETCH. Live-validated: a cross-join SELECT that
+takes the server several seconds to materialise canceled in 250ms
+(`WithTimeout`) and 200ms (explicit `cancel()`) at statement open;
+the pool then auto-recovered with a fresh connection.
 
 **Deferred from M6 (nice-to-have, not blocking labelverification-gw):**
 
@@ -958,7 +964,7 @@ reference: [`docs/ccsid-support.md`](./ccsid-support.md) (shipped
 ### Phase A — Documentation (complete 2026-05-13)
 
 Ship `docs/ccsid-support.md` documenting v0.7.21's supported set
-(37, 273-as-037-stand-in, 1208, 13488, 1200, 65535), unsupported
+(37, 273 real CDRA-sourced table, 1208, 13488, 1200, 65535), unsupported
 fallback behaviour (silent decode as CCSID 37), and three
 workarounds: `?ccsid=` override, server-side
 `CAST AS VARGRAPHIC CCSID 13488`, and `FOR BIT DATA`. Links from
@@ -967,15 +973,16 @@ Single commit on `origin/main`; no code changes.
 
 ### Phase 1 — SBCS European EBCDIC (planned, target v0.7.22)
 
-Adds 18 SBCS EBCDIC CCSIDs and upgrades CCSID 273 from the
-037-stand-in to a real CDRA-sourced table. Adds opt-in
-`?charset-strict=true` DSN knob promoting unknown-CCSID
-fallback from silent to a hard error.
+Adds the remaining SBCS EBCDIC CCSIDs. CCSID 273 already ships its
+real CDRA-sourced `[256]rune` table (`ebcdic/ccsid273.go`), so the
+037-stand-in upgrade is done; this phase extends the same pattern
+to the other pages. Adds opt-in `?charset-strict=true` DSN knob
+promoting unknown-CCSID fallback from silent to a hard error.
 
 - **Stdlib-backed** (no table data — comes from
   `golang.org/x/text/encoding/charmap`): 1047, 1140.
-- **Hand-tabled via ICU UCM → Go generator**: 273 (upgrade),
-  277, 278, 280, 284, 285, 297, 500, 871, 1141, 1142, 1143,
+- **Hand-tabled via ICU UCM → Go generator**: 277, 278, 280,
+  284, 285, 297, 500, 871, 1141, 1142, 1143,
   1144, 1145, 1146, 1147, 1148, 1149.
 
 New tooling: `/cmd/gen-ebcdic/main.go` reads ICU UCM files
