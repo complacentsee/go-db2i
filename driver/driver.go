@@ -58,8 +58,12 @@
 //	             always wins. Default 0 = auto: 13488 (UCS-2 BE)
 //	             for the SET_SQL_ATTRIBUTES negotiation,
 //	             1208 (UTF-8) for parameter binds on V7R3+ servers
-//	             and CCSID 37 elsewhere. Common explicit values are
-//	             1208 (UTF-8) and 37 (US English EBCDIC).
+//	             and CCSID 37 elsewhere. Accepted explicit values are
+//	             37 (US English EBCDIC), 273 (German EBCDIC),
+//	             1208 (UTF-8) and 65535 (FOR BIT DATA) -- the set the
+//	             bind encoder can faithfully tag and encode. Any other
+//	             value is rejected at parse so the descriptor tag and
+//	             the encoded bytes never disagree.
 //
 // # Connection lifecycle
 //
@@ -800,7 +804,20 @@ func parseDSN(dsn string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid ccsid %q (want unsigned 16-bit int): %w", v, err)
 		}
-		cfg.CCSID = uint16(n)
+		// Validate against the set the bind encoder can faithfully
+		// honour. The string-bind path tags the wire descriptor with
+		// this CCSID but only encodes bytes for: 1208 (UTF-8
+		// passthrough), 65535 (FOR BIT DATA passthrough), and the
+		// SBCS tables ebcdicForCCSID models (37, 273). Any other value
+		// would tag the descriptor with N yet emit CCSID-37 bytes --
+		// silent bind corruption -- so we fail loud at parse time
+		// instead of accepting an override the encoder can't keep.
+		switch uint16(n) {
+		case 37, 273, 1208, 65535:
+			cfg.CCSID = uint16(n)
+		default:
+			return nil, fmt.Errorf("unsupported ccsid %d (encoder honours 37, 273, 1208, 65535 only)", n)
+		}
 	}
 	if v := q.Get("lob-threshold"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 32)

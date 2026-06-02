@@ -602,6 +602,18 @@ func TestParseDSNCCSID(t *testing.T) {
 			t.Errorf("ccsid=utf8 should be rejected (not an integer)")
 		}
 	})
+	t.Run("rejects unsupported override", func(t *testing.T) {
+		// The bind encoder tags the descriptor with the override CCSID
+		// but only emits faithful bytes for 37/273/1208/65535. A value
+		// like 1140 (Euro SBCS) would parse as a valid uint16 yet
+		// silently fall back to CCSID-37 bytes under a CCSID-1140 tag,
+		// so parse must reject it instead of corrupting binds.
+		for _, raw := range []string{"1140", "5026", "500", "1252", "1"} {
+			if _, err := parseDSN("db2i://u:p@h/?ccsid=" + raw); err == nil {
+				t.Errorf("ccsid=%s should be rejected (encoder can't honour it)", raw)
+			}
+		}
+	})
 }
 
 // TestParseDSNLOBThreshold covers the M7-5 ?lob-threshold=N knob:
