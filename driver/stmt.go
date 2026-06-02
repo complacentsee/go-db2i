@@ -1255,24 +1255,22 @@ func assignOutParam(dest reflect.Value, v any) error {
 
 // isSelect returns true iff the SQL begins with SELECT, VALUES, WITH,
 // or any other read-only verb. Used to dispatch Exec vs Query without
-// requiring the caller to pre-classify.
+// requiring the caller to pre-classify. Leading whitespace and
+// line/block comments are skipped first (see skipLeadingSQLNoise).
 func isSelect(sql string) bool {
-	for i, r := range sql {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		head := sql[i:]
-		// 6 is the longest read-only verb we look for ("SELECT")
-		if len(head) >= 6 && strings.EqualFold(head[:6], "SELECT") {
-			return true
-		}
-		if len(head) >= 6 && strings.EqualFold(head[:6], "VALUES") {
-			return true
-		}
-		if len(head) >= 4 && strings.EqualFold(head[:4], "WITH") {
-			return true
-		}
+	head := sql[skipLeadingSQLNoise(sql):]
+	if head == "" {
 		return false
+	}
+	// 6 is the longest read-only verb we look for ("SELECT")
+	if len(head) >= 6 && strings.EqualFold(head[:6], "SELECT") {
+		return true
+	}
+	if len(head) >= 6 && strings.EqualFold(head[:6], "VALUES") {
+		return true
+	}
+	if len(head) >= 4 && strings.EqualFold(head[:4], "WITH") {
+		return true
 	}
 	return false
 }
@@ -1288,21 +1286,15 @@ func isSelect(sql string) bool {
 // strips the braces in JDSQLToken before PREPARE, but go-db2i
 // expects callers to pass the literal CALL statement.
 func isCall(sql string) bool {
-	for i, r := range sql {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			continue
+	head := sql[skipLeadingSQLNoise(sql):]
+	if len(head) >= 4 && strings.EqualFold(head[:4], "CALL") {
+		// Guard against verbs that *contain* CALL but aren't
+		// it (none in standard SQL, but cheap to be careful).
+		if len(head) == 4 {
+			return true
 		}
-		head := sql[i:]
-		if len(head) >= 4 && strings.EqualFold(head[:4], "CALL") {
-			// Guard against verbs that *contain* CALL but aren't
-			// it (none in standard SQL, but cheap to be careful).
-			if len(head) == 4 {
-				return true
-			}
-			next := head[4]
-			return next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '('
-		}
-		return false
+		next := head[4]
+		return next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '('
 	}
 	return false
 }

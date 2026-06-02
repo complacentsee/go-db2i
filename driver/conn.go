@@ -751,18 +751,59 @@ func (c *Conn) refreshPackageCache(ctx context.Context, triggerSQL string) {
 	)
 }
 
-// firstSQLVerb returns the first whitespace-delimited token of sql
-// (after leading spaces / tabs / newlines), without allocating. The
-// returned slice aliases sql.
-func firstSQLVerb(sql string) string {
+// skipLeadingSQLNoise returns the index of the first character in sql
+// that begins the statement proper, skipping leading whitespace and
+// any run of line (`--`) or block (`/* */`) comments. Tools and ORMs
+// routinely emit a banner comment ahead of the verb; without this the
+// verb scanners (firstSQLVerb / isSelect / isCall) read the comment
+// instead of SELECT/CALL/INSERT and misclassify the statement.
+//
+// Allocation-free; only the leading region is examined, so a comment
+// character appearing later inside a literal is never reached. JT400
+// strips comments wholesale via JDSQLTokenizer before determining the
+// first word (JDSQLStatement.java); we only need the leading ones to
+// recover the verb.
+func skipLeadingSQLNoise(sql string) int {
 	i := 0
 	for i < len(sql) {
 		c := sql[i]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-			break
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			i++
+			continue
 		}
-		i++
+		if c == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+			// Line comment: skip to end of line (or string).
+			i += 2
+			for i < len(sql) && sql[i] != '\n' && sql[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+			// Block comment: skip to the closing */ (or string end
+			// if unterminated). Not nested -- SQL block comments
+			// don't nest on IBM i for this leading-skip purpose.
+			i += 2
+			for i+1 < len(sql) && !(sql[i] == '*' && sql[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(sql) {
+				i += 2 // consume the closing */
+			} else {
+				i = len(sql) // unterminated
+			}
+			continue
+		}
+		break
 	}
+	return i
+}
+
+// firstSQLVerb returns the first whitespace-delimited token of sql
+// (after leading whitespace and any leading line/block comments),
+// without allocating. The returned slice aliases sql.
+func firstSQLVerb(sql string) string {
+	i := skipLeadingSQLNoise(sql)
 	j := i
 	for j < len(sql) {
 		c := sql[j]
