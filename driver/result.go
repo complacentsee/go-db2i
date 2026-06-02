@@ -20,9 +20,9 @@ import (
 // returns NULL and we surface ErrNoLastInsertId so callers can
 // distinguish "not supported" from "no rows affected".
 //
-// RowsAffected currently returns the row count carried back via
-// the Exec path; SQLCA decoding (CP 0x3807 SQLERRD[2]) lands with
-// M7 -- today the host-server layer pre-fills 0.
+// RowsAffected returns the real row count decoded from the EXECUTE
+// reply's SQLCA (CP 0x3807 SQLERRD3 slot), carried back via the
+// Exec path -- it is no longer pre-filled to 0.
 type Result struct {
 	rowsAffected int64
 

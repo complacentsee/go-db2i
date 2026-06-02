@@ -10,6 +10,62 @@ across IBM i versions; expect the public API surface to settle at
 
 ## [Unreleased]
 
+The 39 commits below are tagged-pending past v0.7.21: the June-1
+bind/decode bug-fix sweep (issues #3/#5/#11/#12/#13/#14) and the
+test-suite + CI build-out. Docs/comment hygiene is folded in here
+too. No version banner bump until the maintainer cuts the release.
+
+### Added: GitHub Actions CI, golangci-lint, and a Makefile
+
+A CI workflow (`da6308b`) builds, vets, and `golangci-lint`-runs
+the tree on every push; golangci-lint is built from source to
+match the runner's Go (`3f45cc5`). A `Makefile` standardises the
+local targets. CI defaults to filing extended-dynamic packages and
+scopes the live-coverage leg behind secrets (`08727ef`,
+`dca15ac`); the IBM Cloud V7R6 live-conformance leg is dropped from
+the public matrix (`0f5b857`). The conformance suite gains a
+data-type round-trip matrix (`1937e13`), an error-path /
+pool-timeout gap-fill (`e152a1a`), in-schema stored-proc fixtures
+(`9c8e051`), and per-run-unique fixture names to stop concurrent-run
+collisions (`6084518`). A `gofmt` pre-commit hook (`6b3c14a`) plus a
+one-time tree-wide gofmt sweep (`d3ba343`) keep formatting honest;
+the suite + CI secret/env names are documented (`83f9a50`).
+
+### Fixed: scalar GRAPHIC/VARGRAPHIC/LONG VARGRAPHIC column decode (issue #3)
+
+`decodeColumn` no longer rejects SQL types 464/465/468/469/472/473.
+Scalar graphic columns -- e.g. `QSYS2.SYSVIEWS.VIEW_DEFINITION`
+(CCSID 1200) -- now decode instead of erroring (`f548110`).
+
+### Fixed: GRAPHIC/VARGRAPHIC parameter binds (issue #5)
+
+The bind/encode path now encodes GRAPHIC / VARGRAPHIC / LONG
+VARGRAPHIC parameters instead of returning
+`ErrUnsupportedCachedParamType` on OUT/INOUT graphic markers
+(`e84d963`).
+
+### Fixed: nil bind into native BINARY/VARBINARY columns (issue #11)
+
+A `nil` bind into a native binary column adopts the column's
+declared shape rather than failing with SQL-301 (`eaa182d`).
+
+### Fixed: high-precision DECIMAL/DECFLOAT bind guidance (issue #12)
+
+`float64` binds to DECFLOAT/DECIMAL columns lose precision; the
+bind docs now recommend `string` binds for high-precision decimal
+parameters (`b049fc6`).
+
+### Fixed: []byte binds into CCSID-65535 GRAPHIC/VARGRAPHIC columns (issue #13)
+
+`[]byte` binds route into bit-data graphic columns instead of
+erroring with SQL-332 (`5661a1d`).
+
+### Fixed: LOB-bind cache-hit documented as impossible by design (issue #14)
+
+LOB-bind INSERTs file into the `*PGM` but cannot take the cache-hit
+fast path; a test + doc note pin this as a server-side constraint,
+not a driver bug (`4e48498`).
+
 ## [0.7.21] - 2026-05-12
 
 ### Added: live-coverage hardening (9 new test groups, TLS turned on)

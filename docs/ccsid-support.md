@@ -12,7 +12,7 @@ own CCSID tag that tells the client how to interpret column bytes.
 | CCSID | Description           | Region / use         | Backing                                                |
 |-------|-----------------------|----------------------|--------------------------------------------------------|
 | 37    | US English EBCDIC     | US / Canada          | `golang.org/x/text/encoding/charmap.CodePage037`       |
-| 273   | German EBCDIC         | DE / AT (PARTIAL)    | CCSID 37 stand-in (see limitation below)               |
+| 273   | German EBCDIC         | DE / AT              | Real CDRA-sourced `[256]rune` table (`ebcdic/ccsid273.go`) |
 | 1208  | UTF-8                 | Unicode              | Passthrough (no transcode)                             |
 | 13488 | UCS-2 BE              | Unicode (GRAPHIC)    | `unicode/utf16`                                        |
 | 1200  | UTF-16 BE             | Unicode (GRAPHIC)    | `unicode/utf16`                                        |
@@ -20,16 +20,16 @@ own CCSID tag that tells the client how to interpret column bytes.
 
 ### Note on CCSID 273
 
-The driver currently wraps `charmap.CodePage037` for the CCSID
-273 codec slot. For the ASCII printable subset (digits, `A-Z`,
-`a-z`, space, common punctuation) this produces correct bytes
-because 037 and 273 agree on 239 of 256 positions. The 17
-positions that diverge — `§ Ä Ö Ü ä ö ü ß` plus reshuffled
-punctuation (`@ # $ ^ [ ] { } ~ \`` and a few others) — will
-round-trip **incorrectly**. A real CCSID 273 mapping table is
-planned (see "Planned" below). German shops that need correct
-Umlaut handling today should override the session CCSID to 1208
-(UTF-8) via `?ccsid=1208` if the server supports it (V7R3+ in
+The driver ships a real, table-backed CCSID 273 codec — a
+hand-verified, CDRA-sourced `[256]rune` forward table in
+`ebcdic/ccsid273.go`, not a CCSID 37 stand-in. It agrees with
+CCSID 37 on 234 of 256 positions; the 22 positions that diverge —
+`§ Ä Ö Ü ä ö ü ß` plus reshuffled punctuation (`@ # $ ^ [ ] { } ~
+\`` and others) — round-trip **correctly**. Both directions are
+pinned by the offline tests in `ebcdic/ccsid273_test.go`
+(per-byte bijection plus the divergent-character matrix). German
+shops can use CCSID 273 directly; `?ccsid=1208` (UTF-8) remains an
+option for mixed-encoding data if the server supports it (V7R3+ in
 most configurations).
 
 ## Unsupported (silent fallback to CCSID 37)
@@ -87,10 +87,11 @@ Common unsupported CCSIDs:
 
 Additional CCSID coverage is rolled out in three phases. The
 roadmap and per-CCSID priority lives in
-[`../internal/PLAN.md`](../internal/PLAN.md). Phase 1 adds the
-common European SBCS pages (273 real-table upgrade, 277, 278,
-280, 284, 285, 297, 500, 871, 1047, 1140-1149) and introduces an
-opt-in `?charset-strict=true` DSN knob that promotes
+[`../internal/PLAN.md`](../internal/PLAN.md). CCSID 273 already
+ships its real CDRA-sourced table (see above); Phase 1 adds the
+remaining common European SBCS pages (277, 278, 280, 284, 285,
+297, 500, 871, 1047, 1140-1149) and introduces an opt-in
+`?charset-strict=true` DSN knob that promotes
 unknown-CCSID fallback from silent to a hard error. Phase 2
 extends to Cyrillic / Greek / Turkish / Hebrew / Arabic plus
 legacy EBCDIC pages on a demand-driven basis; Phase 3 covers
