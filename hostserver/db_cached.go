@@ -309,6 +309,9 @@ func OpenSelectPreparedCached(conn io.ReadWriter, cached *PackageStatement, para
 
 	cols := make([]SelectColumn, len(cached.DataFormat))
 	copy(cols, cached.DataFormat)
+	// Stamp the negotiated date/time formats so the row decoder
+	// normalises DATE/TIME values to ISO by format, not by shape.
+	stampDateTimeFormat(cols, o)
 	rows, err := rep.findExtendedResultData(cols)
 	if err != nil {
 		_ = deleteRPB(conn, nextCorr())

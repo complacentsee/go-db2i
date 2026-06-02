@@ -452,6 +452,24 @@ func (c *Conn) selectOptions() []hostserver.SelectOption {
 // Stmt.Exec and just wants the conn-level flags.
 func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectOption {
 	var opts []hostserver.SelectOption
+	if c.cfg != nil {
+		// Thread the session's negotiated date/time output formats so
+		// the row decoder normalises DATE/TIME values to ISO by the
+		// negotiated format rather than guessing from the string
+		// shape (which can't tell MDY from DMY). Only emit the option
+		// when at least one format was actually negotiated -- a
+		// JOB-default/unset session keeps the legacy shape-sniffing
+		// decode path and emits no extra option here.
+		dateFmt := c.cfg.DateFormat
+		timeFmt := int8(-1)
+		if idx, ok := timeFormatWireIndex(c.cfg.TimeFormat); ok {
+			timeFmt = idx
+		}
+		dateNegotiated := dateFmt != 0 && dateFmt != hostserver.DateFormatJOB
+		if dateNegotiated || timeFmt >= 0 {
+			opts = append(opts, hostserver.WithDateTimeFormat(dateFmt, timeFmt))
+		}
+	}
 	if c.cfg != nil && c.cfg.ExtendedMetadata {
 		opts = append(opts, hostserver.WithExtendedMetadata(true))
 	}

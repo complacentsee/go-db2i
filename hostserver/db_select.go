@@ -491,6 +491,21 @@ type SelectColumn struct {
 	Table          string
 	BaseColumnName string
 	Label          string
+
+	// Negotiated date/time output formats, stamped onto the column
+	// from the session's SET_SQL_ATTRIBUTES options so the row
+	// decoder can normalise DATE/TIME values to ISO without guessing
+	// the format from the string shape. Both default to the unset
+	// sentinel (DateFormat 0 / TimeFormat -1), in which case
+	// decodeColumn falls back to the legacy shape-sniffing path.
+	//
+	// DateFormat holds a DateFormat* byte constant (0xF1..0xF7);
+	// DateFormatJOB (0xF0) and the zero value both mean "not
+	// negotiated -- sniff the shape". TimeFormat holds JT400's
+	// TIME_FORMAT choice index (hms=0, usa=1, iso=2, eur=3, jis=4);
+	// -1 means "not negotiated".
+	DateFormat byte
+	TimeFormat int8
 }
 
 // SelectResult bundles the column descriptors with the rows
@@ -581,6 +596,19 @@ type selectOpts struct {
 	// resolved value so continuation FETCHes use the same size as
 	// the initial OPEN_DESCRIBE_FETCH.
 	blockSizeKiB int
+
+	// dateFormat / timeFormat carry the session's negotiated
+	// SET_SQL_ATTRIBUTES date/time output formats. They don't change
+	// the wire request at all -- they're stamped onto each returned
+	// SelectColumn so the row decoder normalises DATE/TIME values to
+	// ISO by the negotiated format instead of guessing from the
+	// string shape (which can't tell MDY from DMY). dateFormat is a
+	// DateFormat* byte (0xF1..0xF7); DateFormatJOB / zero means
+	// "not negotiated, sniff the shape". timeFormat is JT400's
+	// TIME_FORMAT index (hms=0, usa=1, iso=2, eur=3, jis=4) with -1
+	// for "not negotiated". WithDateTimeFormat sets both.
+	dateFormat byte
+	timeFormat int8
 }
 
 // rpbStringCCSID returns the CCSID the CREATE_RPB statement-name
@@ -679,6 +707,37 @@ func WithBlockSize(kib int) SelectOption {
 	}
 }
 
+// WithDateTimeFormat carries the session's negotiated date/time
+// output formats into the row decoder. It has no effect on the wire
+// request -- the formats are stamped onto each returned SelectColumn
+// so decodeColumn normalises DATE/TIME values to ISO by the
+// negotiated format rather than sniffing the string shape (which
+// can't distinguish MDY from DMY).
+//
+// dateFormat is a DateFormat* byte constant (0xF1..0xF7);
+// DateFormatJOB (0xF0) or the zero value means "not negotiated --
+// sniff the shape". timeFormat is JT400's TIME_FORMAT choice index
+// (hms=0, usa=1, iso=2, eur=3, jis=4); -1 means "not negotiated".
+// Callers thread the connection's negotiated values through here.
+func WithDateTimeFormat(dateFormat byte, timeFormat int8) SelectOption {
+	return func(o *selectOpts) {
+		o.dateFormat = dateFormat
+		o.timeFormat = timeFormat
+	}
+}
+
+// stampDateTimeFormat copies the negotiated date/time formats from
+// the resolved selectOpts onto every column so decodeColumn can
+// normalise DATE/TIME values without shape-sniffing. Cursors keep
+// the stamped slice for continuation FETCHes, so one stamp at open
+// time covers the whole result set.
+func stampDateTimeFormat(cols []SelectColumn, o selectOpts) {
+	for i := range cols {
+		cols[i].DateFormat = o.dateFormat
+		cols[i].TimeFormat = o.timeFormat
+	}
+}
+
 // bufferSizeParam returns the CP 0x3834 (BufferSize) parameter
 // encoded as a 4-byte uint32 carrying kib*1024. kib=0 yields the
 // historical 32 KiB default, preserving byte-equality with
@@ -742,7 +801,10 @@ func estimateBlockingFactor(cols []SelectColumn, blockSizeKiB int) uint32 {
 }
 
 func resolveSelectOpts(opts []SelectOption) selectOpts {
-	var o selectOpts
+	// timeFormat defaults to the -1 unset sentinel so an unstamped
+	// column keeps the legacy "wire is already canonical HH:MM:SS"
+	// decode path (index 0 is a real format, hms).
+	o := selectOpts{timeFormat: -1}
 	for _, fn := range opts {
 		if fn != nil {
 			fn(&o)
@@ -935,6 +997,9 @@ func openStaticUntilFirstBatch(conn io.ReadWriter, sql string, nextCorr func() u
 			}
 		}
 	}
+	// Stamp the negotiated date/time formats so the row decoder
+	// normalises DATE/TIME values to ISO by format, not by shape.
+	stampDateTimeFormat(cols, opts)
 	if len(cols) == 0 {
 		// List the CPs that did come back -- helps when the
 		// server picks the original (0x3805) or extended (0x380C)
