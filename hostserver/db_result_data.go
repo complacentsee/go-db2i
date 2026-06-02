@@ -914,23 +914,39 @@ func ymdToISODate(s string) string {
 }
 
 // ibmTimestampToISO converts IBM i's wire timestamp string
-// "YYYY-MM-DD-HH.MM.SS.ffffff" to ISO 8601
-// "YYYY-MM-DDTHH:MM:SS.ffffff". Both forms are 26 chars; the
-// only differences are the date/time delimiter ('-' -> 'T') and
-// the time-component separator ('.' -> ':') in HH.MM.SS.
+// "YYYY-MM-DD-HH.MM.SS[.ffffff...]" to ISO 8601
+// "YYYY-MM-DDTHH:MM:SS[.ffffff...]". The differences are the
+// date/time delimiter ('-' -> 'T') and the time-component
+// separator ('.' -> ':') in HH.MM.SS.
 //
-// If s doesn't look like a wire timestamp (length or character
-// sentinels off), it's returned unchanged so the caller can still
-// see the raw value rather than panic on bad input.
+// The fractional tail is precision-dependent: TIMESTAMP(0) sends
+// no tail (19 chars, no separator at idx 19), TIMESTAMP(6) sends
+// 6 digits (26 chars), and TIMESTAMP(12) sends 12 digits (32
+// chars). We only rewrite the fixed date/time prefix (idx 0..18)
+// and pass the remaining tail through verbatim, so any precision
+// 0..12 round-trips. This mirrors SQLTimestamp.parse in JTOpen,
+// which slices the date/time at the same fixed offsets and treats
+// everything from idx 20 on as an optional fractional part.
+//
+// If s doesn't look like a wire timestamp (too short or the fixed
+// sentinels are off), it's returned unchanged so the caller can
+// still see the raw value rather than panic on bad input.
 func ibmTimestampToISO(s string) string {
-	if len(s) != 26 || s[10] != '-' || s[13] != '.' || s[16] != '.' || s[19] != '.' {
+	// 19 = "YYYY-MM-DD-HH.MM.SS" with no fractional part. When a
+	// fraction is present, idx 19 is the '.' separator followed by
+	// the precision-many digits.
+	if len(s) < 19 || s[10] != '-' || s[13] != '.' || s[16] != '.' {
+		return s
+	}
+	if len(s) > 19 && s[19] != '.' {
 		return s
 	}
 	b := []byte(s)
 	b[10] = 'T'
 	b[13] = ':'
 	b[16] = ':'
-	// b[19] stays '.' -- that's the seconds-vs-fractional separator
-	// and ISO uses '.' there.
+	// b[19] (if present) stays '.' -- that's the seconds-vs-fractional
+	// separator and ISO uses '.' there. The fractional digits after it
+	// are copied unchanged.
 	return string(b)
 }

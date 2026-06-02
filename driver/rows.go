@@ -256,7 +256,9 @@ func decodeUTF16BE(b []byte) string {
 //
 //	DATE      -> "YYYY-MM-DD"
 //	TIME      -> "HH:MM:SS" (rare to see fractional)
-//	TIMESTAMP -> "YYYY-MM-DDTHH:MM:SS[.ffffff]" (ibmTimestampToISO output)
+//	TIMESTAMP -> "YYYY-MM-DDTHH:MM:SS[.ffffff...]" (ibmTimestampToISO
+//	             output; the fractional tail is 0..12 digits wide
+//	             depending on the column's declared precision)
 //
 // All times are interpreted as UTC -- IBM i timestamps don't carry
 // zone information and the eATM treats them as zoneless. Callers that
@@ -268,14 +270,13 @@ func parseTemporalISO(sqlType uint16, s string) (time.Time, error) {
 	case 388, 389:
 		return time.ParseInLocation("15:04:05", s, time.UTC)
 	case 392, 393:
-		layouts := []string{
-			"2006-01-02T15:04:05.999999",
-			"2006-01-02T15:04:05",
-		}
-		for _, layout := range layouts {
-			if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
-				return t, nil
-			}
+		// The ".999999999" fraction is optional and elastic: it parses
+		// TIMESTAMP(0) (no fractional part) through TIMESTAMP(9) exactly,
+		// and TIMESTAMP(12)'s picosecond tail truncates to time.Time's
+		// nanosecond resolution -- the same loss java.sql.Timestamp takes
+		// via setNanos(picos/1000) in JTOpen.
+		if t, err := time.ParseInLocation("2006-01-02T15:04:05.999999999", s, time.UTC); err == nil {
+			return t, nil
 		}
 		return time.Time{}, fmt.Errorf("unrecognised timestamp format %q", s)
 	}
