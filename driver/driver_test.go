@@ -163,6 +163,40 @@ func TestParseDSNBlockSize(t *testing.T) {
 	}
 }
 
+func TestParseDSNCharsetStrict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		dsn     string
+		want    bool
+		wantErr bool
+	}{
+		{"unset = false (non-breaking default)", "db2i://u:p@h/", false, false},
+		{"true", "db2i://u:p@h/?charset-strict=true", true, false},
+		{"false", "db2i://u:p@h/?charset-strict=false", false, false},
+		{"bad value rejected", "db2i://u:p@h/?charset-strict=maybe", false, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := parseDSN(tc.dsn)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseDSN(%q): want error, got nil", tc.dsn)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseDSN(%q): %v", tc.dsn, err)
+			}
+			if cfg.CharsetStrict != tc.want {
+				t.Fatalf("CharsetStrict: got %v want %v", cfg.CharsetStrict, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseDSNUppercasesLibrary(t *testing.T) {
 	// IBM i schema lookups are case-insensitive but the wire format
 	// expects EBCDIC uppercase. Normalising at the DSN boundary

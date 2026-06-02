@@ -88,6 +88,12 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		// dispatches per column.
 		opts.ClientCCSID = c.cfg.CCSID
 	}
+	// ?charset-strict=true promotes the hostserver's unknown-CCSID
+	// fallback from a one-shot warn to a hard error. This is a
+	// process-level toggle (the hostserver decoder has no per-Conn
+	// handle), so the last connector to open wins -- callers who want
+	// strict mode should set it on every DSN.
+	hostserver.SetCCSIDStrict(c.cfg.CharsetStrict)
 	if c.cfg.LOBThreshold != 0 {
 		// CP 0x3822 LOBFieldThreshold -- inline cutoff for LOB
 		// columns. SetSQLAttributes substitutes the historical

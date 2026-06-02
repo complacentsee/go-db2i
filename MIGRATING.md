@@ -174,10 +174,10 @@ only the DSN-knob parity view.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (30 DSN keys): `library`, `libraries`, `naming`,
+✅ **Supported** (31 DSN keys): `library`, `libraries`, `naming`,
 `signon-port`, `date`, `time-format`, `date-separator`,
 `time-separator`, `decimal-separator`, `isolation`, `lob`,
-`lob-threshold`, `ccsid`, `extended-metadata`, `block-size`,
+`lob-threshold`, `ccsid`, `charset-strict`, `extended-metadata`, `block-size`,
 `query-optimize-goal`, `login-timeout`, `socket-timeout`,
 `tls`, `tls-insecure-skip-verify`, `tls-server-name`,
 `extended-dynamic`, `package`, `package-library`, `package-cache`,
