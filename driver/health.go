@@ -37,6 +37,13 @@ func (c *Conn) markDead() {
 // want to know WHY the conn died (TCP RST vs server-side 08xxx vs
 // short-frame desync) can still get there via errors.As / Unwrap.
 //
+// One exception: when the conn-level error wraps
+// hostserver.ErrRequestSent, the EXECUTE frame for a non-idempotent
+// write verb already reached the server before the transport broke.
+// Replaying it could duplicate the write, so we retire the conn but
+// return the raw cause (NOT badConnWrap) and database/sql surfaces
+// the failure to the caller instead of re-running the statement.
+//
 // The conditions we treat as "conn dead":
 //
 //   - io.EOF / io.ErrUnexpectedEOF: TCP peer closed mid-frame.
@@ -65,6 +72,22 @@ func (c *Conn) classifyConnErr(err error) error {
 	}
 	if isConnLevelErr(err) {
 		c.markDead()
+		// Post-write transport failure: the EXECUTE frame for a
+		// non-idempotent write verb provably reached the server (the
+		// reply read/parse is what failed). The statement may have
+		// committed, so we must NOT let database/sql replay it on a
+		// fresh conn -- retire the socket but return the raw cause
+		// instead of an ErrBadConn-satisfying wrapper. The exec layer
+		// tags these with hostserver.ErrRequestSent; pre-send failures
+		// and read-only verbs never carry it, so they stay replayable.
+		if errors.Is(err, hostserver.ErrRequestSent) {
+			if c.log != nil {
+				c.log.LogAttrs(context.Background(), slog.LevelWarn, "db2i: conn-level failure after request sent (pool will retire conn; not retried to avoid duplicate write)",
+					slog.String("err", err.Error()),
+				)
+			}
+			return err
+		}
 		if c.log != nil {
 			c.log.LogAttrs(context.Background(), slog.LevelWarn, "db2i: classified as ErrBadConn (pool will retire conn)",
 				slog.String("err", err.Error()),

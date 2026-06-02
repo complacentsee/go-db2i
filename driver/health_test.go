@@ -151,6 +151,43 @@ func TestConnPing(t *testing.T) {
 	})
 }
 
+// TestClassifyConnErr_RequestSentNotBadConn pins the issue #29 fix at
+// the classifier boundary: a conn-level transport failure that wraps
+// hostserver.ErrRequestSent (the EXECUTE frame for a non-idempotent
+// write already reached the server) must retire the conn WITHOUT
+// satisfying driver.ErrBadConn, so database/sql surfaces the error
+// instead of silently replaying the write on a fresh connection. The
+// identical transport failure WITHOUT the sentinel (pre-send, or a
+// read-only verb) stays ErrBadConn so the safe replay still happens.
+func TestClassifyConnErr_RequestSentNotBadConn(t *testing.T) {
+	// Post-write: EOF wrapped together with ErrRequestSent, exactly as
+	// the exec layer builds it (read EXECUTE reply: %w: %w).
+	postWrite := fmt.Errorf("hostserver: read EXECUTE reply: %w: %w", io.EOF, hostserver.ErrRequestSent)
+
+	c := &Conn{}
+	got := c.classifyConnErr(postWrite)
+	if !c.closed {
+		t.Error("post-write conn-level failure should still retire the conn (closed=true)")
+	}
+	if errors.Is(got, driver.ErrBadConn) {
+		t.Errorf("post-write write-verb failure satisfied ErrBadConn; database/sql would replay the write: %v", got)
+	}
+	if !errors.Is(got, io.EOF) {
+		t.Errorf("post-write classification lost the underlying cause: %v", got)
+	}
+
+	// Pre-send: same transport cause, no ErrRequestSent sentinel.
+	preSend := fmt.Errorf("hostserver: send EXECUTE: %w", io.EOF)
+	c2 := &Conn{}
+	got2 := c2.classifyConnErr(preSend)
+	if !c2.closed {
+		t.Error("pre-send conn-level failure should retire the conn (closed=true)")
+	}
+	if !errors.Is(got2, driver.ErrBadConn) {
+		t.Errorf("pre-send failure should satisfy ErrBadConn for safe replay: %v", got2)
+	}
+}
+
 // TestConnIsValidAndResetSession exercises the database/sql interface
 // hooks that gate pool reuse. A live conn passes; a closed/dead conn
 // fails IsValid and returns driver.ErrBadConn from ResetSession.
