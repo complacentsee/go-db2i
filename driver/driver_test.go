@@ -2,7 +2,10 @@ package driver
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -39,9 +42,9 @@ func TestParseDSNBasic(t *testing.T) {
 	if cfg.DateFormat != hostserver.DateFormatJOB {
 		t.Errorf("DateFormat = 0x%02X, want JOB (0x%02X)", cfg.DateFormat, hostserver.DateFormatJOB)
 	}
-	if cfg.Isolation != hostserver.IsolationCommitNone {
-		t.Errorf("Isolation = %d, want CommitNone (%d) for autocommit-permissive default",
-			cfg.Isolation, hostserver.IsolationCommitNone)
+	if cfg.Isolation != hostserver.IsolationDefault {
+		t.Errorf("Isolation = %d, want IsolationDefault (%d) -- unset sentinel that sends *NONE on connect but *CS at Begin()",
+			cfg.Isolation, hostserver.IsolationDefault)
 	}
 }
 
@@ -91,12 +94,17 @@ func TestParseDSNIsolations(t *testing.T) {
 	}{
 		{"none", hostserver.IsolationCommitNone},
 		{"cs", hostserver.IsolationReadCommitted},
-		{"all", hostserver.IsolationAllCS},
-		{"rr", hostserver.IsolationRepeatableRd},
-		{"rs", hostserver.IsolationSerializable},
+		{"chg", hostserver.IsolationReadUncommitted},
+		{"all", hostserver.IsolationRepeatableRead},
+		{"rr", hostserver.IsolationSerializable},
+		// JT400 "transaction isolation" JDBC URL vocabulary.
+		{"read committed", hostserver.IsolationReadCommitted},
+		{"read uncommitted", hostserver.IsolationReadUncommitted},
+		{"repeatable read", hostserver.IsolationRepeatableRead},
+		{"serializable", hostserver.IsolationSerializable},
 	}
 	for _, tc := range cases {
-		cfg, err := parseDSN("db2i://u:p@h/?isolation=" + tc.key)
+		cfg, err := parseDSN("db2i://u:p@h/?isolation=" + url.QueryEscape(tc.key))
 		if err != nil {
 			t.Errorf("isolation=%s: %v", tc.key, err)
 			continue
@@ -104,6 +112,54 @@ func TestParseDSNIsolations(t *testing.T) {
 		if cfg.Isolation != tc.want {
 			t.Errorf("isolation=%s: level = %d, want %d", tc.key, cfg.Isolation, tc.want)
 		}
+	}
+}
+
+// TestDefaultConfigIsolationSentinel pins that the default Config no
+// longer carries the raw *NONE value (0). It must hold the
+// IsolationDefault sentinel (-1) so Begin() falls back to *CS instead
+// of re-sending *NONE -- the bug that made db.Begin() then COMMIT
+// fail with SQL -211. On connect the sentinel still encodes to wire 0
+// (isolationLevelWireValue maps it down), so connect-time behaviour
+// is unchanged.
+func TestDefaultConfigIsolationSentinel(t *testing.T) {
+	t.Parallel()
+	if got := DefaultConfig().Isolation; got != hostserver.IsolationDefault {
+		t.Fatalf("DefaultConfig().Isolation = %d, want IsolationDefault (%d); a *NONE (0) default makes Begin() send *NONE and COMMIT fail SQL -211",
+			got, hostserver.IsolationDefault)
+	}
+}
+
+// TestMapSQLIsolation pins the database/sql isolation level -> CP
+// 0x380E wire value mapping against JT400's server-side commit modes
+// (*CS=1, *CHG=2, *ALL=3, *RR=4). sql.LevelDefault passes through
+// IsolationDefault so the AutocommitOffWithIsolation fallback (*CS)
+// applies.
+func TestMapSQLIsolation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		level sql.IsolationLevel
+		want  int16
+	}{
+		{sql.LevelDefault, hostserver.IsolationDefault},
+		{sql.LevelReadUncommitted, hostserver.IsolationReadUncommitted}, // *CHG, wire 2
+		{sql.LevelReadCommitted, hostserver.IsolationReadCommitted},     // *CS, wire 1
+		{sql.LevelRepeatableRead, hostserver.IsolationRepeatableRead},   // *ALL, wire 3
+		{sql.LevelSerializable, hostserver.IsolationSerializable},       // *RR, wire 4
+	}
+	for _, tc := range cases {
+		got, err := mapSQLIsolation(driver.IsolationLevel(tc.level))
+		if err != nil {
+			t.Errorf("mapSQLIsolation(%v): %v", tc.level, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("mapSQLIsolation(%v) = %d, want %d", tc.level, got, tc.want)
+		}
+	}
+	// Snapshot has no IBM i analogue and must reject.
+	if _, err := mapSQLIsolation(driver.IsolationLevel(sql.LevelSnapshot)); err == nil {
+		t.Errorf("mapSQLIsolation(Snapshot): want error, got nil")
 	}
 }
 

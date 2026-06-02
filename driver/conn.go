@@ -1002,14 +1002,15 @@ func (c *Conn) Begin() (driver.Tx, error) {
 // callers think they had a guarantee they don't.
 //
 // Isolation mapping mirrors JDBC's IsolationLevel constants on
-// IBM i (see JT400's AS400JDBCConnection.setTransactionIsolation):
+// IBM i (see JT400's JDTransactionManager.mapLevelToCommitMode plus
+// the server remap in getIsolationLevel; CP 0x380E wire values in
+// parens):
 //
 //	sql.LevelDefault         → DSN value (or *CS if DSN unset)
-//	sql.LevelReadUncommitted → *CHG (commitment level 4, "All
-//	                           transactions read", uncommitted)
-//	sql.LevelReadCommitted   → *CS  (cursor stability)
-//	sql.LevelRepeatableRead  → *ALL (read stability)
-//	sql.LevelSerializable    → *RR  (repeatable read; serializable)
+//	sql.LevelReadUncommitted → *CHG (wire 2, uncommitted read)
+//	sql.LevelReadCommitted   → *CS  (wire 1, cursor stability)
+//	sql.LevelRepeatableRead  → *ALL (wire 3, read stability)
+//	sql.LevelSerializable    → *RR  (wire 4, repeatable read)
 //
 // Other levels (Snapshot, LinearizableRead, etc.) reject with a
 // clear error. Snapshot in particular is a SQL Server concept --
@@ -1047,16 +1048,15 @@ func mapSQLIsolation(level driver.IsolationLevel) (int16, error) {
 	case sql.LevelDefault:
 		return hostserver.IsolationDefault, nil
 	case sql.LevelReadUncommitted:
-		// IBM i *CHG -- commitment level 4 per
-		// DBSQLAttributesDS.setCommitmentControlLevelParserOption.
-		// JT400 maps TRANSACTION_READ_UNCOMMITTED to *CHG too.
-		return 4, nil
+		// IBM i *CHG -- CP 0x380E wire value 2 (server commit mode).
+		// JT400 maps TRANSACTION_READ_UNCOMMITTED to *CHG.
+		return hostserver.IsolationReadUncommitted, nil // *CHG (wire 2)
 	case sql.LevelReadCommitted:
-		return hostserver.IsolationReadCommitted, nil // *CS
+		return hostserver.IsolationReadCommitted, nil // *CS (wire 1)
 	case sql.LevelRepeatableRead:
-		return hostserver.IsolationAllCS, nil // *ALL (read stability)
+		return hostserver.IsolationRepeatableRead, nil // *ALL, read stability (wire 3)
 	case sql.LevelSerializable:
-		return hostserver.IsolationRepeatableRd, nil // *RR
+		return hostserver.IsolationSerializable, nil // *RR (wire 4)
 	default:
 		return 0, fmt.Errorf("db2i: BeginTx: isolation level %v is not supported on IBM i (use Default / ReadUncommitted / ReadCommitted / RepeatableRead / Serializable)", sql.IsolationLevel(level))
 	}

@@ -89,12 +89,15 @@ func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error
 // when JDBC's setAutoCommit(false) is invoked:
 //
 //	CP 0x3824 = 0xD5  -- autocommit OFF (EBCDIC 'N')
-//	CP 0x380E = *CS   -- start a commitment definition at cursor
-//	                     stability (wire value 2 per JT400's
-//	                     COMMIT_MODE_CS_); without this the server
-//	                     stays in *NONE and COMMIT/ROLLBACK return
-//	                     SQL -211 errorClass=0x0002 even with a real
-//	                     INSERT pending.
+//	CP 0x380E = 2     -- start a commitment definition. Wire value 2
+//	                     is *CHG (TRANSACTION_READ_UNCOMMITTED), which
+//	                     is JT400's JDBC default isolation -- the
+//	                     tx_commit fixture's autocommit-off frame sends
+//	                     exactly `38 0E 00 02`. Any non-*NONE level
+//	                     works here; without one the server stays in
+//	                     *NONE and COMMIT/ROLLBACK return SQL -211
+//	                     errorClass=0x0002 even with a real INSERT
+//	                     pending.
 //	CP 0x3830 = 1     -- LocatorPersistence "scoped to transaction"
 //	                     (matches JT400 default and is required for
 //	                     the file's commitment definition to actually
@@ -104,19 +107,19 @@ func txEnd(conn io.ReadWriter, reqRepID uint16, corr uint32, label string) error
 // JT400's tx_commit fixture sent #8 has the exact byte layout this
 // builds.
 func AutocommitOff(conn io.ReadWriter, corr uint32) error {
-	return setSessionMode(conn, corr, 0xD5, 2 /*CS*/, 1 /*scope=tx*/)
+	return setSessionMode(conn, corr, 0xD5, 2 /*CHG, JT400 JDBC default*/, 1 /*scope=tx*/)
 }
 
 // AutocommitOffWithIsolation is the BeginTx-driven sibling of
 // AutocommitOff: same wire shape (CP 0x3824 + 0x380E + 0x3830) but
 // the commitment level (CP 0x380E) is caller-specified instead of
 // hard-coded to *CS. Pass an `Isolation*` constant
-// (IsolationCommitNone / IsolationReadCommitted / IsolationAllCS /
-// IsolationRepeatableRd / IsolationSerializable). IsolationDefault
+// (IsolationCommitNone / IsolationReadCommitted / IsolationReadUncommitted /
+// IsolationRepeatableRead / IsolationSerializable). IsolationDefault
 // falls back to *CS so a `BeginTx` with `sql.LevelDefault` keeps the
 // historical wire shape.
 func AutocommitOffWithIsolation(conn io.ReadWriter, corr uint32, isolation int16) error {
-	wire := int16(2) // *CS default
+	wire := IsolationReadCommitted // IsolationDefault -> *CS (wire 1), never *NONE
 	if isolation != IsolationDefault {
 		wire = isolation
 	}
