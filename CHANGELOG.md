@@ -11,6 +11,13 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-06-03
+
+v0.7.23 adds two JT400-parity capabilities, both live-validated on
+PUB400 V7R5M0: a generated-keys helper (issue #42) and broader
+result-type decode coverage (issue #39). Issue #42 is closed; #39
+remains open for the outstanding ARRAY element-decode work.
+
 ### Added: Conn.InsertReturning generated-keys helper (issue #42)
 
 A driver-typed `(*db2i.Conn).InsertReturning` (reached via
