@@ -11,6 +11,15 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-06-04
+
+v0.7.24 makes go-db2i auto-discover the host-server ports like JT400:
+before connecting it asks the IBM i server mapper (`as-svrmap`, TCP
+449) for the live as-database / as-signon ports, falling back to the
+historical 8471/8476 (9471/9476 for TLS) defaults on any mapper
+failure. Default-on; opt out with `port-mapper=false`. Live-validated
+on PUB400 V7R5M0.
+
 ### Added: server-mapper (port 449) port resolution, default-on
 
 The driver now resolves the as-database / as-signon ports through the
