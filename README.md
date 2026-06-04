@@ -58,6 +58,7 @@ db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 |----------------------------|----------------------------------|---------|
 | `library`                  | (none)                           | Default schema for unqualified SQL names. Required if the user's job library list doesn't already contain it. |
 | `signon-port`              | 8476 (9476 if `tls=true`)        | as-signon service port. |
+| `port-mapper`              | `true`                           | Resolve the as-database / as-signon ports via the IBM i server mapper (TCP 449), like JT400. Falls back to the configured ports on any mapper failure. An explicit `:PORT` / `signon-port`, or `port-mapper=false`, skips the lookup. |
 | `date`                     | `job`                            | Session date format. One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. |
 | `isolation`                | `none`                           | Session commitment level. One of `none` (`*NONE`), `cs` (`*CS`, read committed), `chg` (`*CHG`, read uncommitted), `all` (`*ALL`, repeatable read), `rr` (`*RR`, serializable). The default `*NONE` matches IBM i Db2's autocommit-permissive baseline. `db.Begin()` flips to `*CS` for the duration of the transaction. |
 | `tls`                      | `false`                          | Wrap both sockets in TLS. When `true`, the default ports flip to 9476 / 9471 (IBM i SSL host server pair). Accepts `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`. Requires the IBM i target to have SSL host server configured via DCM. |
@@ -67,7 +68,7 @@ db2i://USER:PASSWORD@HOST[:DB_PORT]/?key=value&key=value
 The `DB_PORT` segment defaults to 8471 (as-database). Library names
 are upper-cased on parse — IBM i schema lookups are case-insensitive
 but the wire format expects EBCDIC uppercase. The full list of DSN
-keys (31 in total, including LOB threshold, CCSID overrides,
+keys (32 in total, including LOB threshold, CCSID overrides,
 extended-dynamic packaging, naming convention, and diagnostics
 knobs) lives in [`docs/configuration.md`](./docs/configuration.md).
 

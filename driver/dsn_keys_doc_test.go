@@ -37,6 +37,7 @@ var documentedDSNKeys = []string{
 	"package-criteria",
 	"package-error",
 	"package-library",
+	"port-mapper",
 	"query-optimize-goal",
 	"signon-port",
 	"socket-timeout",
@@ -96,6 +97,6 @@ func TestDocumentedDSNKeysMatchParser(t *testing.T) {
 		t.Errorf("documentedDSNKeys list %d key(s) the parser no longer reads: %v -- remove them from the roster and MIGRATING.md", len(missingFromParser), missingFromParser)
 	}
 	if len(parserKeys) != len(documentedDSNKeys) {
-		t.Errorf("parser key count = %d, documented roster count = %d; MIGRATING.md says 'Supported (31 DSN keys)' -- keep all three in sync", len(parserKeys), len(documentedDSNKeys))
+		t.Errorf("parser key count = %d, documented roster count = %d; MIGRATING.md says 'Supported (32 DSN keys)' -- keep all three in sync", len(parserKeys), len(documentedDSNKeys))
 	}
 }
