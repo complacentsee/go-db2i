@@ -14,12 +14,21 @@ PORT defaults to **8471** (as-database) for plaintext, **9471** when
 `tls=true`. The driver opens two sockets per pooled connection: signon
 (8476 / 9476) and database (8471 / 9471).
 
+By default the driver first asks the IBM i **server mapper**
+(`as-svrmap`, TCP **449**) for the live as-database / as-signon ports
+and dials those — matching JT400 — so a target whose host-server ports
+have been remapped just works. On any mapper failure (449 firewalled,
+daemon down) it falls back to the ports above with a one-shot warning,
+caching the result per host. An explicit `:PORT` / `signon-port`, or
+`port-mapper=false`, skips the lookup. See the `port-mapper` row below.
+
 | Key                          | Default      | Notes                                                                 |
 |------------------------------|--------------|-----------------------------------------------------------------------|
 | `library`                    | (none)       | Default schema. Sent via `SET_SQL_ATTRIBUTES` CP `0x380F`. Upper-cased.|
 | `libraries`                  | (none)       | v0.7.11. Comma- or space-separated list of libraries to add to the job's library list at connect. First entry tagged indicator `'C'`, the rest `'L'`. Composes with `library=`: if both are set, `library` is prepended to `libraries` unless already present. Each entry must be 1-10 chars from `[A-Z 0-9 _ # @ $]`. |
 | `naming`                     | `sql`        | v0.7.11. One of `sql` (period-qualified `MYLIB.TABLE`) or `system` (slash-qualified `MYLIB/TABLE`). Maps to CP `0x380C` (NamingConventionParserOption). |
-| `signon-port`                | 8476 / 9476  | Override the as-signon port.                                          |
+| `signon-port`                | 8476 / 9476  | Override the as-signon port. Pins the service: an explicit value skips that service's server-mapper lookup. |
+| `port-mapper`                | `true`       | Resolve as-database / as-signon ports via the IBM i server mapper (`as-svrmap`, TCP 449), like JT400. Plaintext lookup even under TLS (the `-s` service name returns the SSL port). Falls back to the configured/default ports on any failure (one-shot warn, cached per host). Set `false` to dial the configured ports directly. An explicit `:PORT` / `signon-port` pins that service regardless. |
 | `date`                       | `job`        | One of `job`, `iso`, `usa`, `eur`, `jis`, `mdy`, `dmy`, `ymd`. **Scope:** affects (a) how the server renders dates when explicitly cast to string (`CHAR(CURRENT_DATE)`, `VARCHAR_FORMAT`, etc.) and (b) how it parses date string literals in SQL text. **Does NOT affect typed `DATE` columns delivered over the wire** -- those arrive as packed binary and the driver promotes them to `time.Time`, which `Scan(*string)` renders as RFC3339 regardless of this setting. |
 | `time-format`                | `job`        | v0.7.11. One of `job`, `hms`, `usa`, `iso`, `eur`, `jis`. Maps to CP `0x3809` (TimeFormatParserOption). `usa` renders TIME values as 12-hour clock with AM/PM. *Caveat:* the driver's TIME → `time.Time` auto-promotion only understands ISO; for non-ISO values, `Scan` into a `string`. |
 | `date-separator`             | (job)        | v0.7.11. One of `job`, `/`, `-`, `.`, `,`, `space` (or named aliases `slash`/`dash`/`period`/`comma`/`space`). Maps to CP `0x3808` (DateSeparatorParserOption); overrides the date-format-inferred default. |

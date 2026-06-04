@@ -52,8 +52,15 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 		warnInsecureTLS(ctx, log)
 	}
 
+	// Resolve the as-signon / as-database ports via the IBM i server
+	// mapper (TCP 449) unless it's disabled or the port was explicitly
+	// pinned in the DSN. On any mapper failure these fall back to the
+	// configured ports (already TLS-flipped to 9476/9471 when tls=true).
+	signonPort := resolveServicePort(ctx, c.cfg, hostserver.ServerSignon, c.cfg.SignonPort, c.cfg.signonPortPinned, deadline, log)
+	dbPort := resolveServicePort(ctx, c.cfg, hostserver.ServerDatabase, c.cfg.DBPort, c.cfg.dbPortPinned, deadline, log)
+
 	// Sign-on phase: open as-signon, perform encrypted handshake.
-	signon, err := dialHostServer(c.cfg, c.cfg.SignonPort, deadline)
+	signon, err := dialHostServer(c.cfg, signonPort, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("db2i: dial as-signon: %w", err)
 	}
@@ -71,7 +78,7 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 	// Database service phase: separate TCP socket, lives for the
 	// life of the Conn.
-	db, err := dialHostServer(c.cfg, c.cfg.DBPort, deadline)
+	db, err := dialHostServer(c.cfg, dbPort, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("db2i: dial as-database: %w", err)
 	}
@@ -191,8 +198,8 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 	conn.log.LogAttrs(ctx, slog.LevelInfo, "db2i: connected",
 		slog.String("user", c.cfg.User),
-		slog.Int("db_port", c.cfg.DBPort),
-		slog.Int("signon_port", c.cfg.SignonPort),
+		slog.Int("db_port", dbPort),
+		slog.Int("signon_port", signonPort),
 		slog.Bool("tls", c.cfg.TLS),
 		slog.String("library", c.cfg.Library),
 		slog.Bool("extended_dynamic", c.cfg.ExtendedDynamic && conn.pkg != nil),
@@ -1147,4 +1154,87 @@ func tlsServerName(cfg *Config) string {
 		return cfg.TLSServerName
 	}
 	return cfg.Host
+}
+
+// portMapperTimeout bounds the server-mapper (port 449) probe so a
+// firewalled or dead mapper falls back to the default port quickly
+// instead of stalling connect for the full login timeout.
+const portMapperTimeout = 3 * time.Second
+
+// mapperPort is the well-known IBM i server-mapper (as-svrmap) port. A
+// package var rather than a const only so tests can point the resolver
+// at a local fake listener.
+var mapperPort = 449
+
+// portMapKey identifies a cached port resolution. The TLS flag is part
+// of the key because a TLS lookup sends a different service name (the
+// "-s" suffix) and resolves to the SSL port.
+type portMapKey struct {
+	host    string
+	service hostserver.ServerID
+	tls     bool
+}
+
+// portMapCache memoises resolved (and fallen-back) ports for the
+// process lifetime, so a connection pool opening many connections to
+// the same host pays at most one 449 round-trip per service. Mirrors
+// JT400's static per-system port table. One consequence: a transient
+// 449 outage at first connect pins the fallback until process restart.
+var portMapCache sync.Map // portMapKey -> int
+
+// resolveServicePort returns the TCP port to dial for service. With the
+// server mapper enabled and the port not explicitly pinned, it asks the
+// mapper on cfg.Host:449 (plaintext, even under TLS) and caches the
+// result; any failure falls back to fallback with one WARN. With the
+// mapper disabled or the port pinned, it returns fallback unchanged
+// without touching the network.
+func resolveServicePort(ctx context.Context, cfg *Config, service hostserver.ServerID, fallback int, pinned bool, deadline time.Time, log *slog.Logger) int {
+	if !cfg.PortMapper || pinned {
+		return fallback
+	}
+	key := portMapKey{host: cfg.Host, service: service, tls: cfg.TLS}
+	if v, ok := portMapCache.Load(key); ok {
+		return v.(int)
+	}
+	port := lookupServicePort(ctx, cfg, service, fallback, deadline, log)
+	portMapCache.Store(key, port)
+	return port
+}
+
+// lookupServicePort performs a single server-mapper exchange, returning
+// the resolved port or fallback on any error (logging one WARN). The
+// mapper socket is always plaintext, even when cfg.TLS is set; for a
+// TLS connection the "-s" service name resolves to the SSL port. The
+// caller memoises the result, so this runs -- and warns -- at most once
+// per host+service+TLS.
+func lookupServicePort(ctx context.Context, cfg *Config, service hostserver.ServerID, fallback int, deadline time.Time, log *slog.Logger) int {
+	mapperDeadline := time.Now().Add(portMapperTimeout)
+	if !deadline.IsZero() && deadline.Before(mapperDeadline) {
+		mapperDeadline = deadline
+	}
+	addr := fmt.Sprintf("%s:%d", cfg.Host, mapperPort)
+	c, err := dialWithDeadline("tcp", addr, mapperDeadline)
+	if err != nil {
+		warnPortMapper(ctx, log, service, fallback, err)
+		return fallback
+	}
+	defer c.Close()
+	c.SetDeadline(mapperDeadline)
+	port, err := hostserver.ServerMapPort(c, service, cfg.TLS)
+	if err != nil {
+		warnPortMapper(ctx, log, service, fallback, err)
+		return fallback
+	}
+	return port
+}
+
+// warnPortMapper emits the single WARN that the server-mapper lookup
+// failed and the driver is falling back to the configured port.
+func warnPortMapper(ctx context.Context, log *slog.Logger, service hostserver.ServerID, fallback int, err error) {
+	log.LogAttrs(ctx, slog.LevelWarn,
+		"db2i: server mapper (port 449) lookup failed; using fallback port",
+		slog.String("service", service.String()),
+		slog.Int("fallback_port", fallback),
+		slog.String("error", err.Error()),
+	)
 }

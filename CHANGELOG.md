@@ -11,6 +11,40 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+### Added: server-mapper (port 449) port resolution, default-on
+
+The driver now resolves the as-database / as-signon ports through the
+IBM i **server mapper** (`as-svrmap`, job `QZSOSMAPD`, TCP **449**)
+before connecting — the JT400 default — so targets whose host-server
+ports have been remapped off `8471`/`8476` connect without manual port
+configuration. A new `hostserver.ServerMapPort` implements the wire
+exchange (raw-ASCII service-name request; 5-byte reply: `0x2B` `'+'`
+status + big-endian `uint32` port). For TLS the `-s` service name
+(`as-database-s`) returns the SSL port; the mapper socket itself is
+always plaintext.
+
+New DSN key **`port-mapper`** (`Config.PortMapper`, default `true`):
+
+- An explicit `:PORT` (database) or `?signon-port=` (signon) pins that
+  service and skips its lookup; `port-mapper=false` disables the
+  feature entirely and dials the configured ports directly.
+- On any mapper failure (449 firewalled, daemon down, malformed reply)
+  the driver **falls back to the configured/default ports** with a
+  one-shot warning, so existing setups — including those behind a 449
+  firewall — keep working unchanged.
+- Results are cached per process keyed by host + service + TLS, so a
+  connection pool pays at most one 449 round-trip per host (mirroring
+  JT400's static per-system port table). The probe uses a short 3s
+  timeout independent of `login-timeout`.
+
+Brings the recognised DSN-key count to 32.
+
+Live-validated on PUB400 V7R5M0: the real `as-svrmap` daemon returns
+as-signon 8476 / as-database 8471, and the driver connects end-to-end
+on the mapper-resolved ports with `port-mapper` both on and off. The
+TLS `-s` lookup, the 449-unreachable fallback, and remapped-port
+discovery remain covered by the offline tests.
+
 ## [0.7.23] - 2026-06-03
 
 v0.7.23 adds two JT400-parity capabilities, both live-validated on

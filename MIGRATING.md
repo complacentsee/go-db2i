@@ -3,7 +3,7 @@
 This guide maps every [JTOpen JDBC URL property](https://www.ibm.com/docs/en/i/7.5?topic=jdbc-properties)
 to its go-db2i DSN equivalent (or to "not supported, here's why"). It
 is honest about coverage gaps: JT400 ships ~109 connection properties;
-go-db2i exposes 31 (one per recognised DSN key). The rest are either out of scope
+go-db2i exposes 32 (one per recognised DSN key). The rest are either out of scope
 (client-side reroute, BiDi text reordering, JDBC SQL escape extensions)
 or simply haven't been wired through yet.
 
@@ -46,7 +46,8 @@ the *Notes* column says why.
 | `additional authentication factor` | — | Multi-factor at signon is not implemented. |
 | `authentication verification id` | — | Verification ID isn't sent. |
 | `database name` | `library` (closest semantic match) | JT400's "database name" addresses an independent ASP via RDB directory entry; go-db2i connects to the system ASP by default. To use an iASP, run `SETASPGRP` from the server-side trigger / job initialisation programs. |
-| `portnumber` | URL `:PORT` | `db2i://u:p@h:8471/`. SIGNON port lives at `?signon-port=N`. |
+| `portnumber` | URL `:PORT` | `db2i://u:p@h:8471/`. SIGNON port lives at `?signon-port=N`. By default go-db2i resolves both ports via the IBM i server mapper (TCP 449), like JT400 — an explicit `:PORT` / `signon-port` pins that service, or set `?port-mapper=false` to disable the lookup entirely. |
+| (server mapper, port 449) | `port-mapper` (default `true`) | JT400 always consults the server mapper unless ports are pinned; go-db2i matches that by default and falls back to the standard 8471/8476 (9471/9476 for TLS) ports on any mapper failure. |
 | `proxy server` / `secondary URL` | — | No JDBC-toolbox proxy support. |
 
 ### TLS
@@ -175,8 +176,8 @@ only the DSN-knob parity view.
 
 ## Quick reference: what's there + what's not
 
-✅ **Supported** (31 DSN keys): `library`, `libraries`, `naming`,
-`signon-port`, `date`, `time-format`, `date-separator`,
+✅ **Supported** (32 DSN keys): `library`, `libraries`, `naming`,
+`signon-port`, `port-mapper`, `date`, `time-format`, `date-separator`,
 `time-separator`, `decimal-separator`, `isolation`, `lob`,
 `lob-threshold`, `ccsid`, `charset-strict`, `extended-metadata`, `block-size`,
 `query-optimize-goal`, `login-timeout`, `socket-timeout`,

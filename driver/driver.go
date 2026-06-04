@@ -26,6 +26,14 @@
 //	             job library list doesn't already contain the schema.
 //	             Upper-cased on parse.
 //	signon-port  Port for the as-signon service. Default 8476.
+//	port-mapper  true | false (default true). When true, the driver
+//	             asks the IBM i server mapper (as-svrmap, TCP 449) for
+//	             the live as-database / as-signon ports and dials
+//	             those, matching JT400's default. On any mapper failure
+//	             it falls back to the configured/default ports with a
+//	             one-shot warning (cached per host). An explicit :PORT
+//	             or signon-port pins that service and skips the lookup.
+//	             Set false to dial the configured ports directly.
 //	date         Session date format. One of job, iso, usa, eur, jis,
 //	             mdy, dmy, ymd. Default job (uses the job's locale).
 //	isolation    Session commitment level. One of none (*NONE), cs
@@ -79,6 +87,12 @@
 // as-database (8471) for SQL traffic. The signon socket is closed
 // once StartDatabaseService completes; the as-database socket lives
 // for the lifetime of the Conn.
+//
+// Before those dials, unless port-mapper is disabled or the ports are
+// pinned, the driver makes one short plaintext probe to the server
+// mapper (port 449) to discover the live as-signon / as-database ports
+// (see the port-mapper key above). The resolved ports are cached per
+// host, so this probe happens at most once per host for a pool.
 //
 // Authentication uses the IBM i password level the server announces
 // in the random-seed exchange:
@@ -254,9 +268,34 @@ type Config struct {
 	User       string
 	Password   string
 	Host       string
-	DBPort     int    // as-database service (default 8471)
-	SignonPort int    // as-signon service  (default 8476)
-	Library    string // default SQL schema; empty = no override
+	DBPort     int // as-database service (default 8471)
+	SignonPort int // as-signon service  (default 8476)
+
+	// PortMapper enables the IBM i server-mapper (as-svrmap, TCP 449)
+	// port lookup before each connect, matching JT400's default. When
+	// true (the default), the driver asks the mapper for the live
+	// as-database / as-signon ports and dials those; on any mapper
+	// failure (449 firewalled, daemon down, malformed reply) it falls
+	// back to the configured DBPort / SignonPort with a one-shot
+	// warning. The resolved (or fallen-back) port is cached per
+	// process keyed by host+service+TLS, so a connection pool pays at
+	// most one 449 round-trip per host. An explicit :PORT (database)
+	// or signon-port (signon) pins that service and skips its lookup.
+	// Set false via the DSN "port-mapper=false" key, or
+	// programmatically, to dial the configured ports directly.
+	PortMapper bool
+
+	// dbPortPinned / signonPortPinned record whether the user supplied
+	// an explicit port for that service in the DSN (URL :PORT for
+	// database, ?signon-port= for signon). A pinned service skips the
+	// server-mapper lookup even when PortMapper is true, matching
+	// JT400's "an explicitly set port disables the lookup" rule.
+	// Programmatic NewConnector callers that want to pin a port should
+	// set PortMapper=false instead.
+	dbPortPinned     bool
+	signonPortPinned bool
+
+	Library string // default SQL schema; empty = no override
 
 	// Libraries is the full ordered list of libraries to add to the
 	// job's library list at connect time. The first library is tagged
@@ -577,6 +616,11 @@ func DefaultConfig() Config {
 	return Config{
 		DBPort:     8471,
 		SignonPort: 8476,
+		// PortMapper defaults on: resolve as-database / as-signon ports
+		// via the server mapper (TCP 449) like JT400, falling back to
+		// the 8471/8476 (or TLS 9471/9476) defaults above on any mapper
+		// failure. Disable with DSN port-mapper=false.
+		PortMapper: true,
 		DateFormat: hostserver.DateFormatJOB,
 		Isolation:  hostserver.IsolationDefault,
 		// Package-cache defaults: PACKAGE_LIBRARY="QGPL",
@@ -631,6 +675,7 @@ var dsnKeyRoster = []string{
 	"tls-insecure-skip-verify",
 	"tls-server-name",
 	"signon-port",
+	"port-mapper",
 	"library",
 	"libraries",
 	"naming",
@@ -711,6 +756,10 @@ func parseDSN(dsn string) (*Config, error) {
 			return nil, fmt.Errorf("invalid port %d (want 1..65535)", port)
 		}
 		cfg.DBPort = port
+		// An explicit :PORT pins the as-database service: the server-
+		// mapper lookup is skipped for it (JT400's "explicit port
+		// disables the lookup" rule).
+		cfg.dbPortPinned = true
 	}
 
 	q := u.Query()
@@ -847,6 +896,16 @@ func parseDSN(dsn string) (*Config, error) {
 			return nil, fmt.Errorf("invalid signon-port %d (want 1..65535)", port)
 		}
 		cfg.SignonPort = port
+		// An explicit signon-port pins the as-signon service, skipping
+		// its server-mapper lookup.
+		cfg.signonPortPinned = true
+	}
+	if v := q.Get("port-mapper"); v != "" {
+		b, err := parseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port-mapper %q (want true|false): %w", v, err)
+		}
+		cfg.PortMapper = b
 	}
 	if v := q.Get("date"); v != "" {
 		switch strings.ToLower(v) {
