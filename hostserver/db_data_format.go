@@ -224,6 +224,72 @@ func reconcileGraphicBitDataBindShapes(shapes []PreparedParam, values []any, pmf
 	}
 }
 
+// isBinarySQLType reports whether the IBM i SQL type code is a native
+// binary type: BINARY (912/913, fixed-width) or VARBINARY (908/909,
+// 2-byte SL prefix). Both always carry CCSID 65535 ("bit data") and ship
+// raw bytes -- BINARY as a fixed FieldLength-wide field, VARBINARY behind
+// a length prefix like VARCHAR FOR BIT DATA. The encode mirror is
+// encodeRowData cases 908/909 + 912/913; the decode mirror is
+// db_result_data.go cases 912/913 + 908/909.
+func isBinarySQLType(t uint16) bool {
+	switch t {
+	case 908, 909, 912, 913:
+		return true
+	}
+	return false
+}
+
+// reconcileBinaryBindShapes routes a []byte bind into a native BINARY
+// (912/913) or VARBINARY (908/909) column through the native binary
+// encoder so the wire bytes match JT400's describe-driven bind.
+//
+// The database/sql bind path (driver.bindArgsToPreparedParams) maps every
+// []byte to VARCHAR FOR BIT DATA (449, CCSID 65535) -- a shape the server
+// accepts and casts into a binary column, so the value already stores
+// correctly on the cache-miss path. JT400, however, always adopts the
+// column's declared native type from the PREPARE_DESCRIBE parameter-marker
+// format (CP 0x3813) and ships BINARY as a fixed field / VARBINARY behind
+// a 2-byte SL. Adopting that shape here makes encodeRowData take its
+// 912/908 branch and emit the byte-identical wire form, and keeps the
+// cache-miss path consistent with the package-cache fast path (which
+// always recovers the native shape from the *PGM parameter-marker format).
+//
+// Only non-nil []byte IN slots whose PMF type is native binary are
+// rewritten. nil binds (owned by reconcileNullBindShapes), OUT/INOUT
+// slots, and every non-binary target are left untouched. A string bind is
+// deliberately NOT reshaped: the driver maps a string to a real-CCSID
+// VARCHAR the server casts, and JT400's hex-string-into-binary semantics
+// (SQLBinary.set via BinaryConverter.stringToBytes) are intentionally not
+// reproduced -- a []byte is the unambiguous native-binary bind.
+func reconcileBinaryBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
+	if len(pmf) == 0 {
+		return
+	}
+	for i := range shapes {
+		if i >= len(pmf) {
+			break
+		}
+		if _, ok := values[i].([]byte); !ok {
+			continue
+		}
+		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
+			continue
+		}
+		p := pmf[i]
+		if p.CCSID != ccsidBinary || !isBinarySQLType(p.SQLType) {
+			continue
+		}
+		shapes[i] = PreparedParam{
+			SQLType:     p.SQLType,
+			FieldLength: p.FieldLength,
+			Precision:   p.Precision,
+			Scale:       p.Scale,
+			CCSID:       p.CCSID,
+			ParamType:   shapes[i].ParamType,
+		}
+	}
+}
+
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --
 // JTOpen's DBSuperExtendedDataFormat. Layout (per the JTOpen source
 // header comment):

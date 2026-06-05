@@ -11,6 +11,48 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-06-05
+
+v0.7.26 completes the **BINARY / VARBINARY** sub-item of the #40
+describe-driven bind rework: a `[]byte` bound into a native
+`BINARY`/`VARBINARY` column now ships JT400's byte-identical native wire
+shape on both the cache-miss path and the extended-dynamic package-cache
+fast path, instead of silently falling back to the VARCHAR FOR BIT DATA
+shape (which re-PREPAREd every call and defeated the cache for binary
+binds). It also ships the previously-unreleased #39 ARRAY result-type
+documentation. The #40 tracking issue stays open for its DATE/TIME-only
+and OUT-type sub-items. Live-validated on PUB400 V7R5M0.
+
+### Added: native BINARY / VARBINARY parameter binds (issue #40, describe-driven bind)
+
+`encodeRowData` gained native encode branches for **VARBINARY** (908/909 —
+a 2-byte BE length prefix then the raw payload, slot-padded to the field
+width) and **fixed BINARY** (912/913 — the raw payload right-padded with
+`0x00` to the column width), mirroring the existing decode path
+(`db_result_data.go`). A new `reconcileBinaryBindShapes` adopts the
+column's native parameter-marker shape (CP `0x3813`) for any non-nil
+`[]byte` IN slot on both the Exec/IUD and SELECT paths, so the cache-miss
+wire bytes match JT400's describe-driven bind and stay consistent with the
+cache-hit fast path (which recovers the same native shape from the `*PGM`).
+
+An over-length binary value is a **hard error**, matching JT400's default
+behaviour — `SQLBinary`/`SQLVarbinary.set` truncate and
+`AS400JDBCConnection.testDataTruncation` throws a `DataTruncation` on the
+write — rather than silently truncating; this also matches the existing
+VARCHAR/VARGRAPHIC over-length guards. A `string` bind is intentionally
+**not** reshaped (the driver maps it to a real-CCSID VARCHAR the server
+casts; JT400's hex-string-into-binary semantics are not reproduced — a
+`[]byte` is the unambiguous native-binary bind). No `preparedParamsFromCached`
+change was needed: a binary `FieldLength` already normalizes correctly
+(VARBINARY `2+max`, BINARY fixed) via `normalizeSQLDALength`.
+
+Live-validated on PUB400 V7R5M0 (`TestVarbinaryBindCacheHitAgreement`,
+`TestBinaryFixedBindCacheHitAgreement` — the latter also pins the `0x00`
+short-pad and serves as a live probe that the server reports the native
+912/908 type in the parameter-marker format). Offline coverage in
+`hostserver.TestEncodeCachedVarbinary` / `TestEncodeCachedBinaryFixed` /
+`TestEncodeCachedBinaryRejectsTooLong` / `TestReconcileBinaryBindShapes`.
+
 ### Documented: ARRAY is not a result-set column type (closes #39)
 
 Resolved the last open item of the issue #39 result-type decode audit —

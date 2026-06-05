@@ -295,6 +295,15 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	// non-65535-graphic targets and non-[]byte/string binds.
 	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
 
+	// IN-parameter native-binary fixup (issue #40): a []byte bind into a
+	// native BINARY/VARBINARY column defaults to a VARCHAR FOR BIT DATA
+	// shape; the server casts it, so the value stores correctly, but the
+	// wire bytes diverge from JT400 (which adopts the column's native
+	// 912/908 shape). Reshape so encodeRowData ships the byte-identical
+	// native form and the cache-miss path matches the cache-hit fast
+	// path. No-op for non-binary targets and non-[]byte binds.
+	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
+
 	// Stored-procedure OUT / INOUT shape fixup. For each slot whose
 	// caller-supplied PreparedParam.ParamType is 0xF1 (OUT) or 0xF2
 	// (INOUT), substitute the server's declared SQL type / length /
@@ -572,6 +581,16 @@ func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, r
 	// ExecutePreparedSQL runs here -- block-insert and LOB locators
 	// don't compose. Driver-side BatchExec rejects LOB rows.
 	// Intentionally skip the OUT-fixup -- IUD has no OUT params.
+	//
+	// Intentionally skip the bind-shape reconciles (graphic #13, NULL
+	// #11, native-binary #40) too: the batch path keeps the driver's
+	// shapes, so a []byte batches as VARCHAR FOR BIT DATA (449) and the
+	// server casts it into a BINARY/VARBINARY/graphic column. The value
+	// stores correctly -- only the JT400 native-wire-shape parity that
+	// reconcileBinaryBindShapes / reconcileGraphicBitDataBindShapes give
+	// the single-row path is not applied here. Reshaping just one family
+	// would make the batch path inconsistent; native batch shapes are a
+	// separate, uniform change if ever needed.
 
 	// --- 3) CHANGE_DESCRIPTOR. Same per-column shapes, regardless
 	// of row count.

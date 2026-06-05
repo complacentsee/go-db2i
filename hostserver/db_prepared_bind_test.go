@@ -3,6 +3,7 @@ package hostserver
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"strconv"
 	"testing"
 )
@@ -128,6 +129,138 @@ func TestEncodeVarcharCCSIDTagMatchesBytes(t *testing.T) {
 			wantPayload := append([]byte{0x00, byte(len(wantBytes))}, wantBytes...)
 			if !bytes.HasSuffix(data, wantPayload) {
 				t.Fatalf("ccsid=%d payload mismatch: got % X, want suffix % X", ccsid, data, wantPayload)
+			}
+		})
+	}
+}
+
+// cachedRowData slices the data region (after the 20-byte header and the
+// single 2-byte indicator) out of a one-row, one-param CP 0x381F payload.
+func cachedRowData(t *testing.T, payload []byte, fieldLength int) []byte {
+	t.Helper()
+	const dataOff = 20 + 2 // header + one indicator
+	if len(payload) < dataOff+fieldLength {
+		t.Fatalf("payload too short: %d bytes, need >= %d", len(payload), dataOff+fieldLength)
+	}
+	return payload[dataOff : dataOff+fieldLength]
+}
+
+// TestEncodeCachedVarbinary pins the native VARBINARY (908) bind shape: a
+// 2-byte BE actual-length prefix, the raw payload, then 0x00 slot-padding
+// out to FieldLength-2. This is the wire shape reconcileBinaryBindShapes
+// and the package-cache fast path deliver for a []byte into a native
+// VARBINARY column (issue #40). Mirror of db_result_data.go case 908/909.
+func TestEncodeCachedVarbinary(t *testing.T) {
+	t.Run("exact", func(t *testing.T) {
+		payload := []byte{0x11, 0x22, 0x33, 0x44}
+		params := []PreparedParam{{
+			SQLType:     908,
+			FieldLength: uint32(len(payload)) + 2,
+			CCSID:       65535,
+		}}
+		got, err := EncodeDBExtendedData(params, []any{payload})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0x00, 0x04, 0x11, 0x22, 0x33, 0x44}
+		if data := cachedRowData(t, got, 6); !bytes.Equal(data, want) {
+			t.Fatalf("varbinary data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+	t.Run("short_slot_padded", func(t *testing.T) {
+		// VARBINARY(8) carrying a 4-byte value: SL=4 + payload + 4 zero pad.
+		params := []PreparedParam{{SQLType: 908, FieldLength: 10, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{0x11, 0x22, 0x33, 0x44}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0x00, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x00}
+		if data := cachedRowData(t, got, 10); !bytes.Equal(data, want) {
+			t.Fatalf("varbinary short data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		// VARBINARY(4) carrying a 0-byte value: SL=0 + 4 zero pad.
+		params := []PreparedParam{{SQLType: 908, FieldLength: 6, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		if data := cachedRowData(t, got, 6); !bytes.Equal(data, want) {
+			t.Fatalf("varbinary empty data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+}
+
+// TestEncodeCachedBinaryFixed pins the native BINARY (912) bind shape: NO
+// SL prefix, the raw payload, then 0x00 right-padding to exactly
+// FieldLength. JT400's SQLBinary.set zero-pads a short value; the read
+// mirror (db_result_data.go case 912/913) reads back exactly col.Length
+// bytes (issue #40).
+func TestEncodeCachedBinaryFixed(t *testing.T) {
+	t.Run("short_zero_padded", func(t *testing.T) {
+		// BINARY(8) carrying a 2-byte value: payload + 6 zero pad.
+		params := []PreparedParam{{SQLType: 912, FieldLength: 8, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{0xAA, 0xBB}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0xAA, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		if data := cachedRowData(t, got, 8); !bytes.Equal(data, want) {
+			t.Fatalf("binary short data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+	t.Run("exact_verbatim", func(t *testing.T) {
+		params := []PreparedParam{{SQLType: 912, FieldLength: 4, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{0xDE, 0xAD, 0xBE, 0xEF}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+		if data := cachedRowData(t, got, 4); !bytes.Equal(data, want) {
+			t.Fatalf("binary exact data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+	t.Run("empty_all_zero", func(t *testing.T) {
+		// BINARY(4) carrying a 0-byte value: a full-width 0x00 field.
+		params := []PreparedParam{{SQLType: 912, FieldLength: 4, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		want := []byte{0x00, 0x00, 0x00, 0x00}
+		if data := cachedRowData(t, got, 4); !bytes.Equal(data, want) {
+			t.Fatalf("binary empty data:\n got=% X\nwant=% X", data, want)
+		}
+	})
+}
+
+// TestEncodeCachedBinaryRejectsTooLong confirms an over-length binary bind
+// is a HARD error, NOT a recoverable ErrUnsupportedCachedParamType
+// fallback. This matches JT400 (which throws DataTruncation by default for
+// an over-length binary write) and the VARCHAR/VARGRAPHIC over-length
+// guards in encodeRowData. Wrapping ErrUnsupportedCachedParamType would
+// wrongly route the value to the VARCHAR FOR BIT DATA fallback, which has
+// no safe handling for a value that exceeds the column width.
+func TestEncodeCachedBinaryRejectsTooLong(t *testing.T) {
+	cases := []struct {
+		name        string
+		sqlType     uint16
+		fieldLength uint32
+	}{
+		{"binary_fixed", 912, 2}, // BINARY(2)
+		{"varbinary", 908, 4},    // VARBINARY(2): FieldLength = 2 + 2
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := []PreparedParam{{SQLType: tc.sqlType, FieldLength: tc.fieldLength, CCSID: 65535}}
+			_, err := EncodeDBExtendedData(params, []any{[]byte{0x01, 0x02, 0x03}})
+			if err == nil {
+				t.Fatal("expected error for over-length binary, got nil")
+			}
+			if errors.Is(err, ErrUnsupportedCachedParamType) {
+				t.Errorf("error must NOT wrap ErrUnsupportedCachedParamType (no fallback for over-length): %v", err)
 			}
 		})
 	}
