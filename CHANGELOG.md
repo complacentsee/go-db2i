@@ -11,6 +11,30 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+### Documented: ARRAY is not a result-set column type (closes #39)
+
+Resolved the last open item of the issue #39 result-type decode audit —
+full ARRAY element decode — as a **documented non-gap**. DB2 for i never
+delivers an array as a result-set column: a SELECT that projects an
+array (`VALUES ARRAY[..]`, an `ARRAY_AGG` result column,
+`CAST(.. AS .. ARRAY)`) is rejected by the server at PREPARE/DESCRIBE
+with **SQL-20441 / SQLSTATE 428H2** ("array type not allowed in this
+context") before any row data exists, so an array SQL type can never
+reach `decodeColumn` over a SELECT. An array only crosses the
+host-server wire as a stored-procedure array **parameter**: described in
+the parameter-marker format (CP `0x3813`) with the *element* type plus
+an array flag bit (record offset +21, `(flag>>30)&1`), and carried as
+reply CP `0x3901` (`DBVariableData`) — a separate, unimplemented feature
+(array-UDT describe/bind), not a result-column decode gap.
+
+The typed `hostserver.UnsupportedResultTypeError` remains as a defensive
+backstop on the decode path; no production decode behaviour changed.
+This was established by live capture on PUB400 V7R5M0 plus an adversarial
+review of the JTOpen/JT400 source. Evidence is pinned by a byte-exact
+offline test (`hostserver.TestArrayCrossesWireAsParameterNotResultColumn`,
+fixture `testdata/array_param_describe_3813.bin`) and a live conformance
+subtest (`TestResultTypeCoverage/ARRAY_not_a_result_column`).
+
 ## [0.7.24] - 2026-06-04
 
 v0.7.24 makes go-db2i auto-discover the host-server ports like JT400:
