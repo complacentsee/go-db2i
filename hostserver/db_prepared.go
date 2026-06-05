@@ -518,6 +518,53 @@ func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any
 				}
 			}
 			dataOff += int(p.FieldLength)
+		case 908, 909: // VARBINARY (NN, nullable)
+			// VARBINARY shares the VARCHAR FOR BIT DATA wire shape
+			// (449 + CCSID 65535): a 2-byte BE actual-length prefix,
+			// then the raw payload, slot-padded to FieldLength. The
+			// describe-driven funnel (reconcileBinaryBindShapes) and the
+			// package-cache fast path both deliver a native 908 shape
+			// here; the driver's plain []byte bind defaults to 449
+			// instead, so this branch is reached only once a PMF / *PGM
+			// parameter-marker format has confirmed the column is native
+			// VARBINARY. Read mirror: db_result_data.go case 908/909.
+			bv, err := toBytes(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			maxBytes := int(p.FieldLength) - 2
+			if len(bv) > maxBytes {
+				// JT400 throws DataTruncation by default for an
+				// over-length binary write (SQLVarbinary.set truncates +
+				// connection.testDataTruncation throws); we surface a hard
+				// error rather than silently truncate, consistent with the
+				// VARCHAR / VARGRAPHIC arms above. NOT wrapped in
+				// ErrUnsupportedCachedParamType: there is no safe cache-hit
+				// fallback for an over-length value.
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varbinary value too long (%d bytes, max %d)", i, len(bv), maxBytes)
+			}
+			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(bv)))
+			copy(buf[dataOff+2:dataOff+2+len(bv)], bv)
+			// Remaining bytes left zero (server reads SL).
+			dataOff += int(p.FieldLength)
+		case 912, 913: // BINARY (fixed-length) -- NN, nullable
+			// Fixed-width binary: NO SL prefix. Write the payload then
+			// right-pad with 0x00 to exactly FieldLength -- JT400's
+			// SQLBinary.set zero-pads a short value to the column width,
+			// and the read mirror (db_result_data.go case 912/913) reads
+			// back exactly col.Length bytes. buf is zero-initialised, so
+			// the pad needs no explicit write. An over-long value is a
+			// hard error (same JT400-match rationale as VARBINARY above).
+			bv, err := toBytes(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			if len(bv) > int(p.FieldLength) {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: binary value too long (%d bytes, max %d)", i, len(bv), p.FieldLength)
+			}
+			copy(buf[dataOff:dataOff+len(bv)], bv)
+			// Remaining bytes left zero (0x00 pad to FieldLength).
+			dataOff += int(p.FieldLength)
 		default:
 			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
 		}
@@ -575,8 +622,9 @@ func encodeGraphicPayload(ccsid uint16, v any) ([]byte, error) {
 // encodeRowData short-circuits a nil value before its SQL-type switch
 // -- it writes the 0xFFFF indicator and advances FieldLength bytes
 // without invoking any type-specific encoder -- so the substituted
-// SQLType never needs a matching encoder branch (native BINARY has
-// none, and needs none for a NULL).
+// SQLType's encoder branch, if any, is never invoked for a NULL
+// (native binary now has one, used only for non-nil values via
+// reconcileBinaryBindShapes).
 //
 // Only IN slots are touched: LOB slots (already rewritten to the
 // locator shape, with the NULL-LOB indicator handled, by
@@ -814,6 +862,12 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	// non-65535-graphic targets and non-[]byte/string binds. Mirrors the
 	// Exec/IUD path so SELECT/Query predicates get the same fixup.
 	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
+
+	// IN-parameter native-binary fixup (issue #40): adopt the column's
+	// native BINARY/VARBINARY shape for a []byte predicate so it ships
+	// JT400's byte-identical native form rather than VARCHAR FOR BIT DATA.
+	// Mirrors the Exec/IUD path. No-op for non-binary targets / non-[]byte.
+	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
 
 	// IN-parameter NULL fixup (issue #11): adopt the column's declared
 	// shape for any nil bind so a NULL predicate against a native
