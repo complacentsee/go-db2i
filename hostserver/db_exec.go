@@ -330,21 +330,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	// declared signature, so it sends a placeholder shape (e.g.
 	// VARCHAR(2000) for *string OUT). The fixup brings the descriptor
 	// in line with what the server expects.
-	expectOutput := false
-	for i := range paramShapes {
-		switch paramShapes[i].ParamType {
-		case 0xF1, 0xF2:
-			expectOutput = true
-			if i < len(pmf) {
-				p := pmf[i]
-				paramShapes[i].SQLType = p.SQLType
-				paramShapes[i].FieldLength = p.FieldLength
-				paramShapes[i].Precision = p.Precision
-				paramShapes[i].Scale = p.Scale
-				paramShapes[i].CCSID = p.CCSID
-			}
-		}
-	}
+	expectOutput := reconcileOutInoutBindShapes(paramShapes, pmf)
 
 	// IN-parameter NULL fixup: a nil bind defaults to the INTEGER-NULL
 	// marker shape, which the server cannot cast to a native

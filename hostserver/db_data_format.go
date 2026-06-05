@@ -368,6 +368,44 @@ func reconcileDateTimeBindShapes(shapes []PreparedParam, values []any, pmf []Par
 	}
 }
 
+// reconcileOutInoutBindShapes substitutes the server's declared parameter-
+// marker shape (SQLType / FieldLength / Precision / Scale / CCSID, from the
+// PREPARE_DESCRIBE CP 0x3813 PMF) for each stored-procedure OUT (0xF1) / INOUT
+// (0xF2) slot. The driver's bind path cannot know the proc's declared
+// signature, so it ships a placeholder shape (e.g. VARCHAR(2000) for a *string
+// OUT); this brings the descriptor in line with what the server expects.
+//
+// It returns expectOutput=true when any slot is OUT/INOUT so the caller can OR
+// ORSResultData into the EXECUTE ORS bitmap and the server ships the CP 0x380E
+// synthetic single-row data block carrying the OUT values (JT400's
+// AS400JDBCPreparedStatementImpl commonExecuteAfter -> reply.getResultData()).
+// Without that bit the OUT values are silently dropped. The flag flips for
+// every OUT/INOUT slot, even one past the end of the PMF whose shape is left as
+// the placeholder.
+//
+// Unlike the IN-side reconciles (which rebuild the whole PreparedParam), this
+// mutates in place, preserving the slot's Value and DateFormat, and copies the
+// PMF Precision/Scale verbatim so a DECIMAL OUT carries the proc's real
+// precision/scale. It was extracted verbatim from the inline loop that used to
+// live in ExecutePreparedSQL.
+func reconcileOutInoutBindShapes(shapes []PreparedParam, pmf []ParameterMarkerField) (expectOutput bool) {
+	for i := range shapes {
+		switch shapes[i].ParamType {
+		case 0xF1, 0xF2:
+			expectOutput = true
+			if i < len(pmf) {
+				p := pmf[i]
+				shapes[i].SQLType = p.SQLType
+				shapes[i].FieldLength = p.FieldLength
+				shapes[i].Precision = p.Precision
+				shapes[i].Scale = p.Scale
+				shapes[i].CCSID = p.CCSID
+			}
+		}
+	}
+	return expectOutput
+}
+
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --
 // JTOpen's DBSuperExtendedDataFormat. Layout (per the JTOpen source
 // header comment):
