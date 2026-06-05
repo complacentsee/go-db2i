@@ -148,3 +148,73 @@ func TestExactDecimalCacheHitAgreement(t *testing.T) {
 	}
 	decEqual(t, hitExact, miss)
 }
+
+// TestDecimalOverScaleRoundDownCacheHitAgreement pins the v0.7.29 ROUND_DOWN
+// fix end to end. An over-scale decimal (more fractional digits than the column
+// scale) bound on the cache-hit fast path is now truncated toward zero in place
+// by the native packed-BCD encoder -- matching the server's VARCHAR assignment
+// cast on cache-miss and JT400's BigDecimal.setScale(scale, ROUND_DOWN). Before
+// the fix the over-scale value wrapped ErrUnsupportedCachedParamType and fell
+// back off the fast path to a fresh PREPARE, so the expectCacheHit assertion
+// below is what distinguishes the fixed behavior (stays cached, same stored
+// value) from the old one.
+func TestDecimalOverScaleRoundDownCacheHitAgreement(t *testing.T) {
+	requireFiling(t)
+
+	// Reset the shared *PGM so a prior run's filing doesn't mask the
+	// fill->cache-hit transition under test.
+	wipeDB := openDB(t)
+	wipePackage(t, wipeDB, cachePackageName)
+	wipeDB.Close()
+
+	db, _ := openDBWithPackageCache(t, "")
+	tbl := makeCacheTestTable(t, db, "xdos", "(id INTEGER NOT NULL, v DECIMAL(15,2))")
+	insertSQL := "INSERT INTO " + tbl + " (id, v) VALUES (?, ?)"
+
+	// Cache-miss control: the over-scale value ships as VARCHAR and the server
+	// truncates it to scale 2. Capture the stored form as the reference.
+	const overScale = "12.3456" // 4 fractional digits into scale 2 -> 12.34
+	if _, err := db.Exec(insertSQL, 1, liveDecimal{overScale}); err != nil {
+		t.Fatalf("cache-miss INSERT: %v", err)
+	}
+	var miss string
+	if err := db.QueryRow("SELECT v FROM "+tbl+" WHERE id = ?", 1).Scan(&miss); err != nil {
+		t.Fatalf("cache-miss read-back: %v", err)
+	}
+	decEqual(t, miss, "12.34")
+
+	// File the INSERT across the 3-PREPARE threshold, then bind the same
+	// over-scale value on a fresh cache-enabled connection.
+	fillPackageCache(t, fillExec, insertSQL, 900, liveDecimal{overScale})
+	db.Close()
+
+	db2, buf := openDBWithPackageCache(t, "")
+	defer db2.Close()
+	if _, err := db2.Exec(insertSQL, 2, liveDecimal{overScale}); err != nil {
+		t.Fatalf("cache-hit over-scale INSERT: %v", err)
+	}
+	// The discriminating assertion: pre-fix the over-scale bind fell back to
+	// PREPARE (no cache-hit line); post-fix it stays on the fast path.
+	expectCacheHit(t, buf, cacheHitExecMsg)
+
+	var hit string
+	if err := db2.QueryRow("SELECT v FROM "+tbl+" WHERE id = ?", 2).Scan(&hit); err != nil {
+		t.Fatalf("cache-hit read-back: %v", err)
+	}
+	decEqual(t, hit, miss)
+
+	// A negative over-scale value that truncates to all-zero digits must be
+	// accepted by the server and stored as a clean zero (the packed sign nibble
+	// is normalized to positive). Reset the probe buffer so the cache-hit
+	// assertion reflects only this dispatch.
+	buf.Reset()
+	if _, err := db2.Exec(insertSQL, 3, liveDecimal{"-0.009"}); err != nil {
+		t.Fatalf("cache-hit negative-zero INSERT: %v", err)
+	}
+	expectCacheHit(t, buf, cacheHitExecMsg)
+	var negZero string
+	if err := db2.QueryRow("SELECT v FROM "+tbl+" WHERE id = ?", 3).Scan(&negZero); err != nil {
+		t.Fatalf("cache-hit negative-zero read-back: %v", err)
+	}
+	decEqual(t, negZero, "0.00")
+}

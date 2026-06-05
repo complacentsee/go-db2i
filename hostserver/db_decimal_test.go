@@ -89,8 +89,10 @@ func TestZonedBCDRoundTrip(t *testing.T) {
 }
 
 // TestPackedBCDRejectsOverflow makes sure we surface an explicit
-// error when a caller hands us a value that doesn't fit the column
-// shape, rather than silently truncating.
+// error when a caller hands us a value whose integer magnitude won't
+// fit the column shape, or whose text isn't a valid decimal. An
+// over-scale fractional part is NOT an error -- it is truncated toward
+// zero (ROUND_DOWN); see TestEncodeBCDTruncatesOverScale.
 func TestPackedBCDRejectsOverflow(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -99,7 +101,6 @@ func TestPackedBCDRejectsOverflow(t *testing.T) {
 		value     string
 	}{
 		{name: "int_too_big", precision: 5, scale: 2, value: "9999.99"}, // 4 int digits > 3 allowed
-		{name: "frac_too_long", precision: 5, scale: 2, value: "1.234"}, // 3 frac digits > 2 allowed
 		{name: "non_digit", precision: 5, scale: 2, value: "12a.34"},    // bad char
 	}
 	for _, tc := range cases {
@@ -237,5 +238,91 @@ func fieldLenFor(sqlType uint16, precision int) uint32 {
 		return uint32((precision + 1 + 1) / 2)
 	default: // 488, 489 zoned
 		return uint32(precision)
+	}
+}
+
+// TestEncodeBCDTruncatesOverScale pins the v0.7.29 ROUND_DOWN fix: a decimal
+// with more fractional digits than the column scale is truncated toward zero
+// in place -- matching JT400's BigDecimal.setScale(scale, ROUND_DOWN) in
+// SQLDecimal/SQLNumeric.set and the server's VARCHAR assignment cast -- instead
+// of erroring. This keeps an over-scale bind on the cache-hit (and INOUT) fast
+// path, where the native packed/zoned BCD encoders run, storing the same value
+// the cache-miss VARCHAR path produces. The "half_not_rounded_up" row proves
+// the cut is ROUND_DOWN (truncate), not ROUND_HALF_UP.
+func TestEncodeBCDTruncatesOverScale(t *testing.T) {
+	cases := []struct {
+		name      string
+		precision int
+		scale     int
+		value     string
+		want      string // decoded round-trip form after ROUND_DOWN
+	}{
+		{name: "drop_two_frac", precision: 10, scale: 2, value: "1.2345", want: "1.23"},
+		{name: "drop_to_zero_scale", precision: 7, scale: 0, value: "1234.999", want: "1234"},
+		{name: "negative_truncates", precision: 5, scale: 2, value: "-12.349", want: "-12.34"},
+		{name: "exact_scale_unchanged", precision: 5, scale: 2, value: "12.34", want: "12.34"},
+		{name: "half_not_rounded_up", precision: 5, scale: 1, value: "9.95", want: "9.9"},
+	}
+	for _, tc := range cases {
+		t.Run("packed/"+tc.name, func(t *testing.T) {
+			packed, err := encodePackedBCD(tc.value, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("encodePackedBCD(%q, %d, %d): %v", tc.value, tc.precision, tc.scale, err)
+			}
+			got, err := decodePackedBCD(packed, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("decodePackedBCD: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("encodePackedBCD(%q)->decode = %q, want %q (packed = %X)", tc.value, got, tc.want, packed)
+			}
+		})
+		t.Run("zoned/"+tc.name, func(t *testing.T) {
+			zoned, err := encodeZonedBCD(tc.value, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("encodeZonedBCD(%q, %d, %d): %v", tc.value, tc.precision, tc.scale, err)
+			}
+			got, err := decodeZonedBCD(zoned, tc.precision, tc.scale)
+			if err != nil {
+				t.Fatalf("decodeZonedBCD: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("encodeZonedBCD(%q)->decode = %q, want %q (zoned = %X)", tc.value, got, tc.want, zoned)
+			}
+		})
+	}
+}
+
+// TestEncodeBCDNegativeZeroNormalized pins the sign-nibble normalization: a
+// negative value that ROUND_DOWN-truncates to all-zero digits (e.g. -0.009 into
+// scale 2) must pack a POSITIVE sign nibble (packed low nibble 0xC; zoned last-
+// byte high nibble 0xF), matching BigDecimal/JT400's signum-0 treatment of
+// negative zero. Without normalization the encoders would emit a spurious
+// negative zero (0xD) that diverges from JT400's wire bytes.
+func TestEncodeBCDNegativeZeroNormalized(t *testing.T) {
+	const (
+		precision = 5
+		scale     = 2
+	)
+	packed, err := encodePackedBCD("-0.009", precision, scale)
+	if err != nil {
+		t.Fatalf("encodePackedBCD: %v", err)
+	}
+	if sign := packed[len(packed)-1] & 0x0F; sign != 0x0C {
+		t.Errorf("packed negative zero sign nibble = 0x%X, want 0x0C (positive); bytes = %X", sign, packed)
+	}
+	if got, err := decodePackedBCD(packed, precision, scale); err != nil || got != "0.00" {
+		t.Errorf("decodePackedBCD(-0.009) = %q, %v; want %q", got, err, "0.00")
+	}
+
+	zoned, err := encodeZonedBCD("-0.009", precision, scale)
+	if err != nil {
+		t.Fatalf("encodeZonedBCD: %v", err)
+	}
+	if zone := zoned[len(zoned)-1] >> 4; zone != 0x0F {
+		t.Errorf("zoned negative zero sign nibble = 0x%X, want 0x0F (positive); bytes = %X", zone, zoned)
+	}
+	if got, err := decodeZonedBCD(zoned, precision, scale); err != nil || got != "0.00" {
+		t.Errorf("decodeZonedBCD(-0.009) = %q, %v; want %q", got, err, "0.00")
 	}
 }

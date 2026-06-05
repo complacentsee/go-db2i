@@ -1529,10 +1529,26 @@ func encodeTimestampString(s string, fieldLen int) (string, error) {
 	return string(out), nil
 }
 
+// allZeroDigits reports whether every byte of s is the ASCII digit '0'.
+// A decimal that truncates (ROUND_DOWN) to all zeros has signum 0, so its
+// packed/zoned sign nibble must be positive (0xC, not 0xD): BigDecimal and
+// JT400 normalize negative zero to a non-negative zero, and so must we to
+// stay byte-equal on the cache-hit and INOUT BCD paths.
+func allZeroDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' {
+			return false
+		}
+	}
+	return true
+}
+
 // encodeZonedBCD turns a decimal string into IBM zoned BCD bytes
 // for a NUMERIC(precision, scale) column. One byte per digit; high
 // nibble is 0xF (zone) for plain digits and 0xC/0xD on the last
-// byte for sign. Returns precision bytes.
+// byte for sign. Returns precision bytes. Over-scale fractional
+// digits are truncated toward zero (ROUND_DOWN); an over-wide
+// integer part is rejected as magnitude overflow.
 func encodeZonedBCD(s string, precision, scale int) ([]byte, error) {
 	negative := false
 	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
@@ -1557,8 +1573,12 @@ func encodeZonedBCD(s string, precision, scale int) ([]byte, error) {
 	for len(intPart) > 1 && intPart[0] == '0' {
 		intPart = intPart[1:]
 	}
+	// Over-scale fractional digits are truncated toward zero (ROUND_DOWN),
+	// matching SQLNumeric.set's BigDecimal.setScale(scale, ROUND_DOWN) and the
+	// server's VARCHAR cache-miss assignment cast, so the cache-hit/INOUT BCD
+	// path and the cache-miss path store the same value. Under-scale pads.
 	if len(fracPart) > scale {
-		return nil, fmt.Errorf("fractional digit count %d exceeds scale %d", len(fracPart), scale)
+		fracPart = fracPart[:scale]
 	}
 	for len(fracPart) < scale {
 		fracPart += "0"
@@ -1571,6 +1591,7 @@ func encodeZonedBCD(s string, precision, scale int) ([]byte, error) {
 		intPart = "0" + intPart
 	}
 	digits := intPart + fracPart // exactly `precision` digits
+	negative = negative && !allZeroDigits(digits)
 
 	out := make([]byte, precision)
 	for i := 0; i < precision; i++ {
@@ -1587,8 +1608,10 @@ func encodeZonedBCD(s string, precision, scale int) ([]byte, error) {
 // returned byte count is ceil((precision+1)/2). Sign nibble in the
 // final low nibble: 0xC = positive, 0xD = negative.
 //
-// Rejects values whose integer or fractional digit counts exceed
-// the column declaration; trims a leading '+' for symmetry.
+// Over-scale fractional digits are truncated toward zero (ROUND_DOWN,
+// matching JT400 and the server's assignment cast); an integer part
+// that exceeds precision-scale is rejected as magnitude overflow.
+// Trims a leading '+' for symmetry.
 func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
 	negative := false
 	if len(s) > 0 && (s[0] == '+' || s[0] == '-') {
@@ -1615,9 +1638,11 @@ func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
 	for len(intPart) > 1 && intPart[0] == '0' {
 		intPart = intPart[1:]
 	}
-	// Right-pad fractional part with zeros to scale; reject overflow.
+	// Over-scale fractional digits are truncated toward zero (ROUND_DOWN),
+	// matching SQLDecimal.set's BigDecimal.setScale(scale, ROUND_DOWN) and the
+	// server's VARCHAR cache-miss assignment cast; under-scale is right-padded.
 	if len(fracPart) > scale {
-		return nil, fmt.Errorf("fractional digit count %d exceeds scale %d", len(fracPart), scale)
+		fracPart = fracPart[:scale]
 	}
 	for len(fracPart) < scale {
 		fracPart += "0"
@@ -1632,6 +1657,7 @@ func encodePackedBCD(s string, precision, scale int) ([]byte, error) {
 		intPart = "0" + intPart
 	}
 	digits := intPart + fracPart // exactly `precision` digits
+	negative = negative && !allZeroDigits(digits)
 
 	// Pack: precision digits + 1 sign nibble = precision+1 nibbles.
 	totalNibbles := precision + 1
