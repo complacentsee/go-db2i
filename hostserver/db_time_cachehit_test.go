@@ -30,8 +30,10 @@ func TestTimeBindReshapeForDateTimeCacheHit(t *testing.T) {
 	}{
 		{"DATE NN", 384, 10, "2026-05-07"},
 		{"DATE nullable", 385, 10, "2026-05-07"},
-		{"TIME NN", 388, 8, "14:23:45"},
-		{"TIME nullable", 389, 8, "14:23:45"},
+		// TIME wire uses JT400's period separator "HH.MM.SS" (issue #40;
+		// encodeTimeString matches SQLTime.convertToRawBytes byte-for-byte).
+		{"TIME NN", 388, 8, "14.23.45"},
+		{"TIME nullable", 389, 8, "14.23.45"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

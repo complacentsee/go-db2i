@@ -290,6 +290,84 @@ func reconcileBinaryBindShapes(shapes []PreparedParam, values []any, pmf []Param
 	}
 }
 
+// isDateTimeSQLType reports whether the IBM i SQL type code is a native
+// DATE (384/385) or TIME (388/389). Both are fixed-width EBCDIC strings with
+// no length prefix -- DATE 10 bytes (ISO "YYYY-MM-DD"), TIME 8 bytes
+// ("HH.MM.SS"). The encode mirror is encodeRowData cases 384/385 + 388/389.
+// (TIMESTAMP 392/393 is deliberately excluded: a time.Time bound into a
+// TIMESTAMP column already has the right shape and needs no reconcile.)
+func isDateTimeSQLType(t uint16) bool {
+	switch t {
+	case 384, 385, 388, 389:
+		return true
+	}
+	return false
+}
+
+// reconcileDateTimeBindShapes routes a time.Time bind into a native DATE
+// (384/385) or TIME (388/389) column through the native temporal encoder so
+// the wire bytes match JT400's describe-driven bind.
+//
+// The driver (driver.bindArgsToPreparedParams) binds every time.Time as
+// TIMESTAMP (393): it formats the value to the 26-char IBM string
+// "YYYY-MM-DD-HH.MM.SS.ffffff", and the server casts that into a DATE/TIME
+// column, so the value already stores correctly on the cache-miss path.
+// JT400, however, adopts the column's declared native type from the
+// PREPARE_DESCRIBE parameter-marker format (CP 0x3813) and ships DATE as a
+// 10-byte ISO field / TIME as an 8-byte "HH.MM.SS" field. Adopting that shape
+// here makes encodeRowData take its 384/388 branch, where the reshape helpers
+// slice the 26-char value down to the column width -- emitting the
+// byte-identical native form and keeping the cache-miss path consistent with
+// the package-cache fast path (which recovers the same native shape from the
+// *PGM).
+//
+// The driver has already formatted the time.Time to a string by the time we
+// see it, so a time.Time bind and a user string bind both arrive as a Go
+// string. They are disambiguated by the driver's chosen shape: only a
+// time.Time bind arrives as TIMESTAMP (392/393). A user string bound into a
+// DATE/TIME column keeps its VARCHAR (449) shape and the server cast -- it is
+// deliberately NOT reshaped, mirroring reconcileBinaryBindShapes leaving
+// string binds alone. nil binds (reconcileNullBindShapes) and OUT/INOUT slots
+// are skipped. DateFormat is left 0: JT400's SQLDate/SQLTime
+// convertToRawBytes always write ISO regardless of the negotiated session
+// format, which is exactly what the FieldLength-driven length-only encode
+// (encodeDateForParam / encodeTimeString) produces.
+func reconcileDateTimeBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
+	if len(pmf) == 0 {
+		return
+	}
+	for i := range shapes {
+		if i >= len(pmf) {
+			break
+		}
+		// Only the driver's time.Time bind arrives as TIMESTAMP; a user
+		// string bind is VARCHAR (449) and stays on the server-cast path.
+		if shapes[i].SQLType != 392 && shapes[i].SQLType != 393 {
+			continue
+		}
+		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
+			continue
+		}
+		if !isDateTimeSQLType(pmf[i].SQLType) {
+			continue
+		}
+		p := pmf[i]
+		shapes[i] = PreparedParam{
+			SQLType:     p.SQLType,
+			FieldLength: p.FieldLength,
+			CCSID:       p.CCSID,
+			ParamType:   shapes[i].ParamType,
+			// Precision/Scale left 0: the DATE/TIME encode arms ignore them
+			// (SQL type + FieldLength fully determine the temporal wire form),
+			// and the cache-hit path (preparedParamsFromCached) zeroes
+			// Precision/Scale for every non-decimal type. Forcing 0 here keeps
+			// the cache-miss CP 0x381E descriptor byte-identical to the
+			// cache-hit one rather than echoing a possibly-nonzero server-PMF
+			// precision word.
+		}
+	}
+}
+
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --
 // JTOpen's DBSuperExtendedDataFormat. Layout (per the JTOpen source
 // header comment):

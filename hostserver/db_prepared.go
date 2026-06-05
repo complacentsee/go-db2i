@@ -869,6 +869,12 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 	// Mirrors the Exec/IUD path. No-op for non-binary targets / non-[]byte.
 	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
 
+	// IN-parameter native-temporal fixup (issue #40): adopt the column's
+	// native DATE/TIME shape (384/388) for a time.Time predicate so it ships
+	// JT400's byte-identical native form rather than a 26-char TIMESTAMP.
+	// Mirrors the Exec/IUD path. No-op for non-DATE/TIME targets / non-time.Time.
+	reconcileDateTimeBindShapes(paramShapes, paramValues, pmf)
+
 	// IN-parameter NULL fixup (issue #11): adopt the column's declared
 	// shape for any nil bind so a NULL predicate against a native
 	// BINARY/VARBINARY column is assignable rather than failing the
@@ -1468,11 +1474,12 @@ func reshapeTimestampForTime(s string) string {
 	return s
 }
 
-// encodeTimeString converts ISO time "HH:MM:SS" into the wire form.
-// fieldLen 8 only; ISO ":" and IBM "." are both accepted as input
-// to make caller code tolerant. Wire goes out with ":" since PUB400
-// connects in ISO time format by default; switch to "." when we
-// negotiate a different format via SET_SQL_ATTRIBUTES (M5 work).
+// encodeTimeString converts a "HH:MM:SS" / "HH.MM.SS" time into the wire
+// form. fieldLen 8 only; both ':' and '.' are accepted on input for caller
+// tolerance. The wire goes out with the period separator "HH.MM.SS" to match
+// JT400 byte-for-byte: SQLTime.convertToRawBytes hard-codes '.' regardless of
+// the negotiated session time format, and the server accepts it on every
+// format (issue #40).
 func encodeTimeString(s string, fieldLen int) (string, error) {
 	if fieldLen != 8 {
 		return "", fmt.Errorf("time FieldLength %d unsupported (need 8)", fieldLen)
@@ -1480,13 +1487,13 @@ func encodeTimeString(s string, fieldLen int) (string, error) {
 	if len(s) != 8 {
 		return "", fmt.Errorf("time %q must be 8 chars HH:MM:SS or HH.MM.SS", s)
 	}
-	// Normalise separators to ':' (ISO).
+	// Normalise separators to '.' (JT400's SQLTime wire form).
 	out := []byte(s)
-	if out[2] == '.' {
-		out[2] = ':'
+	if out[2] == ':' {
+		out[2] = '.'
 	}
-	if out[5] == '.' {
-		out[5] = ':'
+	if out[5] == ':' {
+		out[5] = '.'
 	}
 	return string(out), nil
 }
