@@ -56,9 +56,18 @@ const ReqDBSQLExecute uint16 = 0x1805
 // reply row still includes them (IN values echoed back) but the
 // caller has no destination to write to. OutValues is nil for any
 // EXECUTE whose paramShapes had no OUT/INOUT direction byte.
+//
+// OutTypes is the parallel slice of post-fixup SQL type codes -- one
+// per OutValues slot -- so the driver's write-back layer can recover
+// the temporal kind of a value the decoder rendered to an ISO string
+// (DATE 384/385, TIME 388/389, TIMESTAMP 392/393 all decode to
+// strings that are otherwise ambiguous). OutTypes[i] is exactly the
+// SQL type that decoded OutValues[i], so the two never disagree.
+// Nil whenever OutValues is nil.
 type ExecResult struct {
 	RowsAffected int64
 	OutValues    []any
+	OutTypes     []uint16
 }
 
 // ExecuteImmediate runs INSERT / UPDATE / DELETE / DDL against conn
@@ -454,8 +463,9 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	// echoed back in the row too -- we surface them so callers can
 	// see them but typically only OUT/INOUT slots are interesting.
 	var outValues []any
+	var outTypes []uint16
 	if expectOutput {
-		outValues, err = parseOutParameterRow(rep, paramShapes)
+		outValues, outTypes, err = parseOutParameterRow(rep, paramShapes)
 		if err != nil {
 			_ = cleanup()
 			return nil, fmt.Errorf("hostserver: parse OUT-parameter row: %w", err)
@@ -465,7 +475,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after EXECUTE: %w", err)
 	}
-	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues, OutTypes: outTypes}, nil
 }
 
 // ExecuteBatch is the v0.7.9 block-insert wire dispatch: same
@@ -697,7 +707,7 @@ func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, r
 // `reply.getResultData()` then `parameterRow_.setServerData()` --
 // go-db2i mirrors this end-to-end via the same parseExtendedResultData
 // path used for SELECT rows.
-func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, error) {
+func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, []uint16, error) {
 	cols := make([]SelectColumn, len(shapes))
 	for i, p := range shapes {
 		cols[i] = SelectColumn{
@@ -710,25 +720,31 @@ func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, error) {
 	}
 	rows, err := rep.findExtendedResultData(cols)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(rows) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(rows) > 1 {
 		// JT400's CallableStatement only consumes parameterRow_[0]
 		// (setRowIndex(0)); subsequent rows would be a server-side
 		// oddity we'd want to surface rather than silently drop.
-		return nil, fmt.Errorf("OUT-parameter row count %d > 1", len(rows))
+		return nil, nil, fmt.Errorf("OUT-parameter row count %d > 1", len(rows))
 	}
 	row := rows[0]
 	out := make([]any, len(shapes))
+	types := make([]uint16, len(shapes))
 	for i := range shapes {
+		// types[i] is the (post-fixup) SQL type that just decoded
+		// row[i] above, so a temporal value's ISO string can be
+		// re-parsed to the right kind on the driver side without
+		// guessing from the string shape.
+		types[i] = shapes[i].SQLType
 		if i < len(row) {
 			out[i] = row[i]
 		}
 	}
-	return out, nil
+	return out, types, nil
 }
 
 // statementTypeForSQL picks the SQL statement-type code (CP 0x3812
