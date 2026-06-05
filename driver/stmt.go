@@ -91,6 +91,22 @@ func checkNamedValue(nv *driver.NamedValue) error {
 		// rejecting Out with "unsupported type ...struct".
 		return nil
 	}
+	// Exact-decimal admission (issue #40, plan §P1-F). The driver.Value
+	// union has no lossless slot for a high-precision DECIMAL, so a
+	// math/big value or a Stringer-based decimal would be rejected by
+	// database/sql's default converter before the driver saw it. Render it
+	// to a canonical plain-decimal string here and substitute it back into
+	// the bind: it then rides the precision-preserving VARCHAR path on
+	// cache-miss and the native packed/zoned-BCD path on cache-hit, both
+	// from the same string. canonicalDecimalString declines anything that
+	// already implements driver.Valuer (return ErrSkip below), so it never
+	// preempts an established Valuer contract. See decimal_bind.go.
+	if s, ok, err := canonicalDecimalString(nv.Value); err != nil {
+		return err
+	} else if ok {
+		nv.Value = s
+		return nil
+	}
 	return driver.ErrSkip
 }
 
@@ -817,6 +833,19 @@ func (s *Stmt) logQuery(op string, paramCount int, start time.Time, err error) {
 // (~15-17 significant digits); bind the value as a string to preserve
 // full precision (the server casts the VARCHAR straight to the decimal
 // column). See the float64 case below and issue #12.
+//
+// Exact-decimal bind contract (issue #40): you do not have to
+// pre-stringify. A *math/big.Rat / *big.Int / *big.Float, or any type
+// whose String() is a decimal literal (custom decimal types that aren't
+// already a driver.Valuer), is admitted by CheckNamedValue, rendered to
+// a canonical plain-decimal string, and bound through this same VARCHAR
+// path -- so the full value reaches the column without a float64 round
+// trip. Decimal libraries that implement driver.Valuer (e.g.
+// shopspring/decimal) already work via database/sql's default converter
+// and are left untouched. A *big.Rat with no terminating decimal
+// expansion (e.g. 1/3) is rejected rather than silently rounded;
+// over-scale values are truncated by the server per SQL cast rules.
+// See decimal_bind.go (canonicalDecimalString).
 //
 // stringCCSID is supplied by the caller (typically the Conn's
 // preferredStringCCSID()): CCSID 1208 (UTF-8) on V7R3+ servers --
