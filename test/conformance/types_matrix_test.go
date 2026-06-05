@@ -454,8 +454,10 @@ func TestTypeMatrixDecimal(t *testing.T) {
 
 	// DECFLOAT special values can't be reached through a VARCHAR bind
 	// cast, so they go in as SQL literals. The driver decodes them to
-	// the canonical "Infinity"/"-Infinity"/"NaN" spellings (signaling
-	// NaN normalizes to NaN on read).
+	// the canonical "Infinity"/"-Infinity"/"NaN" spellings; since the
+	// issue #39 result-type decode work the signaling flag and sign are
+	// preserved, so a signaling NaN reads back as "SNaN" (and -NaN/-SNaN
+	// for the negative forms) rather than collapsing to "NaN".
 	t.Run("DECFLOAT34_specials", func(t *testing.T) {
 		tbl := mkMatrixTable(t, db, "dsp", "DECFLOAT(34)", false)
 		specials := []struct {
@@ -464,7 +466,7 @@ func TestTypeMatrixDecimal(t *testing.T) {
 			{"INFINITY", "Infinity"},
 			{"-INFINITY", "-Infinity"},
 			{"NAN", "NaN"},
-			{"SNAN", "NaN"},
+			{"SNAN", "SNaN"},
 		}
 		for i, sp := range specials {
 			if _, err := db.Exec(fmt.Sprintf("INSERT INTO %s (id, v) VALUES (?, %s)", tbl, sp.lit), i+1); err != nil {

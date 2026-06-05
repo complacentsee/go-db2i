@@ -20,12 +20,18 @@ import (
 var ErrUnsupportedResultType = errors.New("hostserver: unsupported result SQL type")
 
 // UnsupportedResultTypeError is returned by decodeColumn when a
-// column's SQL type has no decode branch (e.g. XML 988/989, ARRAY,
-// or a DATALINK whose payload shape we won't guess at). It carries
-// the descriptor fields a caller needs to report the gap or special-
-// case the type, and wraps ErrUnsupportedResultType so both
+// column's SQL type has no decode branch (e.g. XML 988/989, or a
+// payload shape we won't guess at). It carries the descriptor fields a
+// caller needs to report the gap or special-case the type, and wraps
+// ErrUnsupportedResultType so both
 // errors.Is(err, ErrUnsupportedResultType) and
 // errors.As(err, &UnsupportedResultTypeError{}) work.
+//
+// Note: ARRAY is not in this set despite having no decode branch. DB2
+// for i never delivers an array as a result-set column (the server
+// rejects an array projection with SQL-20441 / SQLSTATE 428H2 at
+// describe time), so an array SQL type cannot reach decodeColumn over a
+// SELECT -- see the decodeColumn default branch and issue #39.
 //
 // Before this typed error existed the decoder returned a bare
 // fmt.Errorf, so a single un-decodable column turned the whole-row
@@ -946,11 +952,28 @@ func decodeColumn(b []byte, col SelectColumn) (any, int, error) {
 			return nil, 0, fmt.Errorf("float type 480 has unexpected length %d (want 4 or 8)", col.Length)
 		}
 	}
-	// No decode branch for this SQL type (e.g. XML 988/989, ARRAY, or
-	// a DATALINK whose payload shape we won't guess at). Return the
-	// typed UnsupportedResultTypeError so the whole-row decode fails
+	// No decode branch for this SQL type (e.g. XML 988/989, or a
+	// payload shape we won't guess at). Return the typed
+	// UnsupportedResultTypeError so the whole-row decode fails
 	// classifiably (errors.As / errors.Is) instead of opaquely, while
 	// keeping the original informative message shape.
+	//
+	// ARRAY is deliberately NOT a case here, and this is not a missing
+	// decoder: DB2 for i never delivers an ARRAY value as a result-set
+	// column. A SELECT that projects an array (VALUES ARRAY[..], an
+	// ARRAY_AGG result column, CAST(.. AS .. ARRAY)) is rejected at
+	// PREPARE/DESCRIBE with SQL-20441 / SQLSTATE 428H2 ("array type not
+	// allowed in this context") before any row data exists -- so an
+	// array SQL type can never reach decodeColumn over a SELECT.
+	// Live-verified on PUB400 V7R5M0; see issue #39 and
+	// db_array_param_test.go. An ARRAY only crosses the host-server wire
+	// as a stored-procedure array PARAMETER: described in the
+	// parameter-marker format (CP 0x3813) with the element type plus an
+	// array flag bit (record +21, (flag>>30)&1), and carried as reply CP
+	// 0x3901 / DBVariableData -- a separate, unimplemented path (array
+	// UDT parameter describe/bind + 0x3901 parsing), not a result-column
+	// decode gap. This typed error therefore stands as a defensive
+	// backstop, not a TODO for an array result column.
 	return nil, 0, &UnsupportedResultTypeError{SQLType: col.SQLType, Length: col.Length, CCSID: col.CCSID}
 }
 

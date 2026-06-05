@@ -294,4 +294,51 @@ func TestResultTypeCoverage(t *testing.T) {
 			t.Errorf("DATALINK = %+v, want a string containing example.com (case-insensitive)", got)
 		}
 	})
+
+	// ARRAY is NOT a result-set column type on DB2 for i. This subtest is
+	// the live contract for the issue #39 ARRAY finding: a SELECT that
+	// projects an array value is rejected by the server at
+	// PREPARE/DESCRIBE -- it never reaches the row decoder as an array
+	// column. (The offline byte-exact half, hostserver
+	// TestArrayCrossesWireAsParameterNotResultColumn, shows the only wire
+	// shape an array takes: a stored-procedure parameter descriptor with
+	// an array flag bit.)
+	//
+	// On V7R5M0/V7R6M0 every array projection returns SQL-20441 /
+	// SQLSTATE 428H2 ("an array value or array type is not allowed in
+	// this context"). We assert the statement fails and, for the common
+	// case, that the error names the array-context restriction; an
+	// install that phrases the refusal differently still satisfies the
+	// core contract (no array result column is ever returned).
+	//
+	// HIGH CONFIDENCE: live-verified on PUB400 V7R5M0 across all four
+	// projection forms below.
+	t.Run("ARRAY not a result column", func(t *testing.T) {
+		cases := []string{
+			`VALUES ARRAY[1,2,3]`,
+			`SELECT ARRAY[1,2,3] FROM SYSIBM.SYSDUMMY1`,
+			`SELECT ARRAY_AGG(C) FROM (SELECT 1 C FROM SYSIBM.SYSDUMMY1 UNION ALL SELECT 2 FROM SYSIBM.SYSDUMMY1) t`,
+			`VALUES CAST(ARRAY[1,2,3] AS INTEGER ARRAY[10])`,
+		}
+		for _, q := range cases {
+			t.Run(q, func(t *testing.T) {
+				// The whole-row decode must never hand back an array
+				// column: the statement has to fail before any rows.
+				var anyVal any
+				err := db.QueryRow(q).Scan(&anyVal)
+				if err == nil {
+					t.Fatalf("array projection %q unexpectedly succeeded (server returned an array result column?)", q)
+				}
+				msg := strings.ToUpper(err.Error())
+				// The canonical refusal names the array-context
+				// restriction. Accept either the SQLCODE or SQLSTATE;
+				// log (don't fail) any other non-nil error so a
+				// back-level / differently-worded refusal still passes
+				// the core "no array result column" contract.
+				if !strings.Contains(msg, "20441") && !strings.Contains(msg, "428H2") && !strings.Contains(msg, "ARRAY") {
+					t.Logf("array projection rejected, but not via the expected SQL-20441/428H2 array-context error: %v", err)
+				}
+			})
+		}
+	})
 }
