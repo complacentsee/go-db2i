@@ -11,6 +11,35 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.29] - 2026-06-05
+
+v0.7.29 retires the last *named* finding of the #40 describe-driven bind rework:
+an over-scale decimal bound on the package-cache fast path (or an `INOUT`
+decimal slot) is now truncated toward zero in place by the native packed/zoned
+BCD encoder, instead of erroring and forcing a fall-back to a fresh `PREPARE`.
+This matches JT400's `BigDecimal.setScale(scale, ROUND_DOWN)` and the server's
+implicit `VARCHAR`->`DECIMAL` assignment cast already used on the cache-miss
+path, so the cache-hit and cache-miss paths now store byte-identical values and
+the over-scale bind keeps the cache-hit speed-up. Integer-magnitude overflow
+stays a hard error (still falls back to the `DOUBLE` `PREPARE_DESCRIBE` path).
+Live-validated on PUB400 V7R5M0. The tracking issue stays open pending the
+structural PMF-driven uniform bind dispatch and the decode-side date-format
+negotiation.
+
+### Fixed: over-scale decimals truncate (ROUND_DOWN) on the cache-hit path (issue #40)
+
+`encodePackedBCD` / `encodeZonedBCD` (hostserver) previously rejected a decimal
+whose fractional digit count exceeded the column scale, wrapping
+`ErrUnsupportedCachedParamType` so cache-hit dispatch fell back to a plain
+`PREPARE` where the server cast the `VARCHAR` text down. The stored value was
+correct, but the fast path was abandoned for every over-scale decimal -- unlike
+JT400, which truncates in place and stays on the path. The encoders now drop the
+low-order fractional digits past `scale` (ROUND_DOWN, truncate toward zero) and
+normalize a resulting negative zero to a positive sign nibble (matching
+`BigDecimal`'s signum-0 treatment), so an over-scale bind packs natively and
+dispatches through the cache. An over-wide integer part is still rejected as
+magnitude overflow.
+
 ## [0.7.28] - 2026-06-05
 
 v0.7.28 completes the **OUT / INOUT typed-destination** sub-item of the #40
