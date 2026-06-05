@@ -11,6 +11,51 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.27] - 2026-06-05
+
+v0.7.27 completes the **DATE-only / TIME-only** sub-item of the #40
+describe-driven bind rework: a `time.Time` bound into a native `DATE` or
+`TIME` column now ships JT400's byte-identical native wire shape on both the
+cache-miss path and the extended-dynamic package-cache fast path, instead of
+the 26-char `TIMESTAMP` it sent before and let the server cast. It also fixes
+the `TIME` wire separator to match JT400. The #40 tracking issue stays open
+for its OUT-type and decode-side sub-items. Live-validated on PUB400 V7R5M0.
+
+### Added: native DATE / TIME parameter binds (issue #40, describe-driven bind)
+
+The driver binds every `time.Time` as `TIMESTAMP` (393, the 26-char IBM
+string `YYYY-MM-DD-HH.MM.SS.ffffff`); into a native `DATE`/`TIME` column the
+server cast it, so the value already stored correctly, but the wire diverged
+from JT400 (26 bytes + a cast instead of the native 10-byte ISO `DATE` /
+8-byte `TIME`). A new `reconcileDateTimeBindShapes` adopts the column's native
+parameter-marker shape (CP `0x3813`) for a `time.Time` bind on both the
+Exec/IUD and SELECT paths, so `encodeRowData` takes its existing 384/388
+branch (the reshape helpers slice the 26-char value to the column width) and
+the cache-miss wire matches both JT400 and the package-cache fast path.
+
+A `time.Time` bind is disambiguated from a user `string` bind by the driver's
+chosen shape — only a `time.Time` arrives as `TIMESTAMP` (392/393) — so a
+`string` bound into a `DATE`/`TIME` column keeps its VARCHAR/server-cast path
+(mirroring how the binary reshape leaves strings alone). No
+`preparedParamsFromCached` change was needed: JT400's `SQLDate`/`SQLTime`
+`convertToRawBytes` always write ISO regardless of the negotiated session
+format, which is exactly what the `FieldLength`-driven length-only encode
+produces.
+
+### Fixed: TIME wire separator now matches JT400 (`HH.MM.SS`)
+
+`encodeTimeString` emitted a colon (`HH:MM:SS`); JT400's `SQLTime.convertToRawBytes`
+hard-codes a period (`HH.MM.SS`) regardless of the negotiated session time
+format. The encoder now emits the period for byte-for-byte parity (the server
+accepts it on every format — live-validated on PUB400 V7R5M0). This affects
+the `TIME` cache-hit path that already existed as well as the new cache-miss
+path.
+
+Live-validated on PUB400 V7R5M0 (`TestDateTimeBindCacheHitAgreement` for
+`DATE` and `TIME`; `TestTypeMatrixTemporal` regression). Offline coverage in
+`hostserver.TestReconcileDateTimeBindShapes` and the updated
+`TestTimeBindReshapeForDateTimeCacheHit`.
+
 ## [0.7.26] - 2026-06-05
 
 v0.7.26 completes the **BINARY / VARBINARY** sub-item of the #40
