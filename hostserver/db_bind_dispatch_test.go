@@ -173,6 +173,39 @@ func TestReconcileBindShapesFromPMFMatchesLegacy(t *testing.T) {
 				{SQLType: 384, FieldLength: 10, CCSID: 37},
 			},
 		},
+		{
+			// A user string into a DATE column keeps its VARCHAR shape (the
+			// driver tags only time.Time as TIMESTAMP 392/393); the datetime
+			// arm must not fire on a 449 shape.
+			name:   "string_into_date_untouched",
+			shapes: []PreparedParam{{SQLType: 449, FieldLength: 10, CCSID: 37, Value: "2026-06-05"}},
+			values: []any{"2026-06-05"},
+			pmf:    []ParameterMarkerField{{SQLType: 384, FieldLength: 10, CCSID: 37}},
+		},
+		{
+			name:   "graphic_long_vargraphic_bytes",
+			shapes: []PreparedParam{{SQLType: 449, FieldLength: 4, CCSID: ccsidBinary, Value: []byte{0x00, 0x41}}},
+			values: []any{[]byte{0x00, 0x41}},
+			pmf:    []ParameterMarkerField{{SQLType: 472, FieldLength: 80, CCSID: ccsidBinary}},
+		},
+		{
+			name:   "out_into_binary",
+			shapes: []PreparedParam{{SQLType: 449, FieldLength: 2000, ParamType: 0xF1, Value: []byte{0x01}}},
+			values: []any{nil},
+			pmf:    []ParameterMarkerField{{SQLType: 908, FieldLength: 34, CCSID: ccsidBinary}},
+		},
+		{
+			name: "two_out_slots",
+			shapes: []PreparedParam{
+				{SQLType: 449, FieldLength: 2000, ParamType: 0xF1},
+				{SQLType: 449, FieldLength: 2000, ParamType: 0xF2, Value: int64(3)},
+			},
+			values: []any{nil, int64(3)},
+			pmf: []ParameterMarkerField{
+				{SQLType: 388, FieldLength: 8, CCSID: 37},
+				{SQLType: 496, FieldLength: 4},
+			},
+		},
 	}
 
 	for _, tc := range cases {

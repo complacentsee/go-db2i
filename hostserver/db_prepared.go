@@ -854,32 +854,14 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
-	// IN-parameter graphic fixup (issue #13): a []byte/string bind into a
-	// CCSID-65535 ("bit data") GRAPHIC/VARGRAPHIC predicate defaults to a
-	// VARCHAR shape the server won't cast (SQL-332 / 57017). Adopt the
-	// column's declared graphic shape from the PMF so the value ships
-	// verbatim through the native graphic encoder. No-op for
-	// non-65535-graphic targets and non-[]byte/string binds. Mirrors the
-	// Exec/IUD path so SELECT/Query predicates get the same fixup.
-	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-binary fixup (issue #40): adopt the column's
-	// native BINARY/VARBINARY shape for a []byte predicate so it ships
-	// JT400's byte-identical native form rather than VARCHAR FOR BIT DATA.
-	// Mirrors the Exec/IUD path. No-op for non-binary targets / non-[]byte.
-	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-temporal fixup (issue #40): adopt the column's
-	// native DATE/TIME shape (384/388) for a time.Time predicate so it ships
-	// JT400's byte-identical native form rather than a 26-char TIMESTAMP.
-	// Mirrors the Exec/IUD path. No-op for non-DATE/TIME targets / non-time.Time.
-	reconcileDateTimeBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter NULL fixup (issue #11): adopt the column's declared
-	// shape for any nil bind so a NULL predicate against a native
-	// BINARY/VARBINARY column is assignable rather than failing the
-	// INTEGER-NULL implicit cast. No-op for non-nil binds.
-	reconcileNullBindShapes(paramShapes, paramValues, pmf)
+	// Unified PMF-driven bind-shape dispatch (issue #40): adopt the server-
+	// declared parameter-marker shape per predicate bind in a single pass --
+	// graphic bit-data (#13), native BINARY/VARBINARY (#40), native DATE/TIME
+	// (#40), and typed NULL (#11). Mirrors the Exec/IUD path. SELECT predicates
+	// never carry OUT/INOUT slots, so the OUT arm never fires and the
+	// expectOutput return is unused here. Byte-identical to the per-type
+	// reconciles it replaced (see db_bind_dispatch.go).
+	reconcileBindShapesFromPMF(paramShapes, paramValues, pmf)
 
 	// --- 3) CHANGE_DESCRIPTOR. ---
 	{

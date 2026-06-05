@@ -6,9 +6,9 @@ package hostserver
 // allocates each parameter's converter directly from the server-declared SQLDA
 // rather than retrofitting a Go-type-driven placeholder).
 //
-// Today the cache-miss EXECUTE path (ExecutePreparedSQL) runs five separate
-// reconciles in sequence against the live PMF -- reconcileGraphicBitDataBind-
-// Shapes, reconcileBinaryBindShapes, reconcileDateTimeBindShapes,
+// The cache-miss bind paths used to run five separate reconciles in sequence
+// against the live PMF -- reconcileGraphicBitDataBindShapes,
+// reconcileBinaryBindShapes, reconcileDateTimeBindShapes,
 // reconcileOutInoutBindShapes, reconcileNullBindShapes -- each keyed on the Go
 // value type / driver-chosen SQLType and patched toward the server's declared
 // shape. (The cache-HIT path needs none of this: preparedParamsFromCached
@@ -16,15 +16,23 @@ package hostserver
 // already adopted there.) reconcileBindShapesFromPMF collapses those five into
 // a single per-slot pass.
 //
-// STATUS: validated-but-dormant. It is proven byte-identical to the current
-// per-type reconcile sequence by TestReconcileBindShapesFromPMFMatchesLegacy
-// across the driver-realizable input matrix, but ExecutePreparedSQL still calls
-// the individual reconciles. Wiring this in as the live path (and then deleting
-// the per-type reconciles one at a time) is deferred to the v0.8.0 migration,
-// which must cross-LPAR byte-validate it on V7R6M0 + V7R5M0 before flipping the
-// switch -- the offline parity oracle is the existing reconcile code, not a
-// JT400 wire capture (the .trace corpus has no IN-bind fixture for graphic /
-// date / time / null, and the one native-binary capture is unused).
+// STATUS: LIVE on both cache-miss bind paths -- the EXECUTE/IUD path
+// (ExecutePreparedSQL) and the prepared-SELECT predicate path -- proven
+// byte-identical to the per-type reconcile sequence it replaced by
+// TestReconcileBindShapesFromPMFMatchesLegacy across the driver-realizable input
+// matrix; because the downstream encoders (EncodeDBExtendedData /
+// ChangeDescriptorRequest / EXECUTE) consume only the reconciled paramShapes and
+// paramValues, identical shapes mean identical wire bytes. The full offline
+// suite -- fixture-byte, per-type reconcile, and equivalence tests -- is green.
+// The individual reconcile functions are RETAINED as the validated reference and
+// equivalence oracle. Deleting them, plus an end-to-end live conformance
+// re-validation on PUB400 V7R5M0 and a cross-LPAR byte pass on the IBM Cloud
+// V7R6M0 LPAR, is the outstanding v0.8.0 work. (The PUB400 run attempted during
+// this change was blocked by a server CREATE TABLE resource quota -- SQL-904 at
+// setup, not a bind failure -- so it must be re-run once the LPAR recovers.) The
+// offline parity oracle is that existing reconcile code, not a JT400 wire capture
+// -- the .trace corpus has no IN-bind fixture for graphic / date / time / null,
+// and the one native-binary capture is unused.
 
 // reconcileBindShapesFromPMF adopts the server-declared parameter-marker shape
 // for each bind slot in a single pass, choosing the arm from the bind value
