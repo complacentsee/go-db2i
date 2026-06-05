@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"reflect"
 	"strings"
 	"time"
@@ -565,6 +566,14 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 
+	// A CALL with a temporal (DATE/TIME/TIMESTAMP) OUT/INOUT parameter
+	// can't use the extended-dynamic package fast path (server SQL-180);
+	// divert it to the regular PREPARE_DESCRIBE path -- skip the
+	// cache-hit dispatch, the filing counter, and the package marker on
+	// EXECUTE. The non-temporal OUT types (*[]byte, big.*) are fine on
+	// the fast path and are not diverted.
+	temporalOut := anyTemporalOutDest(outDests)
+
 	// Cache-hit fast path: when the SQL byte-equals a cached entry,
 	// skip PREPARE_DESCRIBE. Saves one wire round-trip per call by
 	// relying on the server-side plan filed in the *PGM under the
@@ -580,7 +589,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// docs/plans/v0.7.8-out-param-cache-hit.md confirmed
 	// the server honours OUT direction bytes here on V7R6M0.
 	cached := s.conn.packageLookup(s.query)
-	if cached != nil && s.conn.pkg != nil {
+	if cached != nil && s.conn.pkg != nil && !temporalOut {
 		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logExecCached(logger, len(args), start, res, cached.Name, err)
 		if shouldRefallbackToPrepare(err) {
@@ -595,7 +604,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 			if err != nil {
 				return nil, s.conn.classifyConnErr(err)
 			}
-			if err := writeBackOutParams(outDests, res.OutValues); err != nil {
+			if err := writeBackOutParams(outDests, res.OutValues, res.OutTypes); err != nil {
 				return nil, err
 			}
 			return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
@@ -611,10 +620,10 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// passes packageEligibleFor (otherwise the server isn't
 	// going to file no matter how often we prepare).
 	shouldRefresh := false
-	if s.conn.packageEligibleFor(s.query, len(args) > 0) {
+	if !temporalOut && s.conn.packageEligibleFor(s.query, len(args) > 0) {
 		shouldRefresh = s.conn.noteFilingPrepare(s.query)
 	}
-	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0)...)
+	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0, temporalOut)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
@@ -622,7 +631,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	if shouldRefresh {
 		s.conn.refreshPackageCache(context.Background(), s.query)
 	}
-	if err := writeBackOutParams(outDests, res.OutValues); err != nil {
+	if err := writeBackOutParams(outDests, res.OutValues, res.OutTypes); err != nil {
 		return nil, err
 	}
 	return &Result{rowsAffected: res.RowsAffected, conn: s.conn}, nil
@@ -698,7 +707,10 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return nil, fmt.Errorf("db2i: Query called with non-SELECT/CALL; use Exec")
 	}
 	hasParams := len(args) > 0
-	selectOpts := s.conn.selectOptionsFor(s.query, hasParams)
+	// Parameterless statements (the only ones the static branch below
+	// serves) never carry an sql.Out, so the package marker is never
+	// suppressed there.
+	selectOpts := s.conn.selectOptionsFor(s.query, hasParams, false)
 	start := time.Now()
 	// Parameterless SELECTs default to OpenSelectStatic. But when
 	// extended-dynamic + package-criteria=select are both active,
@@ -715,17 +727,26 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 		}
 		return &Rows{cursor: cursor, conn: s.conn}, nil
 	}
-	shapes, values, _, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
+	shapes, values, outDests, err := bindArgsToPreparedParams(args, s.conn.preferredStringCCSID())
 	if err != nil {
 		return nil, err
+	}
+
+	// A CALL with a temporal OUT/INOUT parameter can't use the package
+	// fast path (server SQL-180); divert it to the regular path here as
+	// Stmt.Exec does. Rebuild selectOpts with the package marker
+	// suppressed when so.
+	temporalOut := anyTemporalOutDest(outDests)
+	if temporalOut {
+		selectOpts = s.conn.selectOptionsFor(s.query, hasParams, true)
 	}
 
 	// Cache-hit fast path: same gate as Stmt.Exec, but cached
 	// statement must have a result-set descriptor (i.e. an actual
 	// SELECT). The returned Cursor owns the RPB and supports
 	// continuation FETCH normally because we still issue CREATE_RPB.
-	if cached := s.conn.packageLookup(s.query); cached != nil && len(cached.DataFormat) > 0 && s.conn.pkg != nil {
-		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37, s.conn.selectOptionsFor(s.query, len(args) > 0)...)
+	if cached := s.conn.packageLookup(s.query); cached != nil && len(cached.DataFormat) > 0 && s.conn.pkg != nil && !temporalOut {
+		cursor, err := hostserver.OpenSelectPreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37, selectOpts...)
 		s.logQueryCached(len(args), start, cached.Name, err)
 		if shouldRefallbackToPrepare(err) {
 			// SQL-204 / SQL-805: stale cached plan. Purge and
@@ -744,7 +765,7 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 	// the OPEN returns the first batch, so the next call of the
 	// same SQL on this conn finds NameBytes populated.
 	shouldRefresh := false
-	if s.conn.packageEligibleFor(s.query, hasParams) {
+	if !temporalOut && s.conn.packageEligibleFor(s.query, hasParams) {
 		shouldRefresh = s.conn.noteFilingPrepare(s.query)
 	}
 	cursor, err := hostserver.OpenSelectPrepared(s.conn.conn, s.query, shapes, values, s.conn.nextCorrFunc(), selectOpts...)
@@ -1051,8 +1072,101 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		return hostserver.PreparedParam{}, nil, fmt.Errorf("sql.Out.Dest must be a pointer, got %T", out.Dest)
 	}
 	elem := destVal.Elem()
-	// IN side of an INOUT binds the current value at the destination.
+	if !elem.IsValid() {
+		// A typed-nil pointer (e.g. sql.Out{Dest: (*big.Rat)(nil)})
+		// passes the interface-nil guard in bindArgsToPreparedParams
+		// and the Kind==Pointer check above, but Elem() of a nil
+		// pointer is the zero Value -- using it (Type()/Kind()) would
+		// panic. Reject it cleanly: a nil pointer can never receive an
+		// OUT value anyway.
+		return hostserver.PreparedParam{}, nil, fmt.Errorf("sql.Out.Dest must be a non-nil pointer, got %T", out.Dest)
+	}
+	// The server ignores the IN value of an OUT-only (0xF1) slot, so we
+	// bind SQL NULL there: a nil value makes EncodeDBExtendedData set
+	// the 0xFFFF null indicator and write no data bytes, which the
+	// server accepts for any declared type. A typed zero, by contrast,
+	// is still syntax-validated -- a DATE zero under an extended-dynamic
+	// package raises SQL-180 -- so NULL is both safer and matches
+	// JT400's registered-OUT behaviour. An INOUT (0xF2) slot binds the
+	// current value at the destination.
+	//
+	// Each placeholder shape below is only a starting point: the
+	// OUT-fixup loop in hostserver.ExecutePreparedSQL overrides
+	// SQLType / FieldLength / Precision / Scale / CCSID from the proc's
+	// declared parameter type (PMF). Only the direction byte and a
+	// non-zero FieldLength survive to the wire (the latter keeps the
+	// descriptor's per-column width and the row-size accumulator
+	// correct). inValue stays nil unless this is an INOUT slot.
 	var inValue any
+
+	// Concrete-type destinations whose reflect.Kind isn't one of the
+	// scalar kinds the switch below handles: []byte is a slice;
+	// time.Time and the math/big carriers are structs (or pointers to
+	// them).
+	switch {
+	case isByteSliceType(elem.Type()):
+		// VARBINARY / BINARY OUT. Placeholder is VARCHAR FOR BIT DATA
+		// (CCSID 65535); the fixup adopts the column's native
+		// 908/912/452 shape. An INOUT echoes the caller's bytes, copied
+		// defensively -- the backing array may be mutated before EXECUTE.
+		shape := hostserver.PreparedParam{
+			SQLType:     449,
+			FieldLength: 2002, // 2-byte SL + 2000 max bytes
+			Precision:   2000,
+			CCSID:       65535, // FOR BIT DATA
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = append([]byte(nil), elem.Bytes()...)
+		}
+		return shape, inValue, nil
+	case elem.Type() == timeType:
+		// DATE / TIME / TIMESTAMP OUT. Placeholder is TIMESTAMP (393,
+		// 26-char IBM string); the fixup adopts the column's native
+		// 384/388/392 shape and the DATE/TIME encode arms reshape the
+		// 26-char INOUT value down to the column width (same path a
+		// plain time.Time IN bind takes).
+		//
+		// Constraint: a TIMESTAMP INOUT param must be TIMESTAMP(6) (the
+		// IBM i default, 26-char wire width). encodeTimestampString only
+		// accepts width 26 and the OUT-fixup forces the proc's declared
+		// width, so a non-default TIMESTAMP(p) precision errors at encode
+		// for an INOUT bind -- the same driver-wide TIMESTAMP(6) limit
+		// the IN bind path carries on the package-cache fast path. An
+		// OUT-only slot binds NULL, so it is unaffected, as are DATE and
+		// TIME of any precision.
+		shape := hostserver.PreparedParam{
+			SQLType:     393,
+			FieldLength: 26,
+			ParamType:   direction,
+		}
+		if out.In {
+			inValue = elem.Interface().(time.Time).Format("2006-01-02-15.04.05.000000")
+		}
+		return shape, inValue, nil
+	case isBigDecimalType(elem.Type()):
+		// DECIMAL / NUMERIC OUT into a math/big carrier (big.Rat /
+		// big.Int / big.Float, by value or by pointer -- symmetric
+		// with the IN-side exact-decimal funnel in decimal_bind.go).
+		// Placeholder is DECIMAL(31,0); the fixup adopts the proc's
+		// declared precision/scale.
+		shape := hostserver.PreparedParam{
+			SQLType:     485, // DECIMAL packed nullable; PMF fixup overrides
+			FieldLength: 16,
+			Precision:   31,
+			Scale:       0,
+			ParamType:   direction,
+		}
+		if out.In {
+			s, err := bigDecimalDestToString(elem)
+			if err != nil {
+				return hostserver.PreparedParam{}, nil, err
+			}
+			inValue = s
+		}
+		return shape, inValue, nil
+	}
+
 	switch elem.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
 		shape := hostserver.PreparedParam{
@@ -1062,8 +1176,6 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		}
 		if out.In {
 			inValue = int32Of(elem)
-		} else {
-			inValue = int32(0)
 		}
 		return shape, inValue, nil
 	case reflect.Int64:
@@ -1074,8 +1186,6 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		}
 		if out.In {
 			inValue = elem.Int()
-		} else {
-			inValue = int64(0)
 		}
 		return shape, inValue, nil
 	case reflect.Float32, reflect.Float64:
@@ -1086,16 +1196,11 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		}
 		if out.In {
 			inValue = elem.Float()
-		} else {
-			inValue = float64(0)
 		}
 		return shape, inValue, nil
 	case reflect.String:
-		// VARCHAR(2000) placeholder. The PMF fixup sets the real
-		// CCSID + length from the proc's declared parameter type;
-		// here we just need a non-zero FieldLength so the row-size
-		// accumulator in EncodeDBExtendedDataFormat is correct
-		// before fixup.
+		// VARCHAR(2000) placeholder; the PMF fixup sets the real CCSID +
+		// length from the proc's declared parameter type.
 		shape := hostserver.PreparedParam{
 			SQLType:     449,
 			FieldLength: 2002, // 2-byte SL + 2000 max bytes
@@ -1105,8 +1210,6 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		}
 		if out.In {
 			inValue = elem.String()
-		} else {
-			inValue = ""
 		}
 		return shape, inValue, nil
 	case reflect.Bool:
@@ -1115,10 +1218,12 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 			FieldLength: 2,
 			ParamType:   direction,
 		}
-		if out.In && elem.Bool() {
-			inValue = int32(1)
-		} else {
-			inValue = int32(0)
+		if out.In {
+			if elem.Bool() {
+				inValue = int32(1)
+			} else {
+				inValue = int32(0)
+			}
 		}
 		return shape, inValue, nil
 	default:
@@ -1136,6 +1241,113 @@ func int32Of(v reflect.Value) int32 {
 	return 0
 }
 
+// Concrete reflect types the OUT-bind path recognises by type rather
+// than by Kind (time.Time and the math/big carriers are all structs).
+var (
+	timeType     = reflect.TypeOf(time.Time{})
+	bigRatType   = reflect.TypeOf(big.Rat{})
+	bigIntType   = reflect.TypeOf(big.Int{})
+	bigFloatType = reflect.TypeOf(big.Float{})
+)
+
+// isByteSliceType reports whether t is a []byte (or any named slice
+// type whose element is byte) -- the destination shape for a
+// BINARY/VARBINARY OUT parameter.
+func isByteSliceType(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8
+}
+
+// isBigDecimalType reports whether t is one of math/big's exact /
+// decimal carriers (big.Rat / big.Int / big.Float), addressed either
+// by value or through a single pointer. Mirrors the IN-side funnel
+// (canonicalDecimalString), which admits the *big.* pointer forms.
+func isBigDecimalType(t reflect.Type) bool {
+	base := t
+	if base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	switch base {
+	case bigRatType, bigIntType, bigFloatType:
+		return true
+	}
+	return false
+}
+
+// bigDecimalDestToString renders the current value at a big-decimal
+// OUT destination (the dereferenced *Dest, by value or pointer form)
+// to its canonical decimal string -- the value an INOUT slot ships on
+// the IN side, and "0" for an OUT-only slot's zero carrier. It reuses
+// canonicalDecimalString so the rendering matches an IN bind exactly.
+func bigDecimalDestToString(elem reflect.Value) (string, error) {
+	var ptr any
+	if elem.Kind() == reflect.Pointer {
+		if elem.IsNil() {
+			// A nil *big.Rat OUT destination has no current value; an
+			// OUT-only slot's IN value is ignored by the server, so a
+			// neutral "0" is a safe, encodable placeholder.
+			return "0", nil
+		}
+		ptr = elem.Interface() // *big.Rat / *big.Int / *big.Float
+	} else {
+		// Value form: address it to get the *big.* pointer
+		// canonicalDecimalString matches on. Elem() of a pointer is
+		// always addressable, so Addr() is safe here.
+		ptr = elem.Addr().Interface()
+	}
+	s, ok, err := canonicalDecimalString(ptr)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("sql.Out.Dest *%s is not an exact-decimal type", elem.Type().String())
+	}
+	return s, nil
+}
+
+// assignBigDecimal parses the server-decoded decimal string s into a
+// big-decimal OUT destination, normalising the value and pointer
+// forms (big.Rat vs *big.Rat) to a settable *big.* target. A nil
+// pointer destination is allocated first.
+func assignBigDecimal(dest reflect.Value, s string) error {
+	switch dest.Kind() {
+	case reflect.Pointer:
+		if dest.IsNil() {
+			dest.Set(reflect.New(dest.Type().Elem()))
+		}
+		return setBigFromString(dest.Interface(), s)
+	case reflect.Struct:
+		// Value form (big.Rat / big.Int / big.Float): address it. A
+		// dest reached through reflect.ValueOf(ptr).Elem() is always
+		// addressable.
+		return setBigFromString(dest.Addr().Interface(), s)
+	}
+	return fmt.Errorf("cannot assign decimal into *%s", dest.Type().String())
+}
+
+// setBigFromString writes the decimal string s into the *big.Rat /
+// *big.Int / *big.Float behind ptr. A fractional value into a *big.Int
+// (which has no scale) is reported as an error rather than truncated.
+func setBigFromString(ptr any, s string) error {
+	switch p := ptr.(type) {
+	case *big.Rat:
+		if _, ok := p.SetString(s); !ok {
+			return fmt.Errorf("cannot parse %q as *big.Rat", s)
+		}
+		return nil
+	case *big.Int:
+		if _, ok := p.SetString(s, 10); !ok {
+			return fmt.Errorf("cannot parse %q as *big.Int (fractional DECIMAL needs *big.Rat or *big.Float)", s)
+		}
+		return nil
+	case *big.Float:
+		if _, ok := p.SetString(s); !ok {
+			return fmt.Errorf("cannot parse %q as *big.Float", s)
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported big-decimal type %T", ptr)
+}
+
 // hasOutDest reports whether any slot in outDests is a real
 // sql.Out destination. outDests is preallocated by
 // bindArgsToPreparedParams with len(args) slots, the unused ones
@@ -1145,6 +1357,33 @@ func hasOutDest(outDests []*stdsql.Out) bool {
 	for _, o := range outDests {
 		if o != nil {
 			return true
+		}
+	}
+	return false
+}
+
+// anyTemporalOutDest reports whether any OUT/INOUT destination is a
+// *time.Time. A stored procedure with a DATE/TIME/TIMESTAMP OUT or
+// INOUT parameter raises SQL-180 under the extended-dynamic package
+// fast path on IBM i -- the server rejects a temporal OUT-parameter
+// descriptor in the package context even when the slot's IN value is
+// SQL NULL -- so such a CALL must route through the regular
+// PREPARE_DESCRIBE path instead. The driver recognises the temporal
+// case only from a *time.Time destination (it doesn't know the proc's
+// declared parameter types), which is exactly the surface v0.7.28's
+// *time.Time OUT support introduces; the non-temporal new types
+// (*[]byte, big.*) are fine on the fast path and are not diverted.
+func anyTemporalOutDest(outDests []*stdsql.Out) bool {
+	for _, o := range outDests {
+		if o == nil {
+			continue
+		}
+		dv := reflect.ValueOf(o.Dest)
+		if dv.Kind() == reflect.Pointer {
+			el := dv.Elem()
+			if el.IsValid() && el.Type() == timeType {
+				return true
+			}
 		}
 	}
 	return false
@@ -1193,17 +1432,23 @@ func shouldRefallbackToPrepare(err error) bool {
 // server returned no row).
 //
 // Conversion follows the same conventions database/sql.Rows.Scan
-// uses, but limited to the destination kinds outBindShape accepts:
+// uses, limited to the destination kinds outBindShape accepts:
 //
-//	*string                      <- string / []byte
+//	*string                        <- string / []byte
 //	*int / *int8 / *int16 / *int32 <- int32 / int64 (narrow with range check)
-//	*int64                       <- int32 / int64
-//	*float32 / *float64          <- float32 / float64
-//	*bool                        <- non-zero int32 / bool
+//	*int64                         <- int32 / int64
+//	*float32 / *float64            <- float32 / float64
+//	*bool                          <- non-zero int32 / bool
+//	*[]byte                        <- []byte / string (copied)
+//	*time.Time                     <- ISO string (parsed per outTypes[i])
+//	*big.Rat / *big.Int / *big.Float (or value form) <- decimal string
 //
-// Mismatches surface as db2i errors with the param index so the
-// caller knows which slot misaligned.
-func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
+// outTypes runs parallel to outValues and carries the post-fixup SQL
+// type that decoded each value, so a temporal ISO string is re-parsed
+// to the correct kind without guessing from its shape (DATE/TIME/
+// TIMESTAMP all decode to strings). Mismatches surface as db2i errors
+// with the param index so the caller knows which slot misaligned.
+func writeBackOutParams(outDests []*stdsql.Out, outValues []any, outTypes []uint16) error {
 	if outDests == nil {
 		return nil
 	}
@@ -1224,18 +1469,59 @@ func writeBackOutParams(outDests []*stdsql.Out, outValues []any) error {
 			destVal.SetZero()
 			continue
 		}
-		if err := assignOutParam(destVal, v); err != nil {
+		var sqlType uint16
+		if i < len(outTypes) {
+			sqlType = outTypes[i]
+		}
+		if err := assignOutParam(destVal, v, sqlType); err != nil {
 			return fmt.Errorf("db2i: OUT param %d: %w", i, err)
 		}
 	}
 	return nil
 }
 
-// assignOutParam handles the type coercion from the server-decoded
-// value (int32 / int64 / float64 / string / []byte / bool /
-// time.Time) into the destination's Kind. Out of scope for M9-2:
-// time.Time, DECIMAL, []byte; those need separate decoder paths.
-func assignOutParam(dest reflect.Value, v any) error {
+// assignOutParam coerces the server-decoded value (int32 / int64 /
+// float64 / string / []byte / bool) into the destination, dispatching
+// first on the concrete destination types whose reflect.Kind isn't a
+// scalar -- []byte, time.Time, and the math/big decimal carriers --
+// then on the scalar Kind. sqlType is the post-fixup SQL type that
+// decoded v; it disambiguates the DATE/TIME/TIMESTAMP ISO strings for
+// a *time.Time destination (see parseTemporalISO).
+func assignOutParam(dest reflect.Value, v any, sqlType uint16) error {
+	// Concrete-type destinations first -- these would otherwise fall
+	// through the Kind switch ([]byte is a Slice; time.Time and the
+	// big.* carriers are Structs / Pointers).
+	switch {
+	case isByteSliceType(dest.Type()):
+		switch x := v.(type) {
+		case []byte:
+			// Copy: the decode buffer the row parser handed us may be
+			// reused for the next reply on this connection.
+			dest.SetBytes(append([]byte(nil), x...))
+			return nil
+		case string:
+			// A non-bit-data CHAR/VARCHAR OUT decodes to a Go string;
+			// when the caller bound a *[]byte destination, surface its
+			// bytes. (FOR BIT DATA / CCSID 65535 columns already decode
+			// to []byte and take the case above.)
+			dest.SetBytes([]byte(x))
+			return nil
+		}
+	case dest.Type() == timeType:
+		if s, ok := v.(string); ok {
+			t, err := parseTemporalISO(sqlType, s)
+			if err != nil {
+				return fmt.Errorf("cannot assign %q into *time.Time: %w", s, err)
+			}
+			dest.Set(reflect.ValueOf(t))
+			return nil
+		}
+	case isBigDecimalType(dest.Type()):
+		if s, ok := v.(string); ok {
+			return assignBigDecimal(dest, s)
+		}
+	}
+
 	switch dest.Kind() {
 	case reflect.String:
 		switch x := v.(type) {

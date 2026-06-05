@@ -314,12 +314,23 @@ func TestCallInOutFixtureOutDecode(t *testing.T) {
 		{SQLType: 448, FieldLength: 66, Precision: 64, CCSID: 37, ParamType: 0xF1},
 		{SQLType: 496, FieldLength: 4, Precision: 10, CCSID: 0, ParamType: 0xF1},
 	}
-	out, err := parseOutParameterRow(rep, shapes)
+	out, outTypes, err := parseOutParameterRow(rep, shapes)
 	if err != nil {
 		t.Fatalf("parseOutParameterRow: %v", err)
 	}
 	if len(out) != 3 {
 		t.Fatalf("OUT slots = %d, want 3 (IN echoed + 2 OUT)", len(out))
+	}
+	// OutTypes runs parallel to the values and reports the post-fixup
+	// SQL type that decoded each slot (here mirroring the shapes).
+	wantTypes := []uint16{448, 448, 496}
+	if len(outTypes) != len(wantTypes) {
+		t.Fatalf("OutTypes len = %d, want %d", len(outTypes), len(wantTypes))
+	}
+	for i, want := range wantTypes {
+		if outTypes[i] != want {
+			t.Errorf("OutTypes[%d] = %d, want %d", i, outTypes[i], want)
+		}
 	}
 	// Slot 1 = OUT VARCHAR -> "Acme Widget" (padded; trim trailing
 	// spaces for the assertion since IBM i blank-pads CHAR/VARCHAR

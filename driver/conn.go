@@ -442,7 +442,13 @@ func (c *Conn) nextCorr() uint32 {
 // bypassed -- selectOptions() takes this shortcut for the common
 // case where the caller hasn't yet routed through Stmt.Prepare /
 // Stmt.Exec and just wants the conn-level flags.
-func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectOption {
+// suppressPackage forces the extended-dynamic package marker off for
+// one statement even when the connection and SQL are otherwise
+// package-eligible. Used for CALLs that carry a temporal (DATE/TIME/
+// TIMESTAMP) OUT/INOUT parameter: those raise SQL-180 under the package
+// fast path on IBM i and must route through the regular PREPARE_DESCRIBE
+// path (see anyTemporalOutDest).
+func (c *Conn) selectOptionsFor(sql string, hasParams bool, suppressPackage bool) []hostserver.SelectOption {
 	var opts []hostserver.SelectOption
 	if c.cfg != nil {
 		// Thread the session's negotiated date/time output formats so
@@ -468,7 +474,7 @@ func (c *Conn) selectOptionsFor(sql string, hasParams bool) []hostserver.SelectO
 	if c.cfg != nil && c.cfg.BlockSizeKiB > 0 {
 		opts = append(opts, hostserver.WithBlockSize(c.cfg.BlockSizeKiB))
 	}
-	if c.pkg != nil && c.packageEligibleFor(sql, hasParams) {
+	if c.pkg != nil && !suppressPackage && c.packageEligibleFor(sql, hasParams) {
 		// Extended-dynamic + packaged statement: emit CP 0x3804
 		// carrying the full package name + prepare-option=0x01.
 		// That's JT400's wire shape for the "file into *PGM"

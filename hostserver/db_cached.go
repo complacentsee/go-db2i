@@ -170,8 +170,9 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	// v0.7.8: decode OUT/INOUT values from the synthetic CP 0x380E
 	// single-row data block when the EXECUTE asked for ORSResultData.
 	var outValues []any
+	var outTypes []uint16
 	if expectOutput {
-		outValues, err = parseOutParameterRow(rep, shapes)
+		outValues, outTypes, err = parseOutParameterRow(rep, shapes)
 		if err != nil {
 			_ = cleanup()
 			return nil, fmt.Errorf("hostserver: parse cached OUT-parameter row: %w", err)
@@ -180,7 +181,7 @@ func ExecutePreparedCached(conn io.ReadWriter, cached *PackageStatement, paramVa
 	if err := cleanup(); err != nil {
 		return nil, fmt.Errorf("hostserver: cleanup RPB after cached EXECUTE: %w", err)
 	}
-	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues}, nil
+	return &ExecResult{RowsAffected: rep.RowsAffected(), OutValues: outValues, OutTypes: outTypes}, nil
 }
 
 // OpenSelectPreparedCached is the Query-path companion to

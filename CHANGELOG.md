@@ -11,6 +11,81 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.7.28] - 2026-06-05
+
+v0.7.28 completes the **OUT / INOUT typed-destination** sub-item of the #40
+describe-driven bind rework: a stored-procedure `OUT`/`INOUT` parameter can now
+write back into a `*[]byte`, a `*time.Time`, or a `math/big` decimal carrier
+(`*big.Rat` / `*big.Int` / `*big.Float`, by value or pointer), in addition to
+the `int*`/`int64`/`float*`/`string`/`bool` destinations shipped earlier. With
+this, every named bind sub-item in #40 (exact-decimal, native VARBINARY,
+DATE/TIME-only, OUT types) has shipped; the tracking issue stays open pending a
+final pass over the decode-side date-format negotiation. Live-validated on
+PUB400 V7R5M0.
+
+### Added: OUT / INOUT `*[]byte` / `*time.Time` / `big.*` destinations (issue #40)
+
+The OUT wire and value decode were already correct (v0.7.8 added OUT cache-hit
+dispatch and the CP `0x380E` decode); the gap was purely Go-side destination
+handling. `outBindShape` now accepts the three new pointed-to types and
+`assignOutParam` converts the server-decoded value into them:
+
+- `*[]byte` ← the decoded `[]byte` (BINARY/VARBINARY) or string
+  (VARCHAR FOR BIT DATA), copied so the reused decode buffer can't alias it.
+- `*time.Time` ← the decoded ISO string, re-parsed by the **post-fixup SQL
+  type** rather than guessed from the string shape. `hostserver.ExecResult`
+  gained an `OutTypes []uint16` slice (populated on both the cache-miss and
+  cache-hit decode paths) so `parseTemporalISO` always sees the exact type that
+  produced the value — `DATE` (384/385), `TIME` (388/389), `TIMESTAMP`
+  (392/393).
+- `*big.Rat` / `*big.Int` / `*big.Float` ← the decoded decimal string, parsed
+  exactly (symmetric with the v0.7.25 exact-decimal IN funnel). A fractional
+  value into a `*big.Int` is reported as an error rather than truncated.
+
+`TIMESTAMP` `OUT`/`INOUT` parameters must be `TIMESTAMP(6)` (the IBM i default,
+26-char wire width) on the INOUT IN-side — the same driver-wide `TIMESTAMP(6)`
+encode limit the package-cache fast path already carries. `DATE` and `TIME` of
+any precision are unaffected.
+
+### Changed: OUT-only slots now bind SQL NULL
+
+An `OUT`-only slot's input value is ignored by the server, so the driver now
+binds SQL NULL there (the `0xFFFF` indicator, no data bytes) instead of a typed
+zero. A typed zero is still syntax-validated by the server for picky types — a
+`DATE` zero under an extended-dynamic package raised SQL-180 — so NULL is both
+safer and matches JT400's registered-OUT behaviour. `INOUT` slots still bind
+the destination's current value.
+
+### Fixed: temporal `OUT` params divert from the package fast path
+
+A `DATE`/`TIME`/`TIMESTAMP` `OUT`/`INOUT` parameter raises **SQL-180** under the
+extended-dynamic package fast path on IBM i (the server rejects a temporal
+OUT-parameter descriptor in the package context, even when the slot ships SQL
+NULL). The driver now detects a `*time.Time` OUT destination and routes that
+CALL through the regular `PREPARE_DESCRIBE` path — skipping the cache-hit
+dispatch, the filing counter, and the package marker on EXECUTE — so the CALL
+just works with package caching enabled (precedent: LOB binds already fall
+back). The non-temporal new types (`*[]byte`, `big.*`) are fine on the fast
+path and are not diverted.
+
+### Fixed: space-padded `DATE`/`TIME` OUT values normalize to ISO
+
+A stored-procedure `OUT` temporal value rides a synthetic result-data row whose
+field is the parameter's declared width, so a shorter job-format date
+(`26-05-07`) arrived right-padded with spaces (`26-05-07  `) and defeated the
+ISO normaliser. `dateStringToISO` / `timeStringToISO` now right-trim the value
+first; an exact-width SELECT column is unaffected (the trim is a no-op there).
+
+Live-validated on PUB400 V7R5M0 (`TestCallOutTypedDestinations` for the
+cache-miss `*[]byte` / `*time.Time` / `big.*` round-trips,
+`TestCallOutTypedCacheHitAgreement` for `[]byte` + decimal OUT on the fast path,
+`TestCallOutTemporalDivertsFromPackageCache` for the temporal-OUT diversion;
+the existing `TestStoredProcedureOUT` / `TestStoredProcedureINOUT` /
+`TestCacheHit_CriteriaExtended_OutCallDispatches` regressions stay green).
+Offline coverage in `driver.TestOutBindShapeTypes`, `TestAssignOutParam`,
+`TestWriteBackOutParamsNullAndTypes`, and the typed-nil / OUT-only-NULL
+regressions.
+
 ## [0.7.27] - 2026-06-05
 
 v0.7.27 completes the **DATE-only / TIME-only** sub-item of the #40

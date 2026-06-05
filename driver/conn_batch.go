@@ -164,7 +164,7 @@ func (c *Conn) BatchExec(ctx context.Context, sql string, rows [][]any) (int64, 
 		if err != nil {
 			return totalAffected, fmt.Errorf("db2i: BatchExec: chunk @ row %d: %w", off, err)
 		}
-		res, err := hostserver.ExecuteBatch(c.conn, sql, shapes, rowsAsAny, c.nextCorr(), c.selectOptionsFor(sql, true)...)
+		res, err := hostserver.ExecuteBatch(c.conn, sql, shapes, rowsAsAny, c.nextCorr(), c.selectOptionsFor(sql, true, false)...)
 		if err != nil {
 			return totalAffected, c.classifyConnErr(err)
 		}

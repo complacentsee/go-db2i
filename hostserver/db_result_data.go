@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"unicode/utf16"
 
 	"github.com/complacentsee/go-db2i/ebcdic"
@@ -1213,6 +1214,14 @@ func ymdToISODate(s string) string {
 // the same 1940 century boundary JT400 uses (00..39 -> 20YY,
 // 40..99 -> 19YY).
 func dateStringToISO(s string, format byte) string {
+	// A stored-procedure OUT/INOUT DATE value rides a synthetic
+	// result-data row whose field is the parameter's declared width
+	// (often the 10-char ISO max), so a shorter job-format date
+	// ("26-05-07") arrives right-padded with spaces ("26-05-07  ").
+	// That padding breaks every length check below and the sniffer.
+	// A SELECT DATE column is exact-width, so this trim is a no-op
+	// there; it only rescues the padded OUT case.
+	s = strings.TrimRight(s, " ")
 	// Each branch checks both length and separators so a wire string
 	// that doesn't match the negotiated format degrades to the
 	// shape-sniffer rather than slicing the wrong fields.
@@ -1271,6 +1280,10 @@ func centuryFromYY(yy string) string {
 // doesn't match the negotiated format is returned unchanged so a
 // misconfigured session degrades gracefully.
 func timeStringToISO(s string, format int8) string {
+	// Same OUT-param right-padding rescue as dateStringToISO: a TIME
+	// value in a synthetic OUT row is padded to the declared field
+	// width. Exact-width SELECT values are unaffected.
+	s = strings.TrimRight(s, " ")
 	switch format {
 	case 1: // USA: "HH:MM AM" / "HH:MM PM" (12-hour, no seconds)
 		if len(s) == 8 && (s[6] == 'A' || s[6] == 'P') {

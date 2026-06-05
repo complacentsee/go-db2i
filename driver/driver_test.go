@@ -1240,21 +1240,28 @@ func TestPackageCriteriaPlumbing(t *testing.T) {
 
 	// SELECT without params under default criteria: should NOT
 	// emit the WithExtendedDynamic option.
-	opts := conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false)
+	opts := conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false, false)
 	if hasExtendedDynamic(opts) {
 		t.Error("non-parameterised SELECT under criteria=default should not get WithExtendedDynamic")
 	}
 
 	// SELECT with params under default: should emit.
-	opts = conn.selectOptionsFor("SELECT ? FROM SYSIBM.SYSDUMMY1", true)
+	opts = conn.selectOptionsFor("SELECT ? FROM SYSIBM.SYSDUMMY1", true, false)
 	if !hasExtendedDynamic(opts) {
 		t.Error("parameterised SELECT under criteria=default should get WithExtendedDynamic")
+	}
+
+	// suppressPackage=true forces the marker off even for an otherwise
+	// eligible statement (the temporal-OUT CALL diversion).
+	opts = conn.selectOptionsFor("SELECT ? FROM SYSIBM.SYSDUMMY1", true, true)
+	if hasExtendedDynamic(opts) {
+		t.Error("suppressPackage=true should drop WithExtendedDynamic")
 	}
 
 	// Flip to criteria=select; the same unparameterised SELECT now
 	// passes the filter.
 	conn.cfg.PackageCriteria = "select"
-	opts = conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false)
+	opts = conn.selectOptionsFor("SELECT 1 FROM SYSIBM.SYSDUMMY1", false, false)
 	if !hasExtendedDynamic(opts) {
 		t.Error("non-parameterised SELECT under criteria=select should get WithExtendedDynamic")
 	}
