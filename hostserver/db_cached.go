@@ -417,12 +417,23 @@ func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, erro
 		}
 		precision := uint16(0)
 		scale := uint16(0)
+		fieldLength := p.FieldLength
 		if isDecimalNumericSQLType(p.SQLType) {
 			// Trust the SQLDA's high/low-byte split for packed/
 			// zoned decimal -- precision and scale are part of the
 			// type identity for these.
 			precision = p.Precision
 			scale = p.Scale
+			// The package SQLDA's 2-byte "length" field for packed/
+			// zoned/decfloat carries the precision/scale word itself
+			// (e.g. DECIMAL(31,7) stores 0x1F07), NOT the wire byte
+			// width -- normalizeSQLDALength passes it through unchanged
+			// for these non-VAR types. Binding it verbatim made the
+			// packed/zoned encoder reject the slot ("packed bytes 16 !=
+			// FieldLength 7943"), so recompute the real on-wire width
+			// from precision. This is the cache-hit analogue of the
+			// width EncodeDBExtendedData derives on the cache-miss path.
+			fieldLength = cachedDecimalFieldLength(p.SQLType, precision)
 		}
 		// Preserve the cached direction byte. Normalising 0xF0 to
 		// 0x00 keeps the wire path consistent with v0.7.7-and-earlier
@@ -434,7 +445,7 @@ func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, erro
 		}
 		out = append(out, PreparedParam{
 			SQLType:     p.SQLType,
-			FieldLength: p.FieldLength,
+			FieldLength: fieldLength,
 			Precision:   precision,
 			Scale:       scale,
 			CCSID:       p.CCSID,
@@ -442,6 +453,35 @@ func preparedParamsFromCached(pmf []ParameterMarkerField) ([]PreparedParam, erro
 		})
 	}
 	return out, nil
+}
+
+// cachedDecimalFieldLength returns the on-wire byte width of a packed/
+// zoned/decfloat parameter from its precision, mirroring the widths the
+// encodeRowData arms expect (and that EncodeDBExtendedData derives on the
+// cache-miss path):
+//
+//   - DECIMAL (484/485): packed BCD, ceil((precision+1)/2) bytes -- one
+//     nibble per digit plus a sign nibble.
+//   - NUMERIC (488/489): zoned BCD, one byte per digit (precision bytes).
+//   - DECFLOAT (996/997): 8 bytes for the 16-digit form, 16 for the
+//     34-digit form; precision selects.
+//
+// It exists because the cached package SQLDA encodes precision/scale in the
+// field's "length" slot rather than the byte width, so the width must be
+// reconstructed (see preparedParamsFromCached).
+func cachedDecimalFieldLength(sqlType, precision uint16) uint32 {
+	switch sqlType {
+	case 484, 485: // DECIMAL packed BCD
+		return uint32((precision + 2) / 2) // == ceil((precision+1)/2)
+	case 488, 489: // NUMERIC zoned BCD
+		return uint32(precision)
+	case 996, 997: // DECFLOAT
+		if precision <= 16 {
+			return 8
+		}
+		return 16
+	}
+	return 0
 }
 
 // isDecimalNumericSQLType reports whether the SQLType is one of the

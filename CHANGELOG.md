@@ -35,6 +35,55 @@ offline test (`hostserver.TestArrayCrossesWireAsParameterNotResultColumn`,
 fixture `testdata/array_param_describe_3813.bin`) and a live conformance
 subtest (`TestResultTypeCoverage/ARRAY_not_a_result_column`).
 
+## [0.7.25] - 2026-06-05
+
+v0.7.25 adds describe-driven **exact-decimal parameter binds** — a
+high-precision `DECIMAL`/`NUMERIC` value can be bound straight from
+`*math/big.Rat` / `*big.Int` / `*big.Float` or any `fmt.Stringer` decimal,
+with no `float64` precision loss — and fixes a latent bug that broke native
+decimal binds on the extended-dynamic package-cache fast path. Part of the
+#40 describe-driven bind rework (which stays open for its BINARY/VARBINARY,
+DATE/TIME-only, and OUT-type sub-items). Live-validated on PUB400 V7R5M0.
+
+### Added: exact-decimal parameter binds (issue #40, describe-driven bind)
+
+The bind boundary now admits exact-decimal Go types that `database/sql`'s
+default converter previously rejected — `*math/big.Rat`, `*big.Int`,
+`*big.Float`, and struct-shaped `fmt.Stringer` decimals — rendering each
+to a canonical plain-decimal string in `CheckNamedValue` and binding it
+through the precision-preserving VARCHAR path (server-cast on cache-miss;
+native packed/zoned BCD from the `*PGM` parameter-marker format on
+cache-hit). This closes the `bind-no-exact-decimal-type` gap from the
+2026-06 compatibility audit: a high-precision `DECIMAL(31,7)` value no
+longer has to be hand-stringified or routed lossily through `float64`.
+
+The funnel is **additive and describe-driven** — it never preempts a type
+that already implements `driver.Valuer` (e.g. shopspring/decimal keeps
+binding via `Value()`), never re-routes a type the default converter
+already handles (`time.Time`, stringer enums, named scalars stay on their
+existing path), and emits no wire byte the driver didn't already emit for
+the equivalent string bind. A `*big.Rat` with no terminating decimal
+expansion (e.g. `1/3`) is **refused** rather than silently rounded;
+over-scale values are truncated by the server per SQL assignment-cast
+rules (ROUND_DOWN, matching JT400). Live-validated on PUB400 V7R5M0
+(`TestExactDecimalBind`, `TestExactDecimalCacheHitAgreement`); offline
+coverage in `driver.TestCanonicalDecimalString` /
+`TestCheckNamedValueAdmitsDecimalTypes`.
+
+### Fixed: DECIMAL/NUMERIC parameter bind on cache-hit (`FieldLength 7943`)
+
+Recovering a cached packed/zoned/DECFLOAT parameter shape mis-set its
+on-wire `FieldLength` to the SQLDA's precision/scale word (a
+`DECIMAL(31,7)` slot came back as `0x1F07` = 7943 instead of 16 packed
+bytes), so the encoder rejected the slot — `packed bytes 16 != FieldLength
+7943` — and every native decimal bind failed on the cache-hit fast path
+(the bug went unnoticed because no prior test bound a native DECIMAL/
+NUMERIC parameter through a cached statement). `preparedParamsFromCached`
+now recomputes the byte width from precision via `cachedDecimalFieldLength`,
+matching the cache-miss path. Surfaced by the issue #40 cache-hit
+conformance work; pinned offline by
+`hostserver.TestPreparedParamsFromCachedDecimalFieldLength`.
+
 ## [0.7.24] - 2026-06-04
 
 v0.7.24 makes go-db2i auto-discover the host-server ports like JT400:
