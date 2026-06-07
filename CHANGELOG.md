@@ -11,6 +11,57 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-07
+
+v0.9.0 adds **stored-procedure ARRAY parameters** (issue #68) — the first
+feature past the #40 bind rework. On DB2 for i an ARRAY crosses the
+host-server wire only as a procedure parameter (IN/OUT/INOUT), never a
+result-set column (#39 / SQL-20441). A new generic carrier, `db2i.Array[T]`,
+binds an array IN and is registered as an `sql.Out` destination for OUT /
+INOUT — mapping 1:1 to JT400's `java.sql.Array` over a CALL.
+
+### Added: stored-procedure ARRAY parameters via `db2i.Array[T]` (issue #68)
+
+```go
+// IN
+db.Exec("CALL P(?)", db2i.Array[int32]{Elements: []int32{1, 2, 3}})
+// OUT
+var a db2i.Array[int32]
+db.Exec("CALL P(?)", sql.Out{Dest: &a})
+// INOUT
+db.Exec("CALL P(?)", sql.Out{Dest: &a, In: true})
+// per-element NULLs: use a pointer element type
+db2i.Array[*int32]{Elements: []*int32{&x, nil, &z}}
+```
+
+The wire layout was captured live from JT400 21.0.4 on PUB400 V7R5M0
+before any codec was written (the keystone Phase 0), then implemented to
+match byte-for-byte:
+
+- **Describe (CP 0x3813):** the parameter-marker parser now reads the
+  field-flags array bit (`+21`) and declared cardinality (`+22`); a
+  parameter exposes `IsArray` + `ArrayMaxCardinality` with the element
+  type/length/CCSID in the existing fields.
+- **IN/INOUT encode (CP 0x382F, `DBVariableData`):** replaces the scalar
+  CP 0x381F whenever any parameter is an array. The per-element encoder
+  is the same `encodeScalarValue` the scalar row path uses, so an array
+  element's bytes are byte-identical to the same scalar value; VARCHAR
+  elements use a fixed `maxLen+2` stride, a NULL element is a `0xFFFF`
+  indicator over a zeroed slot, and a whole-null array is `0x9911 0xFFFF`.
+- **OUT/INOUT decode (reply CP 0x3901, `DBVariableData`):** replaces the
+  scalar CP 0x380E for array CALLs; carries only OUT/INOUT columns in OUT
+  order, decoded per element via the existing column decoder and written
+  back into the caller's `*db2i.Array[T]`.
+
+Element types in this release: SMALLINT / INTEGER / BIGINT / DECIMAL /
+NUMERIC / REAL / DOUBLE / DECFLOAT / VARCHAR (whatever the scalar element
+encoder supports). Array CALLs currently divert off the extended-dynamic
+package fast path (array cache-hit behaviour is not yet captured), the
+same way temporal-OUT CALLs do. Live-validated on PUB400 V7R5M0 across
+IN / OUT / INOUT, INTEGER and VARCHAR, a null element, and a whole-null
+array; the 0x382F / 0x3901 codecs are pinned byte-for-byte against the
+captured JT400 frames offline. No change to any non-array path.
+
 ## [0.8.0] - 2026-06-07
 
 v0.8.0 completes the **#40 describe-driven bind rework**. The five per-type

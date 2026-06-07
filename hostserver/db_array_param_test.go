@@ -82,4 +82,17 @@ func TestArrayCrossesWireAsParameterNotResultColumn(t *testing.T) {
 	if got := (flag >> 30) & 1; got != 1 {
 		t.Errorf("array flag bit (flag=0x%08X >>30 &1) = %d, want 1 (this column IS an array parameter)", flag, got)
 	}
+
+	// Issue #68 Phase 1: the production parser now exposes the array
+	// flag + declared cardinality directly, so callers no longer repeat
+	// the offset math above.
+	if !f.IsArray {
+		t.Errorf("parsed field IsArray = false, want true")
+	}
+	if f.Flags != flag {
+		t.Errorf("parsed field Flags = 0x%08X, want 0x%08X (raw +21 field-flags int)", f.Flags, flag)
+	}
+	if f.ArrayMaxCardinality != 10 {
+		t.Errorf("parsed field ArrayMaxCardinality = %d, want 10 (INTEGER ARRAY[10])", f.ArrayMaxCardinality)
+	}
 }

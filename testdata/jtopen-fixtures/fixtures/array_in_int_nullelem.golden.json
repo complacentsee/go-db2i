@@ -1,0 +1,7 @@
+{
+  "case" : "array_in_int_nullelem",
+  "resultSets" : [ ],
+  "notes" : {
+    "inArray" : "[10,20,null,40,50]"
+  }
+}

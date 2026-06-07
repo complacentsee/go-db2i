@@ -321,8 +321,18 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		}
 	}
 
-	// --- 4) EXECUTE with input parameter values.
-	dataPayload, err := EncodeDBExtendedData(paramShapes, paramValues)
+	// --- 4) EXECUTE with input parameter values. An array parameter
+	// (issue #68) switches the value block from the scalar CP 0x381F
+	// (DBExtendedData) to CP 0x382F (DBVariableData); the server then
+	// replies with the array CP 0x3901 instead of the scalar 0x380E.
+	dataCP := cpDBExtendedData
+	var dataPayload []byte
+	if anyArrayParam(paramShapes) {
+		dataCP = cpDBVariableData
+		dataPayload, err = EncodeDBVariableData(paramShapes, paramValues)
+	} else {
+		dataPayload, err = EncodeDBExtendedData(paramShapes, paramValues)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("hostserver: encode input parameter data: %w", err)
 	}
@@ -362,7 +372,7 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		}
 		params = append(params,
 			DBParamShort(cpDBStatementType, statementTypeForSQL(sql)),
-			DBParam{CodePoint: cpDBExtendedData, Data: dataPayload},
+			DBParam{CodePoint: dataCP, Data: dataPayload},
 			DBParamShort(cpDBSyncPointDelimiter, 0x0000),
 		)
 		hdr, payload, err := BuildDBRequest(ReqDBSQLExecute, tpl, params)
@@ -661,6 +671,14 @@ func ExecuteBatch(conn io.ReadWriter, sql string, paramShapes []PreparedParam, r
 // go-db2i mirrors this end-to-end via the same parseExtendedResultData
 // path used for SELECT rows.
 func parseOutParameterRow(rep *DBReply, shapes []PreparedParam) ([]any, []uint16, error) {
+	// Array CALLs (issue #68) reply via CP 0x3901 (DBVariableData)
+	// instead of the scalar CP 0x380E synthetic row. When present, decode
+	// it: it carries only OUT/INOUT columns in OUT order, with array
+	// slots producing an ArrayValue.
+	if data := rep.findVariableResultData(); data != nil {
+		return parseVariableResultData(data, shapes)
+	}
+
 	cols := make([]SelectColumn, len(shapes))
 	for i, p := range shapes {
 		cols[i] = SelectColumn{

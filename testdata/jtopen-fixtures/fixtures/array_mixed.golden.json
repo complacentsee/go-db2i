@@ -1,0 +1,13 @@
+{
+  "case" : "array_mixed",
+  "resultSets" : [ ],
+  "notes" : {
+    "inScalar" : "7",
+    "inArray" : "[100,200,300]"
+  },
+  "outParams" : [ {
+    "index" : 3,
+    "sqlType" : 4,
+    "value" : 10
+  } ]
+}

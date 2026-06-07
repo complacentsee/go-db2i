@@ -59,6 +59,26 @@ package hostserver
 // DateFormat, and OUT/INOUT mutates in place (preserving Value/DateFormat).
 func reconcileBindShapesFromPMF(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) (expectOutput bool) {
 	for i := range shapes {
+		// Array parameter (issue #68): adopt the ELEMENT shape from the
+		// describe (the PMF reports the element type/len/CCSID, not the
+		// array) and mark the slot so the EXECUTE row is encoded as
+		// CP 0x382F. Handles all directions; an OUT/INOUT array still
+		// flips expectOutput below via its direction byte. The bound
+		// cardinality + element values live in shapes[i].Value /
+		// ArrayCardinality and are preserved.
+		if i < len(pmf) && pmf[i].IsArray {
+			p := pmf[i]
+			shapes[i].IsArray = true
+			shapes[i].SQLType = p.SQLType
+			shapes[i].FieldLength = p.FieldLength
+			shapes[i].Precision = p.Precision
+			shapes[i].Scale = p.Scale
+			shapes[i].CCSID = p.CCSID
+			if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
+				expectOutput = true
+			}
+			continue
+		}
 		// OUT/INOUT direction is independent of PMF length: expectOutput must
 		// flip for every OUT/INOUT slot, even one past the end of the PMF whose
 		// shape stays the placeholder (matches reconcileOutInoutBindShapes).

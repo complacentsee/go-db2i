@@ -1,0 +1,7 @@
+{
+  "case" : "array_out_int",
+  "resultSets" : [ ],
+  "notes" : {
+    "outArray" : "[11, 22, 33]"
+  }
+}
