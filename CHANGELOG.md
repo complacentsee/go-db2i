@@ -11,6 +11,53 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-07
+
+v0.9.1 closes the issue #68 stored-procedure ARRAY follow-ups: broader
+element-type support, and the resolution of array cache-hit as a documented
+server-side limitation.
+
+### Added: fixed-CHAR array elements + broader element coverage
+
+- `CHAR(n)` array elements now encode — a new 452/453 arm in
+  `encodeScalarValue` (EBCDIC via the SBCS converter, blank-padded with
+  `0x40` / zero-padded for FOR BIT DATA, no length prefix). This also gives
+  scalar fixed-CHAR binds their first encoder.
+- Live conformance now round-trips BIGINT, SMALLINT, DOUBLE, VARBINARY, and
+  DECIMAL array elements (in addition to INTEGER and VARCHAR).
+
+### Fixed
+
+- `assignOutParam` now accepts `int16` / `int8` source values, so a SMALLINT
+  OUT parameter or array element scans into an `int16` destination (SMALLINT
+  decodes to `int16`). Previously errored with "cannot assign int16".
+- `ExecutePreparedSQL` now drops the RPB on the client-side encode-error
+  path. A failed bind (e.g. an unsupported value) left the RPB slot busy and
+  broke the **next** prepared statement on the same connection with
+  RC -101 / errorClass 2. This affects any bind error, not just arrays.
+- The `TestZZPub400Cleanup` maintenance routine now reclaims orphan SQL
+  procedure `*PGM` objects via `DROP SPECIFIC PROCEDURE` instead of the
+  lock-blocked `DLTPGM`; the old path silently leaked procedure storage,
+  eventually exhausting the free-tier user-profile quota.
+
+### Not planned (documented limitations)
+
+- **Array cache-hit on the extended-dynamic package fast path** — permanent
+  server-side limitation, not a deferral. DB2 for i cannot serialize an
+  array parameter's SQLDA through the package mechanism: an array CALL files
+  into the `*PGM`, but `RETURN_PACKAGE` then fails with SQL-351 ("unsupported
+  SQLTYPE") and returns the package empty (a scalar CALL round-trips fine).
+  Array CALLs therefore always re-prepare; the driver diverts them off the
+  fast path. (issue #68; see `ROADMAP.md`)
+- **Temporal array elements** (DATE/TIME/TIMESTAMP via `time.Time`) are not
+  supported — bind a string in the IBM 26-char timestamp form instead.
+
+### Docs
+
+- New `docs/stored-procedures.md` — CALL via `database/sql`, OUT/INOUT via
+  `sql.Out`, and `db2i.Array[T]` (supported element types, per-element
+  NULLs, the package-caching limitation). Linked from the README.
+
 ## [0.9.0] - 2026-06-07
 
 v0.9.0 adds **stored-procedure ARRAY parameters** (issue #68) — the first
