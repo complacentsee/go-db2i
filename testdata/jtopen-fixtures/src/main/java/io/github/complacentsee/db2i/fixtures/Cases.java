@@ -1,5 +1,6 @@
 package io.github.complacentsee.db2i.fixtures;
 
+import java.sql.Array;
 import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -8,6 +9,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -124,6 +126,24 @@ final class Cases {
         cases.add(new CallResultSet());
         cases.add(new CallMultiSet());
         cases.add(new CallInout());
+
+        // Stored-procedure ARRAY parameters (issue #68, Phase 0 capture).
+        // CREATE TYPE ... ARRAY UDTs + IN/OUT/INOUT array procedures, then
+        // CALL with java.sql.Array binds. These produce the authoritative
+        // JT400 wire bytes for the IN-array EXECUTE frame (CP 0x382F) and
+        // the OUT-array reply frame (CP 0x3901) -- frames go-db2i cannot
+        // yet emit, so JT400 is the only source. Element types cover the
+        // fixed-stride (INTEGER) and variable-length (VARCHAR) cases; the
+        // CALL variants cover a NULL element, a whole-NULL array, and a
+        // mixed scalar+array procedure. Confirms whether PUB400 V7R5M0
+        // accepts IN and INOUT array params (vs OUT-only).
+        cases.add(new ArrayInIntBasic(schema));
+        cases.add(new ArrayInIntNullElem(schema));
+        cases.add(new ArrayInIntWholeNull(schema));
+        cases.add(new ArrayOutInt(schema));
+        cases.add(new ArrayInoutInt(schema));
+        cases.add(new ArrayInoutVc(schema));
+        cases.add(new ArrayMixed(schema));
 
         // Extended-dynamic-package caching (M10). Three captures cover
         // the cache lifecycle: first PREPARE writing to the *PGM,
@@ -975,6 +995,214 @@ final class Cases {
                 cs.registerOutParameter(1, Types.INTEGER);
                 cs.execute();
                 golden.recordOutParam(1, Types.INTEGER, Integer.valueOf(cs.getInt(1)));
+            }
+        }
+    }
+
+    /**
+     * Base class for issue #68 stored-procedure ARRAY-parameter fixtures.
+     *
+     * On DB2 for i an ARRAY only crosses the host-server wire as a
+     * stored-procedure parameter (IN/OUT/INOUT), never a result column
+     * (#39 / SQL-20441). The parameter type must be a user-defined ARRAY
+     * type (CREATE TYPE ... AS &lt;elem&gt; ARRAY[n]); the procedure
+     * signature references that UDT. JT400 binds an array IN via
+     * {@code setArray} (which requires a CALL statement, see
+     * AS400JDBCPreparedStatementImpl.setArray) and reads OUT/INOUT arrays
+     * via {@code getArray}.
+     *
+     * setup() creates the two element-type UDTs idempotently (DB2 for i
+     * has no CREATE TYPE IF NOT EXISTS, so SQLSTATE 42710 "already exists"
+     * is swallowed) and (re)creates the procedures with CREATE OR REPLACE.
+     * Objects live in the test user's own schema and are named G* so the
+     * Go conformance suite's zz_cleanup_test reclaims any orphans
+     * (*SQLUDT via DROP TYPE, *PGM via DLTPGM).
+     */
+    private static abstract class ArrayProcs extends Case {
+        protected final String schema;
+        protected final String tInt;     // INTEGER ARRAY[10] UDT
+        protected final String tVc;      // VARCHAR(20) ARRAY[10] UDT
+        protected final String pAinInt;  // (IN  INTEGER ARRAY)
+        protected final String pAoutInt; // (OUT INTEGER ARRAY)
+        protected final String pAioInt;  // (INOUT INTEGER ARRAY)
+        protected final String pAioVc;   // (INOUT VARCHAR ARRAY)
+        protected final String pMix;     // (IN INT, IN INTEGER ARRAY, OUT INT)
+
+        ArrayProcs(String name, String schema) {
+            super(name);
+            this.schema = schema;
+            this.tInt = schema + ".GARRINT";
+            this.tVc = schema + ".GARRVC";
+            this.pAinInt = schema + ".GPAININT";
+            this.pAoutInt = schema + ".GPAOUTINT";
+            this.pAioInt = schema + ".GPAIOINT";
+            this.pAioVc = schema + ".GPAIOVC";
+            this.pMix = schema + ".GPMIX";
+        }
+
+        @Override public void setup(Connection conn) throws SQLException {
+            try (Statement st = conn.createStatement()) {
+                createTypeIfAbsent(st, "CREATE TYPE " + tInt + " AS INTEGER ARRAY[10]");
+                createTypeIfAbsent(st, "CREATE TYPE " + tVc + " AS VARCHAR(20) ARRAY[10]");
+
+                // IN-only: body ignores the param; the array still ships on
+                // the wire as the EXECUTE request's CP 0x382F payload.
+                st.execute("CREATE OR REPLACE PROCEDURE " + pAinInt
+                        + " (IN P_A " + tInt + ") LANGUAGE SQL "
+                        + "BEGIN DECLARE V INTEGER DEFAULT 0; SET V = 1; END");
+                // OUT-only: returns a known array so the CP 0x3901 reply
+                // carries deterministic element bytes.
+                st.execute("CREATE OR REPLACE PROCEDURE " + pAoutInt
+                        + " (OUT P_A " + tInt + ") LANGUAGE SQL "
+                        + "BEGIN SET P_A = ARRAY[11,22,33]; END");
+                // INOUT: IN side ships the bound array (0x382F), OUT side
+                // returns a different array (0x3901) -- both in one CALL.
+                st.execute("CREATE OR REPLACE PROCEDURE " + pAioInt
+                        + " (INOUT P_A " + tInt + ") LANGUAGE SQL "
+                        + "BEGIN SET P_A = ARRAY[100,200,300]; END");
+                // INOUT VARCHAR: resolves the variable-length element-stride
+                // question on both the IN and OUT sides.
+                st.execute("CREATE OR REPLACE PROCEDURE " + pAioVc
+                        + " (INOUT P_A " + tVc + ") LANGUAGE SQL "
+                        + "BEGIN SET P_A = ARRAY['XX','YYY']; END");
+                // Mixed scalar + array: scalar IN, array IN, scalar OUT.
+                // Tests descriptor ordering when only some params are arrays
+                // and which reply CP carries the scalar OUT.
+                st.execute("CREATE OR REPLACE PROCEDURE " + pMix
+                        + " (IN P_N INTEGER, IN P_A " + tInt + ", OUT P_CNT INTEGER) "
+                        + "LANGUAGE SQL "
+                        + "BEGIN SET P_CNT = P_N + CARDINALITY(P_A); END");
+            }
+        }
+
+        private static void createTypeIfAbsent(Statement st, String ddl) throws SQLException {
+            try {
+                st.execute(ddl);
+            } catch (SQLException e) {
+                // 42710 = object already exists. DB2 for i has no
+                // CREATE TYPE IF NOT EXISTS; reuse the existing UDT.
+                if (!"42710".equals(e.getSQLState())) {
+                    throw e;
+                }
+            }
+        }
+
+        /** Record an OUT/INOUT array value as a golden note, tolerant of
+         *  a JT400 decode error (the .trace still has the reply bytes). */
+        protected static void recordArray(GoldenWriter golden, String key, Array arr) {
+            try {
+                if (arr == null) {
+                    golden.recordNote(key, "NULL");
+                    return;
+                }
+                Object raw = arr.getArray();
+                if (raw instanceof Object[]) {
+                    golden.recordNote(key, Arrays.toString((Object[]) raw));
+                } else {
+                    golden.recordNote(key, String.valueOf(raw));
+                }
+            } catch (SQLException e) {
+                golden.recordNote(key + "_decodeError", String.valueOf(e.getMessage()));
+            }
+        }
+
+        // Types/procs are left in place across cases (idempotent setup);
+        // the Go cleanup routine reclaims them as G* orphans.
+    }
+
+    /** {@code array_in_int_basic} — IN INTEGER ARRAY[10], 5 non-null elements. */
+    private static final class ArrayInIntBasic extends ArrayProcs {
+        ArrayInIntBasic(String schema) { super("array_in_int_basic", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            Array a = conn.createArrayOf("INTEGER", new Integer[]{10, 20, 30, 40, 50});
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAinInt + "(?)")) {
+                cs.setArray(1, a);
+                cs.execute();
+                golden.recordNote("inArray", "[10,20,30,40,50]");
+            }
+        }
+    }
+
+    /** {@code array_in_int_nullelem} — IN INTEGER ARRAY with one NULL element. */
+    private static final class ArrayInIntNullElem extends ArrayProcs {
+        ArrayInIntNullElem(String schema) { super("array_in_int_nullelem", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            Array a = conn.createArrayOf("INTEGER", new Integer[]{10, 20, null, 40, 50});
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAinInt + "(?)")) {
+                cs.setArray(1, a);
+                cs.execute();
+                golden.recordNote("inArray", "[10,20,null,40,50]");
+            }
+        }
+    }
+
+    /** {@code array_in_int_wholenull} — IN INTEGER ARRAY bound to SQL NULL. */
+    private static final class ArrayInIntWholeNull extends ArrayProcs {
+        ArrayInIntWholeNull(String schema) { super("array_in_int_wholenull", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAinInt + "(?)")) {
+                cs.setNull(1, Types.ARRAY);
+                cs.execute();
+                golden.recordNote("inArray", "NULL");
+            }
+        }
+    }
+
+    /** {@code array_out_int} — OUT INTEGER ARRAY; reply CP 0x3901. */
+    private static final class ArrayOutInt extends ArrayProcs {
+        ArrayOutInt(String schema) { super("array_out_int", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAoutInt + "(?)")) {
+                cs.registerOutParameter(1, Types.ARRAY);
+                cs.execute();
+                recordArray(golden, "outArray", cs.getArray(1));
+            }
+        }
+    }
+
+    /** {@code array_inout_int} — INOUT INTEGER ARRAY; request 0x382F + reply 0x3901. */
+    private static final class ArrayInoutInt extends ArrayProcs {
+        ArrayInoutInt(String schema) { super("array_inout_int", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            Array a = conn.createArrayOf("INTEGER", new Integer[]{1, 2, 3});
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAioInt + "(?)")) {
+                cs.setArray(1, a);
+                cs.registerOutParameter(1, Types.ARRAY);
+                cs.execute();
+                golden.recordNote("inArray", "[1,2,3]");
+                recordArray(golden, "outArray", cs.getArray(1));
+            }
+        }
+    }
+
+    /** {@code array_inout_vc} — INOUT VARCHAR ARRAY; variable-length element stride. */
+    private static final class ArrayInoutVc extends ArrayProcs {
+        ArrayInoutVc(String schema) { super("array_inout_vc", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            Array a = conn.createArrayOf("VARCHAR", new String[]{"AB", "CDE", null});
+            try (CallableStatement cs = conn.prepareCall("CALL " + pAioVc + "(?)")) {
+                cs.setArray(1, a);
+                cs.registerOutParameter(1, Types.ARRAY);
+                cs.execute();
+                golden.recordNote("inArray", "[AB,CDE,null]");
+                recordArray(golden, "outArray", cs.getArray(1));
+            }
+        }
+    }
+
+    /** {@code array_mixed} — IN INTEGER, IN INTEGER ARRAY, OUT INTEGER. */
+    private static final class ArrayMixed extends ArrayProcs {
+        ArrayMixed(String schema) { super("array_mixed", schema); }
+        @Override public void execute(Connection conn, GoldenWriter golden) throws SQLException {
+            Array a = conn.createArrayOf("INTEGER", new Integer[]{100, 200, 300});
+            try (CallableStatement cs = conn.prepareCall("CALL " + pMix + "(?, ?, ?)")) {
+                cs.setInt(1, 7);
+                cs.setArray(2, a);
+                cs.registerOutParameter(3, Types.INTEGER);
+                cs.execute();
+                golden.recordNote("inScalar", "7");
+                golden.recordNote("inArray", "[100,200,300]");
+                golden.recordOutParam(3, Types.INTEGER, Integer.valueOf(cs.getInt(3)));
             }
         }
     }

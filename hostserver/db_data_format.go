@@ -73,6 +73,21 @@ type ParameterMarkerField struct {
 	LOBLocator  uint32
 	LOBMaxSize  uint32
 	Name        string
+
+	// Flags is the raw 4-byte field-flags int at per-field record
+	// offset +21 (JTOpen DBSuperExtendedDataFormat). Bit 30 is the
+	// array flag (see IsArray); bit 27 is the XML-DBChar flag.
+	Flags uint32
+	// IsArray reports whether this parameter is a stored-procedure
+	// ARRAY parameter (issue #68). When set, SQLType/FieldLength/CCSID
+	// describe the ELEMENT, not the array; there is no array SQL-type
+	// code on the wire. Mutually exclusive with IsLOB (a parameter is
+	// LOB or array, never both), so LOBLocator/LOBMaxSize are not
+	// meaningful when IsArray is true.
+	IsArray bool
+	// ArrayMaxCardinality is the declared ARRAY[N] bound, read from
+	// per-field record offset +22 (a u32) when IsArray. Zero otherwise.
+	ArrayMaxCardinality uint32
 }
 
 // IsLOB reports whether this parameter targets a LOB column and
@@ -140,6 +155,21 @@ func parseSuperExtendedParameterMarkerFormat(data []byte) ([]ParameterMarkerFiel
 			ParamType:   data[base+14],
 			LOBLocator:  be.Uint32(data[base+17 : base+21]),
 			LOBMaxSize:  be.Uint32(data[base+26 : base+30]),
+		}
+		// Field-flags int at +21: bit 30 is the array flag (issue #68).
+		// JTOpen's DBSuperExtendedDataFormat.getArrayType reads
+		// (flag >> 30) & 1. The flags int (+21) and the array-max-
+		// cardinality int (+22) deliberately overlap: a non-array
+		// parameter leaves the lower flag bytes zero, and the array bit
+		// lives in the top byte (+21), independent of the cardinality
+		// bytes (+22..+25). Both reads stay inside the 48-byte fixed
+		// record. The +21/+22 region overlaps the LOB-locator(+17)/
+		// LOB-max(+26) region, but array and LOB are mutually exclusive
+		// so only one interpretation is meaningful per field.
+		f.Flags = be.Uint32(data[base+21 : base+25])
+		f.IsArray = (f.Flags>>30)&1 == 1
+		if f.IsArray {
+			f.ArrayMaxCardinality = be.Uint32(data[base+22 : base+26])
 		}
 		offToVar := int(be.Uint32(data[base+32 : base+36]))
 		varLen := int(be.Uint32(data[base+36 : base+40]))

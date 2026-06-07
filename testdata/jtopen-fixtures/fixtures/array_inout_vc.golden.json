@@ -1,0 +1,8 @@
+{
+  "case" : "array_inout_vc",
+  "resultSets" : [ ],
+  "notes" : {
+    "inArray" : "[AB,CDE,null]",
+    "outArray" : "[XX, YYY]"
+  }
+}

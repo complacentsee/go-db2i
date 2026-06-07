@@ -86,18 +86,14 @@ that needs it.
 - **`LastInsertId` via `IDENTITY_VAL_LOCAL()`** — currently
   session-scoped / best-effort; a more complete implementation is a
   nice-to-have. (deferred)
-- **ARRAY values** — *not* a result-column gap. DB2 for i never
-  delivers an array as a result-set column: a SELECT that projects an
-  array (`VALUES ARRAY[..]`, an `ARRAY_AGG` result column,
+- **ARRAY result columns** — *not* a result-column gap, and not planned.
+  DB2 for i never delivers an array as a result-set column: a SELECT that
+  projects an array (`VALUES ARRAY[..]`, an `ARRAY_AGG` result column,
   `CAST(.. AS .. ARRAY)`) is rejected at describe time with SQL-20441 /
   SQLSTATE 428H2, so an array SQL type cannot reach the row decoder
   (live-verified on PUB400 V7R5M0; see issue #39). An array only crosses
-  the host-server wire as a stored-procedure array **parameter** —
-  described in the parameter-marker format with the element type plus an
-  array flag bit, and returned via reply CP 0x3901 (`DBVariableData`).
-  Supporting stored-procedure array IN/OUT parameters (array-UDT
-  describe/bind + CP 0x3901 parsing, with no `database/sql` array type
-  to bind to) is a possible future feature, not a decode fix. (deferred)
+  the host-server wire as a stored-procedure **parameter**, which is now
+  supported — see below. (won't fix; server-side limitation)
 
 ## Package caching
 

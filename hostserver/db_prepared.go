@@ -72,6 +72,16 @@ type PreparedParam struct {
 	// ISO/JIS/USA/EUR, 8 for MDY/DMY/YMD). Ignored for non-DATE
 	// SQL types.
 	DateFormat byte
+
+	// IsArray marks this as a stored-procedure ARRAY parameter (issue
+	// #68). SQLType/FieldLength/CCSID then describe the ELEMENT; Value
+	// holds the array elements as a []any (or nil for a whole-null
+	// array). When any parameter in a row IsArray, the whole row is
+	// encoded as CP 0x382F (DBVariableData) instead of scalar CP 0x381F.
+	IsArray bool
+	// ArrayCardinality is the element count actually bound (the array
+	// length), distinct from the describe-side declared ARRAY[N] max.
+	ArrayCardinality uint32
 }
 
 // EncodeDBExtendedDataFormat builds the CP 0x381E payload (parameter
@@ -247,327 +257,329 @@ func EncodeDBExtendedDataBatch(params []PreparedParam, rows [][]any) ([]byte, er
 // NULL). rowPrefix is empty for single-row encodings (to preserve
 // legacy error format) and "row N " for batch encodings.
 func encodeRowData(buf []byte, dataOff int, params []PreparedParam, values []any, rowPrefix string) error {
-	be := binary.BigEndian
 	for i, p := range params {
 		v := values[i]
 		if v == nil {
 			dataOff += int(p.FieldLength)
 			continue
 		}
-		switch p.SQLType {
-		case 500, 501: // SMALLINT (NN, nullable)
-			iv, err := toInt32(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			if iv < -1<<15 || iv > 1<<15-1 {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: smallint value %d overflows int16", i, iv)
-			}
-			be.PutUint16(buf[dataOff:dataOff+2], uint16(int16(iv)))
-			dataOff += 2
-		case 496, 497: // INTEGER (NN, nullable)
-			iv, err := toInt32(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			be.PutUint32(buf[dataOff:dataOff+4], uint32(iv))
-			dataOff += 4
-		case 492, 493: // BIGINT (NN, nullable)
-			iv, err := toInt64(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
-			dataOff += 8
-		case 384, 385: // DATE
-			s, err := toString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			// A time.Time bind always produces the 26-char IBM
-			// timestamp "YYYY-MM-DD-HH.MM.SS.ffffff" (driver/stmt.go);
-			// on a DATE cache-hit the PMF says DATE so slice down to
-			// the leading date portion before encoding (issue #23).
-			s = reshapeTimestampForDate(s)
-			wire, err := encodeDateForParam(s, int(p.FieldLength), p.DateFormat)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			ebc, err := ebcdic.CCSID37.Encode(wire)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode date: %w", i, err)
-			}
-			copy(buf[dataOff:dataOff+len(ebc)], ebc)
-			dataOff += int(p.FieldLength)
-		case 388, 389: // TIME
-			s, err := toString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			// Same reshape as DATE: a time.Time bind arrives as the
-			// 26-char IBM timestamp; a TIME cache-hit needs just the
-			// "HH.MM.SS" portion (issue #23). encodeTimeString accepts
-			// both '.' and ':' separators.
-			s = reshapeTimestampForTime(s)
-			wire, err := encodeTimeString(s, int(p.FieldLength))
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			ebc, err := ebcdic.CCSID37.Encode(wire)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode time: %w", i, err)
-			}
-			copy(buf[dataOff:dataOff+len(ebc)], ebc)
-			dataOff += int(p.FieldLength)
-		case 392, 393: // TIMESTAMP
-			s, err := toString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			wire, err := encodeTimestampString(s, int(p.FieldLength))
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			ebc, err := ebcdic.CCSID37.Encode(wire)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode timestamp: %w", i, err)
-			}
-			copy(buf[dataOff:dataOff+len(ebc)], ebc)
-			dataOff += int(p.FieldLength)
-		case 996, 997: // DECFLOAT -- decimal64 (FieldLength 8) or decimal128 (16)
-			s, err := toString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			negative, digs, exp, err := parseDecFloatString(s)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			var packed []byte
-			switch p.FieldLength {
-			case 8:
-				packed, err = encodeDecimal64(negative, digs, exp)
-			case 16:
-				packed, err = encodeDecimal128(negative, digs, exp)
-			default:
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: decfloat FieldLength %d unsupported (need 8 or 16)", i, p.FieldLength)
-			}
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			copy(buf[dataOff:dataOff+len(packed)], packed)
-			dataOff += len(packed)
-		case 488, 489: // NUMERIC(p,s) zoned decimal
-			s, err := toDecimalString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			zoned, err := encodeZonedBCD(s, int(p.Precision), int(p.Scale))
-			if err != nil {
-				// A value that won't fit the column shape (magnitude
-				// or scale overflow) is recoverable on the cache-hit
-				// path: the driver binds float64/etc as DOUBLE on a
-				// plain PREPARE_DESCRIBE and lets the server cast.
-				// Wrap as ErrUnsupportedCachedParamType so cache-hit
-				// dispatch falls back there instead of hard-erroring. See #22.
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
-			}
-			if uint32(len(zoned)) != p.FieldLength {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
-					i, p.Precision, p.Scale, len(zoned), p.FieldLength)
-			}
-			copy(buf[dataOff:dataOff+len(zoned)], zoned)
-			dataOff += len(zoned)
-		case 484, 485: // DECIMAL(p,s) packed BCD
-			s, err := toDecimalString(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			packed, err := encodePackedBCD(s, int(p.Precision), int(p.Scale))
-			if err != nil {
-				// See the numeric arm above: an out-of-range value is
-				// recoverable via the DOUBLE PREPARE_DESCRIBE fallback,
-				// so flag it as ErrUnsupportedCachedParamType rather
-				// than propagating a hard error on cache-hit. See #22.
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
-			}
-			if uint32(len(packed)) != p.FieldLength {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
-					i, p.Precision, p.Scale, len(packed), p.FieldLength)
-			}
-			copy(buf[dataOff:dataOff+len(packed)], packed)
-			dataOff += len(packed)
-		case 480, 481: // REAL/DOUBLE (NN, nullable) -- length picks the width
-			fv, err := toFloat64(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			switch p.FieldLength {
-			case 4:
-				be.PutUint32(buf[dataOff:dataOff+4], math.Float32bits(float32(fv)))
-				dataOff += 4
-			case 8:
-				be.PutUint64(buf[dataOff:dataOff+8], math.Float64bits(fv))
-				dataOff += 8
-			default:
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
-			}
-		case 960, 961, 964, 965, 968, 969:
-			// LOB locator bind: BLOB (960/961), CLOB (964/965),
-			// DBCLOB (968/969). The SQLDA value at this slot is the
-			// 4-byte server-allocated locator handle (the actual
-			// content already shipped via WRITE_LOB_DATA before
-			// EXECUTE). FieldLength must be 4 -- the descriptor
-			// declared during CHANGE_DESCRIPTOR has FieldLength=4
-			// regardless of the column's max LOB size.
-			if p.FieldLength != 4 {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: LOB SQL type %d expects FieldLength=4, got %d", i, p.SQLType, p.FieldLength)
-			}
-			h, err := toUint32Handle(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			be.PutUint32(buf[dataOff:dataOff+4], h)
-			dataOff += 4
-		case 448, 449: // VARCHAR (NN, nullable)
-			// VARCHAR wire layout: 2-byte SL + payload bytes,
-			// padded out to FieldLength-2 bytes. CCSID determines
-			// payload encoding:
-			//   65535       -- FOR BIT DATA, binary passthrough
-			//   1208        -- UTF-8, passthrough (server transcodes
-			//                  to the column CCSID on its side)
-			//   else        -- EBCDIC via the SBCS converter
-			var payload []byte
-			if p.CCSID == ccsidBinary {
-				bv, err := toBytes(v)
-				if err != nil {
-					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-				}
-				payload = bv
-			} else if p.CCSID == 1208 {
-				sv, err := toString(v)
-				if err != nil {
-					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-				}
-				payload = []byte(sv)
-			} else {
-				sv, err := toString(v)
-				if err != nil {
-					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-				}
-				conv := ebcdicForCCSID(p.CCSID)
-				ebc, err := conv.Encode(sv)
-				if err != nil {
-					return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode varchar: %w", i, err)
-				}
-				payload = ebc
-			}
-			maxBytes := int(p.FieldLength) - 2
-			if len(payload) > maxBytes {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varchar value too long (%d bytes, max %d)", i, len(payload), maxBytes)
-			}
-			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)))
-			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
-			// Remaining bytes left zero (server reads SL).
-			dataOff += int(p.FieldLength)
-		case 464, 465, // VARGRAPHIC      (NN, nullable)
-			472, 473: // LONG VARGRAPHIC (NN, nullable)
-			// Variable-length graphic wire layout mirrors VARCHAR but
-			// with 2-byte code units: a 2-byte BE SL = GRAPHIC CHARACTER
-			// count (= payload bytes / 2), then the payload, padded out
-			// to FieldLength. The SL counting characters rather than
-			// bytes is the same asymmetry the read mirror documents
-			// (db_result_data.go cases 464/465 + 472/473): a
-			// VARGRAPHIC(10) 'ABC' ships `00 03 | 00 41 00 42 00 43`.
-			// CCSID picks the payload codec (see encodeGraphicPayload).
-			// An OUT-only slot arrives with an empty string here, so
-			// SL=0 and the whole field is left as the zero-init pad.
-			payload, err := encodeGraphicPayload(p.CCSID, v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			maxBytes := int(p.FieldLength) - 2
-			if len(payload) > maxBytes {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: vargraphic value too long (%d bytes, max %d)", i, len(payload), maxBytes)
-			}
-			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)/2))
-			copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
-			// Remaining bytes left zero (server reads SL).
-			dataOff += int(p.FieldLength)
-		case 468, 469: // GRAPHIC (fixed-length) -- NN, nullable
-			// Fixed-length graphic: NO SL prefix. Encode the payload,
-			// then right-pad to exactly FieldLength with the graphic
-			// space U+0020 (0x00 0x20) -- the same padding the read
-			// mirror (db_result_data.go case 468/469) preserves, e.g.
-			// GRAPHIC(5) 'ABC' ships `00 41 00 42 00 43 00 20 00 20`.
-			// FOR BIT DATA (CCSID 65535) has no notion of a graphic
-			// space, so its slack is left as the 0x00 zero-init pad.
-			payload, err := encodeGraphicPayload(p.CCSID, v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			if len(payload) > int(p.FieldLength) {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: graphic value too long (%d bytes, max %d)", i, len(payload), p.FieldLength)
-			}
-			copy(buf[dataOff:dataOff+len(payload)], payload)
-			if p.CCSID != ccsidBinary {
-				end := dataOff + int(p.FieldLength)
-				for off := dataOff + len(payload); off+2 <= end; off += 2 {
-					buf[off] = 0x00
-					buf[off+1] = 0x20
-				}
-			}
-			dataOff += int(p.FieldLength)
-		case 908, 909: // VARBINARY (NN, nullable)
-			// VARBINARY shares the VARCHAR FOR BIT DATA wire shape
-			// (449 + CCSID 65535): a 2-byte BE actual-length prefix,
-			// then the raw payload, slot-padded to FieldLength. The
-			// describe-driven funnel (reconcileBinaryBindShapes) and the
-			// package-cache fast path both deliver a native 908 shape
-			// here; the driver's plain []byte bind defaults to 449
-			// instead, so this branch is reached only once a PMF / *PGM
-			// parameter-marker format has confirmed the column is native
-			// VARBINARY. Read mirror: db_result_data.go case 908/909.
-			bv, err := toBytes(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			maxBytes := int(p.FieldLength) - 2
-			if len(bv) > maxBytes {
-				// JT400 throws DataTruncation by default for an
-				// over-length binary write (SQLVarbinary.set truncates +
-				// connection.testDataTruncation throws); we surface a hard
-				// error rather than silently truncate, consistent with the
-				// VARCHAR / VARGRAPHIC arms above. NOT wrapped in
-				// ErrUnsupportedCachedParamType: there is no safe cache-hit
-				// fallback for an over-length value.
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varbinary value too long (%d bytes, max %d)", i, len(bv), maxBytes)
-			}
-			be.PutUint16(buf[dataOff:dataOff+2], uint16(len(bv)))
-			copy(buf[dataOff+2:dataOff+2+len(bv)], bv)
-			// Remaining bytes left zero (server reads SL).
-			dataOff += int(p.FieldLength)
-		case 912, 913: // BINARY (fixed-length) -- NN, nullable
-			// Fixed-width binary: NO SL prefix. Write the payload then
-			// right-pad with 0x00 to exactly FieldLength -- JT400's
-			// SQLBinary.set zero-pads a short value to the column width,
-			// and the read mirror (db_result_data.go case 912/913) reads
-			// back exactly col.Length bytes. buf is zero-initialised, so
-			// the pad needs no explicit write. An over-long value is a
-			// hard error (same JT400-match rationale as VARBINARY above).
-			bv, err := toBytes(v)
-			if err != nil {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
-			}
-			if len(bv) > int(p.FieldLength) {
-				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: binary value too long (%d bytes, max %d)", i, len(bv), p.FieldLength)
-			}
-			copy(buf[dataOff:dataOff+len(bv)], bv)
-			// Remaining bytes left zero (0x00 pad to FieldLength).
-			dataOff += int(p.FieldLength)
-		default:
-			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
+		if err := encodeScalarValue(buf, dataOff, p, v, rowPrefix, i); err != nil {
+			return err
 		}
+		dataOff += int(p.FieldLength)
+	}
+	return nil
+}
+
+// encodeScalarValue writes one non-nil value v into the fixed
+// FieldLength-wide slot at buf[dataOff:], using p's SQL type / CCSID /
+// precision / scale. The value occupies exactly p.FieldLength bytes
+// (variable-length types pad to that width), so callers advance their
+// own cursor by p.FieldLength; the dataOff increments inside this switch
+// are vestigial -- kept verbatim from the former inline encoder so the
+// per-type byte layout and error messages are unchanged. rowPrefix and i
+// are woven into error messages to preserve the scalar bind error
+// format. Shared by the scalar row encoder (encodeRowData) and the
+// array-element encoder (EncodeDBVariableData, issue #68), so an array
+// element's bytes are byte-identical to the same scalar value.
+func encodeScalarValue(buf []byte, dataOff int, p PreparedParam, v any, rowPrefix string, i int) error {
+	be := binary.BigEndian
+	switch p.SQLType {
+	case 500, 501: // SMALLINT (NN, nullable)
+		iv, err := toInt32(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		if iv < -1<<15 || iv > 1<<15-1 {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: smallint value %d overflows int16", i, iv)
+		}
+		be.PutUint16(buf[dataOff:dataOff+2], uint16(int16(iv)))
+	case 496, 497: // INTEGER (NN, nullable)
+		iv, err := toInt32(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		be.PutUint32(buf[dataOff:dataOff+4], uint32(iv))
+	case 492, 493: // BIGINT (NN, nullable)
+		iv, err := toInt64(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		be.PutUint64(buf[dataOff:dataOff+8], uint64(iv))
+	case 384, 385: // DATE
+		s, err := toString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		// A time.Time bind always produces the 26-char IBM
+		// timestamp "YYYY-MM-DD-HH.MM.SS.ffffff" (driver/stmt.go);
+		// on a DATE cache-hit the PMF says DATE so slice down to
+		// the leading date portion before encoding (issue #23).
+		s = reshapeTimestampForDate(s)
+		wire, err := encodeDateForParam(s, int(p.FieldLength), p.DateFormat)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		ebc, err := ebcdic.CCSID37.Encode(wire)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode date: %w", i, err)
+		}
+		copy(buf[dataOff:dataOff+len(ebc)], ebc)
+	case 388, 389: // TIME
+		s, err := toString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		// Same reshape as DATE: a time.Time bind arrives as the
+		// 26-char IBM timestamp; a TIME cache-hit needs just the
+		// "HH.MM.SS" portion (issue #23). encodeTimeString accepts
+		// both '.' and ':' separators.
+		s = reshapeTimestampForTime(s)
+		wire, err := encodeTimeString(s, int(p.FieldLength))
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		ebc, err := ebcdic.CCSID37.Encode(wire)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode time: %w", i, err)
+		}
+		copy(buf[dataOff:dataOff+len(ebc)], ebc)
+	case 392, 393: // TIMESTAMP
+		s, err := toString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		wire, err := encodeTimestampString(s, int(p.FieldLength))
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		ebc, err := ebcdic.CCSID37.Encode(wire)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode timestamp: %w", i, err)
+		}
+		copy(buf[dataOff:dataOff+len(ebc)], ebc)
+	case 996, 997: // DECFLOAT -- decimal64 (FieldLength 8) or decimal128 (16)
+		s, err := toString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		negative, digs, exp, err := parseDecFloatString(s)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		var packed []byte
+		switch p.FieldLength {
+		case 8:
+			packed, err = encodeDecimal64(negative, digs, exp)
+		case 16:
+			packed, err = encodeDecimal128(negative, digs, exp)
+		default:
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: decfloat FieldLength %d unsupported (need 8 or 16)", i, p.FieldLength)
+		}
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		copy(buf[dataOff:dataOff+len(packed)], packed)
+	case 488, 489: // NUMERIC(p,s) zoned decimal
+		s, err := toDecimalString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		zoned, err := encodeZonedBCD(s, int(p.Precision), int(p.Scale))
+		if err != nil {
+			// A value that won't fit the column shape (magnitude
+			// or scale overflow) is recoverable on the cache-hit
+			// path: the driver binds float64/etc as DOUBLE on a
+			// plain PREPARE_DESCRIBE and lets the server cast.
+			// Wrap as ErrUnsupportedCachedParamType so cache-hit
+			// dispatch falls back there instead of hard-erroring. See #22.
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
+		}
+		if uint32(len(zoned)) != p.FieldLength {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d (numeric(%d,%d)): zoned bytes %d != FieldLength %d",
+				i, p.Precision, p.Scale, len(zoned), p.FieldLength)
+		}
+		copy(buf[dataOff:dataOff+len(zoned)], zoned)
+	case 484, 485: // DECIMAL(p,s) packed BCD
+		s, err := toDecimalString(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		packed, err := encodePackedBCD(s, int(p.Precision), int(p.Scale))
+		if err != nil {
+			// See the numeric arm above: an out-of-range value is
+			// recoverable via the DOUBLE PREPARE_DESCRIBE fallback,
+			// so flag it as ErrUnsupportedCachedParamType rather
+			// than propagating a hard error on cache-hit. See #22.
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): %v: %w", i, p.Precision, p.Scale, err, ErrUnsupportedCachedParamType)
+		}
+		if uint32(len(packed)) != p.FieldLength {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d (decimal(%d,%d)): packed bytes %d != FieldLength %d",
+				i, p.Precision, p.Scale, len(packed), p.FieldLength)
+		}
+		copy(buf[dataOff:dataOff+len(packed)], packed)
+	case 480, 481: // REAL/DOUBLE (NN, nullable) -- length picks the width
+		fv, err := toFloat64(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		switch p.FieldLength {
+		case 4:
+			be.PutUint32(buf[dataOff:dataOff+4], math.Float32bits(float32(fv)))
+		case 8:
+			be.PutUint64(buf[dataOff:dataOff+8], math.Float64bits(fv))
+		default:
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: float type 480 wants FieldLength 4 or 8, got %d", i, p.FieldLength)
+		}
+	case 960, 961, 964, 965, 968, 969:
+		// LOB locator bind: BLOB (960/961), CLOB (964/965),
+		// DBCLOB (968/969). The SQLDA value at this slot is the
+		// 4-byte server-allocated locator handle (the actual
+		// content already shipped via WRITE_LOB_DATA before
+		// EXECUTE). FieldLength must be 4 -- the descriptor
+		// declared during CHANGE_DESCRIPTOR has FieldLength=4
+		// regardless of the column's max LOB size.
+		if p.FieldLength != 4 {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: LOB SQL type %d expects FieldLength=4, got %d", i, p.SQLType, p.FieldLength)
+		}
+		h, err := toUint32Handle(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		be.PutUint32(buf[dataOff:dataOff+4], h)
+	case 448, 449: // VARCHAR (NN, nullable)
+		// VARCHAR wire layout: 2-byte SL + payload bytes,
+		// padded out to FieldLength-2 bytes. CCSID determines
+		// payload encoding:
+		//   65535       -- FOR BIT DATA, binary passthrough
+		//   1208        -- UTF-8, passthrough (server transcodes
+		//                  to the column CCSID on its side)
+		//   else        -- EBCDIC via the SBCS converter
+		var payload []byte
+		if p.CCSID == ccsidBinary {
+			bv, err := toBytes(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			payload = bv
+		} else if p.CCSID == 1208 {
+			sv, err := toString(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			payload = []byte(sv)
+		} else {
+			sv, err := toString(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			conv := ebcdicForCCSID(p.CCSID)
+			ebc, err := conv.Encode(sv)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode varchar: %w", i, err)
+			}
+			payload = ebc
+		}
+		maxBytes := int(p.FieldLength) - 2
+		if len(payload) > maxBytes {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varchar value too long (%d bytes, max %d)", i, len(payload), maxBytes)
+		}
+		be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)))
+		copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
+		// Remaining bytes left zero (server reads SL).
+	case 464, 465, // VARGRAPHIC      (NN, nullable)
+		472, 473: // LONG VARGRAPHIC (NN, nullable)
+		// Variable-length graphic wire layout mirrors VARCHAR but
+		// with 2-byte code units: a 2-byte BE SL = GRAPHIC CHARACTER
+		// count (= payload bytes / 2), then the payload, padded out
+		// to FieldLength. The SL counting characters rather than
+		// bytes is the same asymmetry the read mirror documents
+		// (db_result_data.go cases 464/465 + 472/473): a
+		// VARGRAPHIC(10) 'ABC' ships `00 03 | 00 41 00 42 00 43`.
+		// CCSID picks the payload codec (see encodeGraphicPayload).
+		// An OUT-only slot arrives with an empty string here, so
+		// SL=0 and the whole field is left as the zero-init pad.
+		payload, err := encodeGraphicPayload(p.CCSID, v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		maxBytes := int(p.FieldLength) - 2
+		if len(payload) > maxBytes {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: vargraphic value too long (%d bytes, max %d)", i, len(payload), maxBytes)
+		}
+		be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)/2))
+		copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
+		// Remaining bytes left zero (server reads SL).
+	case 468, 469: // GRAPHIC (fixed-length) -- NN, nullable
+		// Fixed-length graphic: NO SL prefix. Encode the payload,
+		// then right-pad to exactly FieldLength with the graphic
+		// space U+0020 (0x00 0x20) -- the same padding the read
+		// mirror (db_result_data.go case 468/469) preserves, e.g.
+		// GRAPHIC(5) 'ABC' ships `00 41 00 42 00 43 00 20 00 20`.
+		// FOR BIT DATA (CCSID 65535) has no notion of a graphic
+		// space, so its slack is left as the 0x00 zero-init pad.
+		payload, err := encodeGraphicPayload(p.CCSID, v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		if len(payload) > int(p.FieldLength) {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: graphic value too long (%d bytes, max %d)", i, len(payload), p.FieldLength)
+		}
+		copy(buf[dataOff:dataOff+len(payload)], payload)
+		if p.CCSID != ccsidBinary {
+			end := dataOff + int(p.FieldLength)
+			for off := dataOff + len(payload); off+2 <= end; off += 2 {
+				buf[off] = 0x00
+				buf[off+1] = 0x20
+			}
+		}
+	case 908, 909: // VARBINARY (NN, nullable)
+		// VARBINARY shares the VARCHAR FOR BIT DATA wire shape
+		// (449 + CCSID 65535): a 2-byte BE actual-length prefix,
+		// then the raw payload, slot-padded to FieldLength. The
+		// describe-driven funnel (reconcileBinaryBindShapes) and the
+		// package-cache fast path both deliver a native 908 shape
+		// here; the driver's plain []byte bind defaults to 449
+		// instead, so this branch is reached only once a PMF / *PGM
+		// parameter-marker format has confirmed the column is native
+		// VARBINARY. Read mirror: db_result_data.go case 908/909.
+		bv, err := toBytes(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		maxBytes := int(p.FieldLength) - 2
+		if len(bv) > maxBytes {
+			// JT400 throws DataTruncation by default for an
+			// over-length binary write (SQLVarbinary.set truncates +
+			// connection.testDataTruncation throws); we surface a hard
+			// error rather than silently truncate, consistent with the
+			// VARCHAR / VARGRAPHIC arms above. NOT wrapped in
+			// ErrUnsupportedCachedParamType: there is no safe cache-hit
+			// fallback for an over-length value.
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: varbinary value too long (%d bytes, max %d)", i, len(bv), maxBytes)
+		}
+		be.PutUint16(buf[dataOff:dataOff+2], uint16(len(bv)))
+		copy(buf[dataOff+2:dataOff+2+len(bv)], bv)
+		// Remaining bytes left zero (server reads SL).
+	case 912, 913: // BINARY (fixed-length) -- NN, nullable
+		// Fixed-width binary: NO SL prefix. Write the payload then
+		// right-pad with 0x00 to exactly FieldLength -- JT400's
+		// SQLBinary.set zero-pads a short value to the column width,
+		// and the read mirror (db_result_data.go case 912/913) reads
+		// back exactly col.Length bytes. buf is zero-initialised, so
+		// the pad needs no explicit write. An over-long value is a
+		// hard error (same JT400-match rationale as VARBINARY above).
+		bv, err := toBytes(v)
+		if err != nil {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+		}
+		if len(bv) > int(p.FieldLength) {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: binary value too long (%d bytes, max %d)", i, len(bv), p.FieldLength)
+		}
+		copy(buf[dataOff:dataOff+len(bv)], bv)
+		// Remaining bytes left zero (0x00 pad to FieldLength).
+	default:
+		return fmt.Errorf("hostserver: "+rowPrefix+"param %d: SQL type %d: %w", i, p.SQLType, ErrUnsupportedCachedParamType)
 	}
 	return nil
 }

@@ -1,0 +1,8 @@
+{
+  "case" : "array_inout_int",
+  "resultSets" : [ ],
+  "notes" : {
+    "inArray" : "[1,2,3]",
+    "outArray" : "[100, 200, 300]"
+  }
+}

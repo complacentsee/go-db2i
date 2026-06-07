@@ -84,6 +84,12 @@ func checkNamedValue(nv *driver.NamedValue) error {
 	if _, ok := nv.Value.(*LOBValue); ok {
 		return nil
 	}
+	if _, ok := nv.Value.(arrayBinder); ok {
+		// db2i.Array[T] IN bind (issue #68). database/sql's default
+		// converter rejects a struct value; admit it untouched so the
+		// array bind path in bindArgsToPreparedParams handles it.
+		return nil
+	}
 	if _, ok := nv.Value.(stdsql.Out); ok {
 		// database/sql passes sql.Out{Dest: &x} through as a value
 		// (not a pointer); the bind path in
@@ -574,6 +580,13 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// the fast path and are not diverted.
 	temporalOut := anyTemporalOutDest(outDests)
 
+	// Array CALLs (issue #68) also divert off the extended-dynamic
+	// package fast path: array cache-hit behaviour is not captured yet,
+	// so a CALL with any array parameter takes the regular
+	// PREPARE_DESCRIBE path (skip cache-hit dispatch, the filing counter,
+	// and the EXECUTE package marker), mirroring the temporal-OUT divert.
+	divertPkg := temporalOut || anyArrayShape(shapes)
+
 	// Cache-hit fast path: when the SQL byte-equals a cached entry,
 	// skip PREPARE_DESCRIBE. Saves one wire round-trip per call by
 	// relying on the server-side plan filed in the *PGM under the
@@ -589,7 +602,7 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// docs/plans/v0.7.8-out-param-cache-hit.md confirmed
 	// the server honours OUT direction bytes here on V7R6M0.
 	cached := s.conn.packageLookup(s.query)
-	if cached != nil && s.conn.pkg != nil && !temporalOut {
+	if cached != nil && s.conn.pkg != nil && !divertPkg {
 		res, err := hostserver.ExecutePreparedCached(s.conn.conn, cached, values, s.conn.nextCorrFunc(), s.conn.pkg.Name, s.conn.pkg.Library, 37)
 		s.logExecCached(logger, len(args), start, res, cached.Name, err)
 		if shouldRefallbackToPrepare(err) {
@@ -620,10 +633,10 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	// passes packageEligibleFor (otherwise the server isn't
 	// going to file no matter how often we prepare).
 	shouldRefresh := false
-	if !temporalOut && s.conn.packageEligibleFor(s.query, len(args) > 0) {
+	if !divertPkg && s.conn.packageEligibleFor(s.query, len(args) > 0) {
 		shouldRefresh = s.conn.noteFilingPrepare(s.query)
 	}
-	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0, temporalOut)...)
+	res, err := hostserver.ExecutePreparedSQL(s.conn.conn, s.query, shapes, values, s.conn.nextCorr(), s.conn.selectOptionsFor(s.query, len(args) > 0, divertPkg)...)
 	s.logExec(logger, "EXECUTE_PREPARED", len(args), start, res, err)
 	if err != nil {
 		return nil, s.conn.classifyConnErr(err)
@@ -934,6 +947,28 @@ func bindArgsToPreparedParams(args []driver.Value, stringCCSID uint16) ([]hostse
 			values[i] = placeholderValue
 			continue
 		}
+		// db2i.Array[T] IN bind (issue #68). The element shape is a
+		// placeholder; reconcileBindShapesFromPMF adopts the real element
+		// type/len/CCSID from the describe and confirms IsArray, and the
+		// EXECUTE path serializes the elements as CP 0x382F.
+		if ab, ok := a.(arrayBinder); ok {
+			av, err := ab.db2iArrayElements()
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("db2i: param %d: %w", i, err)
+			}
+			card := 0
+			if !av.Null {
+				card = len(av.Elements)
+			}
+			shapes[i] = hostserver.PreparedParam{
+				SQLType:          497, // INTEGER element placeholder; PMF fixup overrides
+				FieldLength:      4,
+				IsArray:          true,
+				ArrayCardinality: uint32(card),
+			}
+			values[i] = av
+			continue
+		}
 		switch v := a.(type) {
 		case int64:
 			shapes[i] = hostserver.PreparedParam{SQLType: 493, FieldLength: 8}
@@ -1080,6 +1115,32 @@ func outBindShape(out *stdsql.Out, stringCCSID uint16, direction byte) (hostserv
 		// panic. Reject it cleanly: a nil pointer can never receive an
 		// OUT value anyway.
 		return hostserver.PreparedParam{}, nil, fmt.Errorf("sql.Out.Dest must be a non-nil pointer, got %T", out.Dest)
+	}
+
+	// Array OUT / INOUT (issue #68): sql.Out{Dest: *db2i.Array[T]}. The
+	// element shape is a placeholder; the PMF fixup adopts the real
+	// element type/len/CCSID and confirms IsArray from the describe. An
+	// INOUT ships the current array as the IN side (CP 0x382F); an
+	// OUT-only slot is excluded from the request value block, so its
+	// value is unused (EncodeDBVariableData drops 0xF1 columns).
+	if ab, ok := out.Dest.(arrayBinder); ok {
+		shape := hostserver.PreparedParam{
+			SQLType:     497, // INTEGER element placeholder; PMF fixup overrides
+			FieldLength: 4,
+			IsArray:     true,
+			ParamType:   direction,
+		}
+		if out.In {
+			av, err := ab.db2iArrayElements()
+			if err != nil {
+				return hostserver.PreparedParam{}, nil, err
+			}
+			if !av.Null {
+				shape.ArrayCardinality = uint32(len(av.Elements))
+			}
+			return shape, av, nil
+		}
+		return shape, hostserver.ArrayValue{}, nil
 	}
 	// The server ignores the IN value of an OUT-only (0xF1) slot, so we
 	// bind SQL NULL there: a nil value makes EncodeDBExtendedData set
@@ -1460,6 +1521,24 @@ func writeBackOutParams(outDests []*stdsql.Out, outValues []any, outTypes []uint
 			return fmt.Errorf("db2i: OUT param %d: EXECUTE reply had no value (got %d slots)", i, len(outValues))
 		}
 		v := outValues[i]
+		// Array OUT/INOUT (issue #68): the server returned a CP 0x3901
+		// array column, decoded to a hostserver.ArrayValue. Store it via
+		// the *db2i.Array[T] scanner; a whole-null array is carried
+		// inside the ArrayValue (Null=true), not as a nil value.
+		if av, ok := v.(hostserver.ArrayValue); ok {
+			sc, ok := out.Dest.(arrayScanner)
+			if !ok {
+				return fmt.Errorf("db2i: OUT param %d: server returned an array but Dest is %T (want *db2i.Array[T])", i, out.Dest)
+			}
+			var sqlType uint16
+			if i < len(outTypes) {
+				sqlType = outTypes[i]
+			}
+			if err := sc.db2iArrayScan(av, sqlType); err != nil {
+				return fmt.Errorf("db2i: OUT param %d: %w", i, err)
+			}
+			continue
+		}
 		// Nil from the server means a SQL NULL came back for the
 		// OUT slot. database/sql's Scan rejects nil into a non-
 		// pointer-pointer; we mirror that by treating it as the
