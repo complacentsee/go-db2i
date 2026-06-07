@@ -581,10 +581,19 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 	temporalOut := anyTemporalOutDest(outDests)
 
 	// Array CALLs (issue #68) also divert off the extended-dynamic
-	// package fast path: array cache-hit behaviour is not captured yet,
-	// so a CALL with any array parameter takes the regular
-	// PREPARE_DESCRIBE path (skip cache-hit dispatch, the filing counter,
-	// and the EXECUTE package marker), mirroring the temporal-OUT divert.
+	// package fast path -- PERMANENTLY (issue #68 Item 1: won't-fix).
+	// DB2 for i cannot serialize an array parameter's SQLDA through the
+	// package mechanism: an array CALL files into the *PGM fine, but a
+	// subsequent RETURN_PACKAGE fails with SQL-351 ("unsupported
+	// SQLTYPE") and returns the package EMPTY -- poisoning cache-hit
+	// dispatch for every statement sharing that package, scalar ones
+	// included. A scalar CALL round-trips through RETURN_PACKAGE
+	// perfectly, so the breakage is array-specific (proven by the
+	// Phase A self-probe, 2026-06-07; there is no JT400 oracle -- JT400
+	// never files a CALL under any criterion). So a CALL with any array
+	// parameter always takes the regular PREPARE_DESCRIBE path (skip
+	// cache-hit dispatch, the filing counter, and the EXECUTE package
+	// marker), mirroring the temporal-OUT divert.
 	divertPkg := temporalOut || anyArrayShape(shapes)
 
 	// Cache-hit fast path: when the SQL byte-equals a cached entry,
@@ -1614,6 +1623,14 @@ func assignOutParam(dest reflect.Value, v any, sqlType uint16) error {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		switch x := v.(type) {
 		case int32:
+			dest.SetInt(int64(x))
+			return nil
+		case int16:
+			// SMALLINT decodes to int16 (scalar OUT and array elements);
+			// it always fits any int-kind destination.
+			dest.SetInt(int64(x))
+			return nil
+		case int8:
 			dest.SetInt(int64(x))
 			return nil
 		case int64:

@@ -23,14 +23,24 @@ import (
 //
 //	db2i.Array[*int32]{Elements: []*int32{&x, nil, &z}} // element 1 is NULL
 //
+// With a non-pointer element type a decoded NULL element becomes the zero
+// value of T (a NULL INTEGER scans as 0, indistinguishable from a real 0).
+// That is deliberate: it matches how this driver writes a non-pointer
+// scalar OUT parameter, and how database/sql resolves a SQL NULL scanned
+// into a non-pointer destination. Use a pointer element type whenever you
+// must tell a NULL element apart from the zero value.
+//
 // Set Null for a whole-array SQL NULL, which is distinct from an empty
 // Elements (an array with zero elements). The element type T must reduce
 // to one of the value kinds the scalar bind path supports: the signed
-// integers, float32/float64, string, []byte, time.Time, bool, and the
-// math/big decimal carriers (via their string form). Element types are
-// taken from the procedure's declared ARRAY element type (the server's
-// PREPARE_DESCRIBE), not from T, so T only needs to be assignable to/from
-// that element type.
+// integers, float32/float64, string, []byte, and the math/big decimal
+// carriers (via their string form). These cover SMALLINT/INTEGER/BIGINT,
+// REAL/DOUBLE, DECIMAL/NUMERIC/DECFLOAT, CHAR/VARCHAR, and BINARY/VARBINARY
+// elements. Temporal elements (DATE/TIME/TIMESTAMP via time.Time) are NOT
+// supported -- bind a string in the IBM 26-char timestamp form instead.
+// Element types are taken from the procedure's declared ARRAY element type
+// (the server's PREPARE_DESCRIBE), not from T, so T only needs to be
+// assignable to/from that element type.
 type Array[T any] struct {
 	Elements []T
 	Null     bool

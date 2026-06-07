@@ -97,6 +97,17 @@ that needs it.
 
 ## Package caching
 
+- **ARRAY-parameter CALL cache-hit** — *not* planned. A `CALL` with an
+  `ARRAY` parameter cannot use the extended-dynamic package cache-hit fast
+  path: the array `CALL` files into the `*PGM`, but DB2 for i cannot
+  serialize an array parameter's SQLDA back through `RETURN_PACKAGE`, which
+  fails with SQL-351 ("unsupported SQLTYPE") and returns the package empty —
+  poisoning cache-hit dispatch for every statement sharing that package. A
+  scalar `CALL` round-trips fine, so the limitation is array-specific
+  (live-verified on PUB400 V7R5M0 via a self-probe; there is no JT400 oracle
+  because JT400 never files a CALL). Array CALLs always re-prepare; the
+  driver diverts them off the fast path. (won't fix; server-side limitation;
+  see issue #68)
 - **Programmatic package clear** — `?package-clear` is accepted and
   shape-validated but is a no-op (the server manages clearing). A real
   programmatic `DLTPGM`-equivalent from the driver is deferred. (deferred)

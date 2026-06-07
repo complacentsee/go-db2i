@@ -487,6 +487,53 @@ func encodeScalarValue(buf []byte, dataOff int, p PreparedParam, v any, rowPrefi
 		be.PutUint16(buf[dataOff:dataOff+2], uint16(len(payload)))
 		copy(buf[dataOff+2:dataOff+2+len(payload)], payload)
 		// Remaining bytes left zero (server reads SL).
+	case 452, 453: // CHAR (fixed-length) -- NN, nullable
+		// Fixed-length CHAR: NO SL prefix. Encode the payload exactly as
+		// VARCHAR (448/449) above -- FOR BIT DATA (CCSID 65535) is a raw
+		// []byte passthrough, UTF-8 (1208) passes through, else EBCDIC
+		// via the SBCS converter -- then right-pad to exactly
+		// FieldLength. Text pads with the EBCDIC space 0x40 (the server
+		// blank-pads CHAR and the read mirror, db_result_data.go case
+		// 452/453, reads back col.Length bytes); FOR BIT DATA has no
+		// blank, so its slack is the 0x00 zero-init pad (mirrors the
+		// GRAPHIC / BINARY fixed-width arms). An over-long value is a
+		// hard error, consistent with the other fixed-width arms. This
+		// arm also fixes scalar fixed-CHAR binds, not just CHAR ARRAY
+		// elements (issue #68 Item 2).
+		var payload []byte
+		if p.CCSID == ccsidBinary {
+			bv, err := toBytes(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			payload = bv
+		} else if p.CCSID == 1208 {
+			sv, err := toString(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			payload = []byte(sv)
+		} else {
+			sv, err := toString(v)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: %w", i, err)
+			}
+			conv := ebcdicForCCSID(p.CCSID)
+			ebc, err := conv.Encode(sv)
+			if err != nil {
+				return fmt.Errorf("hostserver: "+rowPrefix+"param %d: encode char: %w", i, err)
+			}
+			payload = ebc
+		}
+		if len(payload) > int(p.FieldLength) {
+			return fmt.Errorf("hostserver: "+rowPrefix+"param %d: char value too long (%d bytes, max %d)", i, len(payload), p.FieldLength)
+		}
+		copy(buf[dataOff:dataOff+len(payload)], payload)
+		if p.CCSID != ccsidBinary {
+			for off := dataOff + len(payload); off < dataOff+int(p.FieldLength); off++ {
+				buf[off] = 0x40
+			}
+		}
 	case 464, 465, // VARGRAPHIC      (NN, nullable)
 		472, 473: // LONG VARGRAPHIC (NN, nullable)
 		// Variable-length graphic wire layout mirrors VARCHAR but
