@@ -601,69 +601,6 @@ func encodeGraphicPayload(ccsid uint16, v any) ([]byte, error) {
 	return encodeUTF16BE(s), nil
 }
 
-// reconcileNullBindShapes substitutes the server's declared
-// parameter-marker shape for any IN slot the caller is binding as SQL
-// NULL. The database/sql bind path (driver.bindArgsToPreparedParams)
-// maps a nil value to a fixed INTEGER-nullable shape (SQLType 497)
-// without knowing the target column's type, relying on the server to
-// cast that INTEGER-NULL marker to the column. The cast is accepted
-// for every column family EXCEPT native binary (BINARY 912/913,
-// VARBINARY 908/909): a nil bind there fails with SQL-301 / SQLSTATE
-// 07006 because the server will not implicitly cast an INTEGER
-// parameter marker to a binary column, even for a NULL value (issue
-// #11). VARCHAR FOR BIT DATA tolerates the same nil bind, which is why
-// the asymmetry went unnoticed before the type matrix exercised native
-// binary columns directly.
-//
-// The fix adopts the column's own declared shape (from the
-// PREPARE_DESCRIBE parameter-marker format, CP 0x3813) for the NULL
-// slot, so the parameter marker's type matches the column and the NULL
-// is trivially assignable. This is safe for every type because
-// encodeRowData short-circuits a nil value before its SQL-type switch
-// -- it writes the 0xFFFF indicator and advances FieldLength bytes
-// without invoking any type-specific encoder -- so the substituted
-// SQLType's encoder branch, if any, is never invoked for a NULL
-// (native binary now has one, used only for non-nil values via
-// reconcileBinaryBindShapes).
-//
-// Only IN slots are touched: LOB slots (already rewritten to the
-// locator shape, with the NULL-LOB indicator handled, by
-// bindLOBParameters) and OUT/INOUT slots (owned by the stored-procedure
-// OUT fixup) are skipped. A nil or short pmf, or a non-nil value, is a
-// no-op for the slot, so the working VARCHAR / INTEGER / DOUBLE /
-// TIMESTAMP bind shapes are left exactly as the driver chose them.
-func reconcileNullBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
-	if len(pmf) == 0 {
-		return
-	}
-	for i := range shapes {
-		if i >= len(pmf) {
-			break
-		}
-		if values[i] != nil {
-			continue
-		}
-		// OUT/INOUT placeholders are always non-nil, so this guard is
-		// belt-and-suspenders, but it keeps the intent explicit.
-		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
-			continue
-		}
-		p := pmf[i]
-		if p.IsLOB() {
-			continue
-		}
-		shapes[i] = PreparedParam{
-			SQLType:     p.SQLType,
-			FieldLength: p.FieldLength,
-			Precision:   p.Precision,
-			Scale:       p.Scale,
-			CCSID:       p.CCSID,
-			ParamType:   shapes[i].ParamType,
-			DateFormat:  shapes[i].DateFormat,
-		}
-	}
-}
-
 // ChangeDescriptorRequest builds the 0x1E00 frame body that uploads
 // the input-parameter shape to the RPB created by CREATE_RPB. JTOpen
 // sends this between PREPARE_DESCRIBE and OPEN_DESCRIBE_FETCH on every
@@ -854,32 +791,15 @@ func openPreparedUntilFirstBatch(conn io.ReadWriter, sql string, paramShapes []P
 		return nil, nil, fetchOutcome{}, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
-	// IN-parameter graphic fixup (issue #13): a []byte/string bind into a
-	// CCSID-65535 ("bit data") GRAPHIC/VARGRAPHIC predicate defaults to a
-	// VARCHAR shape the server won't cast (SQL-332 / 57017). Adopt the
-	// column's declared graphic shape from the PMF so the value ships
-	// verbatim through the native graphic encoder. No-op for
-	// non-65535-graphic targets and non-[]byte/string binds. Mirrors the
-	// Exec/IUD path so SELECT/Query predicates get the same fixup.
-	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-binary fixup (issue #40): adopt the column's
-	// native BINARY/VARBINARY shape for a []byte predicate so it ships
-	// JT400's byte-identical native form rather than VARCHAR FOR BIT DATA.
-	// Mirrors the Exec/IUD path. No-op for non-binary targets / non-[]byte.
-	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-temporal fixup (issue #40): adopt the column's
-	// native DATE/TIME shape (384/388) for a time.Time predicate so it ships
-	// JT400's byte-identical native form rather than a 26-char TIMESTAMP.
-	// Mirrors the Exec/IUD path. No-op for non-DATE/TIME targets / non-time.Time.
-	reconcileDateTimeBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter NULL fixup (issue #11): adopt the column's declared
-	// shape for any nil bind so a NULL predicate against a native
-	// BINARY/VARBINARY column is assignable rather than failing the
-	// INTEGER-NULL implicit cast. No-op for non-nil binds.
-	reconcileNullBindShapes(paramShapes, paramValues, pmf)
+	// Unified PMF-driven bind-shape dispatch (issue #40): adopt the server-
+	// declared parameter-marker shape per predicate bind in a single pass --
+	// graphic bit-data (#13), native BINARY/VARBINARY (#40), native DATE/TIME
+	// (#40), and typed NULL (#11). Mirrors the Exec/IUD path. SELECT predicates
+	// never carry OUT/INOUT slots, so the OUT arm never fires and the
+	// expectOutput return is unused here. This is the sole bind-shape
+	// reconciliation implementation; the former per-type reconciles it replaced
+	// are gone (git history only). See db_bind_dispatch.go.
+	reconcileBindShapesFromPMF(paramShapes, paramValues, pmf)
 
 	// --- 3) CHANGE_DESCRIPTOR. ---
 	{

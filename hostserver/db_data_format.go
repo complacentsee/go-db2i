@@ -165,65 +165,6 @@ func isGraphicSQLType(t uint16) bool {
 	return false
 }
 
-// reconcileGraphicBitDataBindShapes routes a []byte / string bind into
-// a CCSID-65535 ("bit data", no-conversion) GRAPHIC / VARGRAPHIC column
-// through the native graphic encoder. The database/sql bind path
-// (driver.bindArgsToPreparedParams) maps a []byte to VARCHAR FOR BIT
-// DATA (449, CCSID 65535) and a string to VARCHAR (449, the connection
-// string CCSID); neither implicitly casts to a no-conversion graphic
-// column -- the server rejects the bind with SQL-332 / SQLSTATE 57017
-// (character conversion not defined, issue #13). The 1200 / 13488
-// graphic CCSIDs are unaffected: they accept the implicit VARCHAR cast
-// and keep their working driver shape.
-//
-// Adopting the column's declared graphic shape from the
-// PREPARE_DESCRIBE parameter-marker format (CP 0x3813) makes
-// encodeRowData take its graphic branch, where encodeGraphicPayload
-// ships the value verbatim for CCSID 65535 (toBytes passthrough) behind
-// the 2-byte graphic-character SL the column expects. The bound bytes
-// must already be valid same-CCSID graphic data (an even byte count for
-// a 2-byte-per-character column); the driver ships them unchanged,
-// matching the no-conversion contract.
-//
-// Only []byte / string IN slots whose declared type is a CCSID-65535
-// graphic are rewritten. nil binds (handled via the indicator), LOB and
-// OUT/INOUT slots, and any other value type are left untouched, so the
-// working 1200 / 13488 graphic binds and every non-graphic bind keep
-// their existing shape.
-func reconcileGraphicBitDataBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
-	if len(pmf) == 0 {
-		return
-	}
-	for i := range shapes {
-		if i >= len(pmf) {
-			break
-		}
-		switch values[i].(type) {
-		case []byte, string:
-			// encodeGraphicPayload's CCSID-65535 branch (toBytes)
-			// accepts exactly these; other Go types have no
-			// no-conversion graphic encoding.
-		default:
-			continue
-		}
-		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
-			continue
-		}
-		p := pmf[i]
-		if p.CCSID != ccsidBinary || !isGraphicSQLType(p.SQLType) {
-			continue
-		}
-		shapes[i] = PreparedParam{
-			SQLType:     p.SQLType,
-			FieldLength: p.FieldLength,
-			Precision:   p.Precision,
-			Scale:       p.Scale,
-			CCSID:       p.CCSID,
-			ParamType:   shapes[i].ParamType,
-		}
-	}
-}
-
 // isBinarySQLType reports whether the IBM i SQL type code is a native
 // binary type: BINARY (912/913, fixed-width) or VARBINARY (908/909,
 // 2-byte SL prefix). Both always carry CCSID 65535 ("bit data") and ship
@@ -239,57 +180,6 @@ func isBinarySQLType(t uint16) bool {
 	return false
 }
 
-// reconcileBinaryBindShapes routes a []byte bind into a native BINARY
-// (912/913) or VARBINARY (908/909) column through the native binary
-// encoder so the wire bytes match JT400's describe-driven bind.
-//
-// The database/sql bind path (driver.bindArgsToPreparedParams) maps every
-// []byte to VARCHAR FOR BIT DATA (449, CCSID 65535) -- a shape the server
-// accepts and casts into a binary column, so the value already stores
-// correctly on the cache-miss path. JT400, however, always adopts the
-// column's declared native type from the PREPARE_DESCRIBE parameter-marker
-// format (CP 0x3813) and ships BINARY as a fixed field / VARBINARY behind
-// a 2-byte SL. Adopting that shape here makes encodeRowData take its
-// 912/908 branch and emit the byte-identical wire form, and keeps the
-// cache-miss path consistent with the package-cache fast path (which
-// always recovers the native shape from the *PGM parameter-marker format).
-//
-// Only non-nil []byte IN slots whose PMF type is native binary are
-// rewritten. nil binds (owned by reconcileNullBindShapes), OUT/INOUT
-// slots, and every non-binary target are left untouched. A string bind is
-// deliberately NOT reshaped: the driver maps a string to a real-CCSID
-// VARCHAR the server casts, and JT400's hex-string-into-binary semantics
-// (SQLBinary.set via BinaryConverter.stringToBytes) are intentionally not
-// reproduced -- a []byte is the unambiguous native-binary bind.
-func reconcileBinaryBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
-	if len(pmf) == 0 {
-		return
-	}
-	for i := range shapes {
-		if i >= len(pmf) {
-			break
-		}
-		if _, ok := values[i].([]byte); !ok {
-			continue
-		}
-		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
-			continue
-		}
-		p := pmf[i]
-		if p.CCSID != ccsidBinary || !isBinarySQLType(p.SQLType) {
-			continue
-		}
-		shapes[i] = PreparedParam{
-			SQLType:     p.SQLType,
-			FieldLength: p.FieldLength,
-			Precision:   p.Precision,
-			Scale:       p.Scale,
-			CCSID:       p.CCSID,
-			ParamType:   shapes[i].ParamType,
-		}
-	}
-}
-
 // isDateTimeSQLType reports whether the IBM i SQL type code is a native
 // DATE (384/385) or TIME (388/389). Both are fixed-width EBCDIC strings with
 // no length prefix -- DATE 10 bytes (ISO "YYYY-MM-DD"), TIME 8 bytes
@@ -302,70 +192,6 @@ func isDateTimeSQLType(t uint16) bool {
 		return true
 	}
 	return false
-}
-
-// reconcileDateTimeBindShapes routes a time.Time bind into a native DATE
-// (384/385) or TIME (388/389) column through the native temporal encoder so
-// the wire bytes match JT400's describe-driven bind.
-//
-// The driver (driver.bindArgsToPreparedParams) binds every time.Time as
-// TIMESTAMP (393): it formats the value to the 26-char IBM string
-// "YYYY-MM-DD-HH.MM.SS.ffffff", and the server casts that into a DATE/TIME
-// column, so the value already stores correctly on the cache-miss path.
-// JT400, however, adopts the column's declared native type from the
-// PREPARE_DESCRIBE parameter-marker format (CP 0x3813) and ships DATE as a
-// 10-byte ISO field / TIME as an 8-byte "HH.MM.SS" field. Adopting that shape
-// here makes encodeRowData take its 384/388 branch, where the reshape helpers
-// slice the 26-char value down to the column width -- emitting the
-// byte-identical native form and keeping the cache-miss path consistent with
-// the package-cache fast path (which recovers the same native shape from the
-// *PGM).
-//
-// The driver has already formatted the time.Time to a string by the time we
-// see it, so a time.Time bind and a user string bind both arrive as a Go
-// string. They are disambiguated by the driver's chosen shape: only a
-// time.Time bind arrives as TIMESTAMP (392/393). A user string bound into a
-// DATE/TIME column keeps its VARCHAR (449) shape and the server cast -- it is
-// deliberately NOT reshaped, mirroring reconcileBinaryBindShapes leaving
-// string binds alone. nil binds (reconcileNullBindShapes) and OUT/INOUT slots
-// are skipped. DateFormat is left 0: JT400's SQLDate/SQLTime
-// convertToRawBytes always write ISO regardless of the negotiated session
-// format, which is exactly what the FieldLength-driven length-only encode
-// (encodeDateForParam / encodeTimeString) produces.
-func reconcileDateTimeBindShapes(shapes []PreparedParam, values []any, pmf []ParameterMarkerField) {
-	if len(pmf) == 0 {
-		return
-	}
-	for i := range shapes {
-		if i >= len(pmf) {
-			break
-		}
-		// Only the driver's time.Time bind arrives as TIMESTAMP; a user
-		// string bind is VARCHAR (449) and stays on the server-cast path.
-		if shapes[i].SQLType != 392 && shapes[i].SQLType != 393 {
-			continue
-		}
-		if shapes[i].ParamType == 0xF1 || shapes[i].ParamType == 0xF2 {
-			continue
-		}
-		if !isDateTimeSQLType(pmf[i].SQLType) {
-			continue
-		}
-		p := pmf[i]
-		shapes[i] = PreparedParam{
-			SQLType:     p.SQLType,
-			FieldLength: p.FieldLength,
-			CCSID:       p.CCSID,
-			ParamType:   shapes[i].ParamType,
-			// Precision/Scale left 0: the DATE/TIME encode arms ignore them
-			// (SQL type + FieldLength fully determine the temporal wire form),
-			// and the cache-hit path (preparedParamsFromCached) zeroes
-			// Precision/Scale for every non-decimal type. Forcing 0 here keeps
-			// the cache-miss CP 0x381E descriptor byte-identical to the
-			// cache-hit one rather than echoing a possibly-nonzero server-PMF
-			// precision word.
-		}
-	}
 }
 
 // parseSuperExtendedDataFormat decodes the CP 0x3812 payload --

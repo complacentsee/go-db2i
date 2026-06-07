@@ -11,6 +11,32 @@ and OTel spans have already landed).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-07
+
+v0.8.0 completes the **#40 describe-driven bind rework**. The five per-type
+cache-miss bind-shape reconciles (graphic bit-data, native BINARY/VARBINARY,
+native DATE/TIME, stored-procedure OUT/INOUT, and typed NULL) are unified into a
+single PREPARE_DESCRIBE/PMF-driven dispatcher, `reconcileBindShapesFromPMF` --
+the structural goal of #40: adopt the server-declared parameter-marker shape
+uniformly per slot (the Go analogue of JT400's per-column SQLData converter)
+instead of picking shapes from the Go value type. With the named bind sub-items
+(exact-decimal, native VARBINARY, DATE/TIME-only, OUT types) already shipped in
+v0.7.25-v0.7.29, this closes out the tracking issue.
+
+### Changed: unified PMF-driven bind-shape dispatch (issue #40)
+
+Both cache-miss bind paths -- `ExecutePreparedSQL` (EXECUTE/IUD) and the
+prepared-SELECT predicate path -- now reconcile every parameter shape against the
+PREPARE_DESCRIBE parameter-marker format in one per-slot pass, replacing the five
+sequential per-type reconcile functions. (The cache-hit fast path was already
+PMF-driven, recovering the native shape from the *PGM-stored SQLDA.) The change
+is byte-identical to the per-type reconciles it replaces -- the arms are mutually
+exclusive on the inputs the driver produces, so one pass equals the five passes,
+and the downstream encoders consume only the reconciled shapes, so the wire
+output is unchanged. Live-validated across every bind type on PUB400 V7R5M0. No
+public API or wire change; an internal consolidation that removes ~320 lines of
+per-type reconcile code.
+
 ## [0.7.29] - 2026-06-05
 
 v0.7.29 retires the last *named* finding of the #40 describe-driven bind rework:

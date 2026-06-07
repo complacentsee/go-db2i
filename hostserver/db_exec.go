@@ -296,62 +296,15 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		return nil, fmt.Errorf("hostserver: bind LOB parameters: %w", err)
 	}
 
-	// IN-parameter graphic fixup: a []byte/string bind into a
-	// CCSID-65535 ("bit data") GRAPHIC/VARGRAPHIC column defaults to a
-	// VARCHAR shape the server won't cast (SQL-332 / 57017, issue #13).
-	// Adopt the column's declared graphic shape from the PMF so the
-	// value ships verbatim through the native graphic encoder. No-op for
-	// non-65535-graphic targets and non-[]byte/string binds.
-	reconcileGraphicBitDataBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-binary fixup (issue #40): a []byte bind into a
-	// native BINARY/VARBINARY column defaults to a VARCHAR FOR BIT DATA
-	// shape; the server casts it, so the value stores correctly, but the
-	// wire bytes diverge from JT400 (which adopts the column's native
-	// 912/908 shape). Reshape so encodeRowData ships the byte-identical
-	// native form and the cache-miss path matches the cache-hit fast
-	// path. No-op for non-binary targets and non-[]byte binds.
-	reconcileBinaryBindShapes(paramShapes, paramValues, pmf)
-
-	// IN-parameter native-temporal fixup (issue #40): a time.Time bind
-	// defaults to TIMESTAMP (393, 26-char); into a native DATE/TIME column
-	// the server casts it, but JT400 adopts the column's native 384/388
-	// shape. Reshape so encodeRowData ships the byte-identical native form
-	// (10-char ISO DATE / 8-char "HH.MM.SS" TIME) and the cache-miss path
-	// matches the cache-hit fast path. No-op for non-DATE/TIME targets and
-	// for non-time.Time (string/VARCHAR) binds.
-	reconcileDateTimeBindShapes(paramShapes, paramValues, pmf)
-
-	// Stored-procedure OUT / INOUT shape fixup. For each slot whose
-	// caller-supplied PreparedParam.ParamType is 0xF1 (OUT) or 0xF2
-	// (INOUT), substitute the server's declared SQL type / length /
-	// CCSID from the PREPARE_DESCRIBE reply's parameter-marker format
-	// (PMF, CP 0x3813). The driver's bind path can't know the proc's
-	// declared signature, so it sends a placeholder shape (e.g.
-	// VARCHAR(2000) for *string OUT). The fixup brings the descriptor
-	// in line with what the server expects.
-	expectOutput := false
-	for i := range paramShapes {
-		switch paramShapes[i].ParamType {
-		case 0xF1, 0xF2:
-			expectOutput = true
-			if i < len(pmf) {
-				p := pmf[i]
-				paramShapes[i].SQLType = p.SQLType
-				paramShapes[i].FieldLength = p.FieldLength
-				paramShapes[i].Precision = p.Precision
-				paramShapes[i].Scale = p.Scale
-				paramShapes[i].CCSID = p.CCSID
-			}
-		}
-	}
-
-	// IN-parameter NULL fixup: a nil bind defaults to the INTEGER-NULL
-	// marker shape, which the server cannot cast to a native
-	// BINARY/VARBINARY column (issue #11). Adopt the column's declared
-	// shape from the PMF so the NULL is universally assignable. No-op
-	// for non-nil binds, so the working IN shapes are untouched.
-	reconcileNullBindShapes(paramShapes, paramValues, pmf)
+	// Unified PMF-driven bind-shape dispatch (issue #40): adopt the server-
+	// declared parameter-marker shape per slot in a single pass -- graphic
+	// bit-data (#13), native BINARY/VARBINARY (#40), native DATE/TIME (#40),
+	// the stored-procedure OUT/INOUT signature, and typed NULL (#11). Returns
+	// expectOutput=true when any slot is OUT/INOUT so EXECUTE requests the CP
+	// 0x380E OUT-value row. This is the sole bind-shape reconciliation
+	// implementation; the former per-type reconciles it replaced are gone (git
+	// history only). See db_bind_dispatch.go.
+	expectOutput := reconcileBindShapesFromPMF(paramShapes, paramValues, pmf)
 
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
 	// round trip for callers that pass through ExecutePreparedSQL
