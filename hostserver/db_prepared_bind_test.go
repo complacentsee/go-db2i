@@ -147,7 +147,7 @@ func cachedRowData(t *testing.T, payload []byte, fieldLength int) []byte {
 
 // TestEncodeCachedVarbinary pins the native VARBINARY (908) bind shape: a
 // 2-byte BE actual-length prefix, the raw payload, then 0x00 slot-padding
-// out to FieldLength-2. This is the wire shape reconcileBinaryBindShapes
+// out to FieldLength-2. This is the wire shape reconcileBindShapesFromPMF
 // and the package-cache fast path deliver for a []byte into a native
 // VARBINARY column (issue #40). Mirror of db_result_data.go case 908/909.
 func TestEncodeCachedVarbinary(t *testing.T) {

@@ -301,10 +301,9 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 	// bit-data (#13), native BINARY/VARBINARY (#40), native DATE/TIME (#40),
 	// the stored-procedure OUT/INOUT signature, and typed NULL (#11). Returns
 	// expectOutput=true when any slot is OUT/INOUT so EXECUTE requests the CP
-	// 0x380E OUT-value row. This is byte-identical to the per-type reconciles
-	// it replaced (proven by TestReconcileBindShapesFromPMFMatchesLegacy); the
-	// individual reconcile functions are retained as the validated reference /
-	// equivalence oracle pending their final deletion. See db_bind_dispatch.go.
+	// 0x380E OUT-value row. This is the sole bind-shape reconciliation
+	// implementation; the former per-type reconciles it replaced are gone (git
+	// history only). See db_bind_dispatch.go.
 	expectOutput := reconcileBindShapesFromPMF(paramShapes, paramValues, pmf)
 
 	// --- 3) CHANGE_DESCRIPTOR. Skip when no parameters -- saves a
