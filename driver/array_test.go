@@ -96,6 +96,33 @@ func TestArrayScan(t *testing.T) {
 		}
 	})
 
+	t.Run("int16", func(t *testing.T) {
+		// SMALLINT elements decode to int16; assignOutParam must accept
+		// an int16 source into an int-kind destination (issue #68 Item 3).
+		var a Array[int16]
+		if err := a.db2iArrayScan(hostserver.ArrayValue{Elements: []any{int16(100), int16(-200), int16(32767)}}, 501); err != nil {
+			t.Fatalf("db2iArrayScan: %v", err)
+		}
+		if len(a.Elements) != 3 || a.Elements[0] != 100 || a.Elements[1] != -200 || a.Elements[2] != 32767 {
+			t.Errorf("scanned = %v, want [100 -200 32767]", a.Elements)
+		}
+	})
+
+	t.Run("null_element_value", func(t *testing.T) {
+		// A NULL element scanned into a NON-pointer element type becomes
+		// the zero value of T -- documented, deliberate, lossy (issue #68
+		// Item 4). The middle element is a SQL NULL; it must read back as
+		// 0, indistinguishable from a real 0. Use Array[*int32] to tell
+		// NULL apart (see null_element_pointer above).
+		var a Array[int32]
+		if err := a.db2iArrayScan(hostserver.ArrayValue{Elements: []any{int32(1), nil, int32(3)}}, 497); err != nil {
+			t.Fatalf("db2iArrayScan: %v", err)
+		}
+		if len(a.Elements) != 3 || a.Elements[0] != 1 || a.Elements[1] != 0 || a.Elements[2] != 3 {
+			t.Errorf("scanned = %v, want [1 0 3] (NULL element -> zero value)", a.Elements)
+		}
+	})
+
 	t.Run("whole_null", func(t *testing.T) {
 		a := Array[int32]{Elements: []int32{1, 2}} // pre-populated; scan must clear
 		if err := a.db2iArrayScan(hostserver.ArrayValue{Null: true}, 497); err != nil {

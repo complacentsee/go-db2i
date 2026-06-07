@@ -29,8 +29,9 @@ Full API reference:
   live-validated; see [Authentication](#authentication)).
 - The full `database/sql` surface: `Query` / `Exec`, prepared
   statements, and transactions.
-- **Stored procedures** with `sql.Out` / `sql.InOut` parameters and
-  multiple result sets.
+- **Stored procedures** with `sql.Out` / `sql.InOut` parameters, multiple
+  result sets, and `db2i.Array[T]` ARRAY parameters — see
+  [`docs/stored-procedures.md`](./docs/stored-procedures.md).
 - **LOBs** — inline BLOB / CLOB / DBCLOB binds, plus `?lob=stream` to
   read multi-GB values without materialising them on the heap.
 - **Extended-dynamic SQL package caching** — files prepared statements

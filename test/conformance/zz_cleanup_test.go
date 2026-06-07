@@ -77,7 +77,21 @@ func TestZZPub400Cleanup(t *testing.T) {
 				err = qcmd(fmt.Sprintf("DLTSQLPKG SQLPKG(%s/%s)", sch, o.name))
 			}
 		case "*PGM":
-			err = qcmd(fmt.Sprintf("DLTPGM PGM(%s/%s)", sch, o.name))
+			// MOST orphan *PGM are SQL PROCEDURES (CREATE PROCEDURE
+			// LANGUAGE SQL compiles to an ILE *PGM, OBJATTRIBUTE CLE).
+			// DLTPGM is lock-blocked on them (surfaces as SQL-603), so
+			// the storage never frees and accumulates until DDL fails
+			// (CPF9838). DROP SPECIFIC PROCEDURE/FUNCTION is the SQL verb
+			// that actually reclaims the routine + its *PGM (the object
+			// system name doubles as the SPECIFIC name for these). Fall
+			// back to DLTPGM for a genuine non-routine *PGM.
+			if _, err = db.Exec(fmt.Sprintf("DROP SPECIFIC PROCEDURE %s.%s", sch, o.name)); err != nil {
+				if _, ferr := db.Exec(fmt.Sprintf("DROP SPECIFIC FUNCTION %s.%s", sch, o.name)); ferr == nil {
+					err = nil
+				} else {
+					err = qcmd(fmt.Sprintf("DLTPGM PGM(%s/%s)", sch, o.name))
+				}
+			}
 		case "*SQLUDT":
 			// SQL user-defined / ARRAY types (CREATE TYPE) leave a *SQLUDT
 			// object that DLTOBJ does not delete by that type name; DROP TYPE

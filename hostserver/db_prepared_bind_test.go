@@ -265,3 +265,58 @@ func TestEncodeCachedBinaryRejectsTooLong(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeCachedCharFixed pins the byte layout of the fixed-length
+// CHAR (452/453) encode arm added for issue #68 Item 2 -- the arm a
+// CHAR array element routes through, and which also gives scalar
+// fixed-CHAR binds their first encoder. NO SL prefix; the payload is
+// right-padded to FieldLength with the EBCDIC space 0x40 (text) or the
+// 0x00 zero-init pad (FOR BIT DATA). EBCDIC: 'A'=0xC1 'B'=0xC2 'C'=0xC3.
+func TestEncodeCachedCharFixed(t *testing.T) {
+	t.Run("ebcdic_text_pad_40", func(t *testing.T) {
+		// CHAR(10) CCSID 37, value "ABC" -> C1 C2 C3 then 7x 0x40.
+		params := []PreparedParam{{SQLType: 452, FieldLength: 10, CCSID: 37}}
+		got, err := EncodeDBExtendedData(params, []any{"ABC"})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		wantHeader := []byte{
+			0x00, 0x00, 0x00, 0x01, // consistency token
+			0x00, 0x00, 0x00, 0x01, // row count
+			0x00, 0x01, // column count
+			0x00, 0x02, // indicator size
+			0x00, 0x00, 0x00, 0x00, // reserved
+			0x00, 0x00, 0x00, 0x0A, // row size = FieldLength = 10
+		}
+		wantIndicator := []byte{0x00, 0x00}
+		wantData := []byte{0xC1, 0xC2, 0xC3, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40}
+		want := append(append(append([]byte{}, wantHeader...), wantIndicator...), wantData...)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("byte mismatch:\n got=% X\nwant=% X", got, want)
+		}
+	})
+
+	t.Run("for_bit_data_pad_00", func(t *testing.T) {
+		// CHAR(8) FOR BIT DATA (CCSID 65535), []byte{01,02,03} -> raw
+		// bytes then 5x 0x00 (no blank for binary).
+		params := []PreparedParam{{SQLType: 453, FieldLength: 8, CCSID: 65535}}
+		got, err := EncodeDBExtendedData(params, []any{[]byte{0x01, 0x02, 0x03}})
+		if err != nil {
+			t.Fatalf("EncodeDBExtendedData: %v", err)
+		}
+		wantData := []byte{0x01, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00}
+		// Data region is the last FieldLength bytes of the frame.
+		gotData := got[len(got)-8:]
+		if !bytes.Equal(gotData, wantData) {
+			t.Fatalf("data mismatch:\n got=% X\nwant=% X", gotData, wantData)
+		}
+	})
+
+	t.Run("rejects_too_long", func(t *testing.T) {
+		// CHAR(2), value "ABC" (3 EBCDIC bytes) overruns the width.
+		params := []PreparedParam{{SQLType: 452, FieldLength: 2, CCSID: 37}}
+		if _, err := EncodeDBExtendedData(params, []any{"ABC"}); err == nil {
+			t.Fatal("expected error for over-length char, got nil")
+		}
+	})
+}

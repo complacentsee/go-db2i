@@ -334,6 +334,13 @@ func ExecutePreparedSQL(conn io.ReadWriter, sql string, paramShapes []PreparedPa
 		dataPayload, err = EncodeDBExtendedData(paramShapes, paramValues)
 	}
 	if err != nil {
+		// A client-side encode failure (e.g. a bad bind value) happens
+		// AFTER PREPARE_DESCRIBE created the RPB but before the EXECUTE
+		// that would drop it. Drop it here too -- a leaked RPB leaves
+		// slot 1 busy and the next prepared statement on this connection
+		// fails at PREPARE_DESCRIBE with RC -101 / errorClass 2 (the
+		// CREATE_RPB no-op-on-busy-slot trap; see the EXECUTE cleanup).
+		_ = deleteRPB(conn, corr)
 		return nil, fmt.Errorf("hostserver: encode input parameter data: %w", err)
 	}
 	execCorr := corr
